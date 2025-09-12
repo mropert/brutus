@@ -1,6 +1,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <VkBootstrap.h>
+#include <array>
 #include <memory>
 #include <print>
 
@@ -18,6 +19,30 @@ namespace raii
 		void operator()( ::VkSurfaceKHR surface ) const { vkDestroySurfaceKHR( instance, surface, nullptr ); }
 	};
 	using VkSurfaceKHR = std::unique_ptr<::VkSurfaceKHR_T, VkSurfaceKHRDeleter>;
+	VkSurfaceKHR make( ::VkInstance instance, ::VkSurfaceKHR surface )
+	{
+		return { surface, VkSurfaceKHRDeleter( instance ) };
+	}
+
+	struct VkObjectDeleter
+	{
+		::VkDevice device;
+		void operator()( ::VkCommandPool command_pool ) const { vkDestroyCommandPool( device, command_pool, nullptr ); }
+		void operator()( ::VkFence fence ) const { vkDestroyFence( device, fence, nullptr ); }
+		void operator()( ::VkSemaphore semaphore ) const { vkDestroySemaphore( device, semaphore, nullptr ); }
+	};
+	template <typename T>
+	using VkObject = std::unique_ptr<std::remove_pointer_t<T>, VkObjectDeleter>;
+
+	template <typename T>
+	auto make( ::VkDevice device, T object )
+	{
+		return VkObject<T> { object, VkObjectDeleter( device ) };
+	}
+
+	using VkCommandPool = VkObject<::VkCommandPool>;
+	using VkFence = VkObject<::VkFence>;
+	using VkSemaphore = VkObject<::VkSemaphore>;
 
 	namespace details
 	{
@@ -80,11 +105,13 @@ namespace raii
 	// Custom version for Swapchain to hold the image views
 	struct VulkanSwapchain : vkb::Swapchain
 	{
-		std::vector<VkImageView> image_views;
+		std::vector<::VkImage> images;
+		std::vector<::VkImageView> image_views;
 
 		VulkanSwapchain() = default;
 		VulkanSwapchain( const vkb::Swapchain& swapchain )
 			: vkb::Swapchain( swapchain )
+			, images( get_images().value() )
 			, image_views( get_image_views().value() )
 		{
 		}
@@ -92,6 +119,9 @@ namespace raii
 		VulkanSwapchain( const VulkanSwapchain& ) = delete;
 		VulkanSwapchain( VulkanSwapchain&& rhs ) noexcept
 			: vkb::Swapchain( rhs )
+			, images( std::move( rhs.images ) )
+			, image_views( std::move( rhs.image_views ) )
+
 		{
 			static_cast<vkb::Swapchain&>( rhs ) = vkb::Swapchain {};
 		}
@@ -100,6 +130,8 @@ namespace raii
 		{
 			free_resources();
 			static_cast<vkb::Swapchain&>( *this ) = rhs;
+			images = std::move( rhs.images );
+			image_views = std::move( rhs.image_views );
 			static_cast<vkb::Swapchain&>( rhs ) = vkb::Swapchain {};
 			return *this;
 		}
@@ -114,6 +146,31 @@ namespace raii
 		}
 	};
 
+}
+
+void transition_image( VkCommandBuffer cmd, VkImage image, VkImageLayout currentLayout, VkImageLayout newLayout )
+{
+	const VkImageAspectFlags aspectMask = ( newLayout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL ) ? VK_IMAGE_ASPECT_DEPTH_BIT
+																									: VK_IMAGE_ASPECT_COLOR_BIT;
+	const VkImageMemoryBarrier2 imageBarrier { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+											   .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+											   .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+											   .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+											   .dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT,
+											   .oldLayout = currentLayout,
+											   .newLayout = newLayout,
+											   .image = image,
+											   .subresourceRange = {
+												   .aspectMask = aspectMask,
+												   .levelCount = VK_REMAINING_MIP_LEVELS,
+												   .layerCount = VK_REMAINING_ARRAY_LAYERS,
+											   } };
+
+	const VkDependencyInfo depInfo { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+									 .imageMemoryBarrierCount = 1,
+									 .pImageMemoryBarriers = &imageBarrier };
+
+	vkCmdPipelineBarrier2( cmd, &depInfo );
 }
 
 int main()
@@ -158,10 +215,13 @@ int main()
 		VkSurfaceKHR tmp {};
 		if ( !SDL_Vulkan_CreateSurface( window.get(), vk_instance.instance, nullptr, &tmp ) )
 		{
-			std::println( stderr, "Failed to create SDL vulkan surface: {}", SDL_GetError() );
+			std::println( stderr,
+						  "Failed to create SDL vulkan "
+						  "surface: {}",
+						  SDL_GetError() );
 			return 1;
 		}
-		vk_surface = { tmp, raii::VkSurfaceKHRDeleter{ vk_instance.instance } };
+		vk_surface = raii::make( vk_instance, tmp );
 	}
 
 	raii::VulkanDevice vk_device;
@@ -183,14 +243,20 @@ int main()
 
 		if ( !physical_device_ret )
 		{
-			std::println( stderr, "Cannot find a suitable hardware device: {}", physical_device_ret.error().message() );
+			std::println( stderr,
+						  "Cannot find a suitable "
+						  "hardware device: {}",
+						  physical_device_ret.error().message() );
 			return 1;
 		}
 
 		const auto device_ret = vkb::DeviceBuilder( physical_device_ret.value() ).build();
 		if ( !device_ret )
 		{
-			std::println( stderr, "Cannot create hardware device: {}", device_ret.error().message() );
+			std::println( stderr,
+						  "Cannot create hardware "
+						  "device: {}",
+						  device_ret.error().message() );
 			return 1;
 		}
 
@@ -203,7 +269,7 @@ int main()
 	}
 
 	constexpr auto swapchain_image_format = VK_FORMAT_B8G8R8A8_UNORM;
-	raii::VulkanSwapchain swapchain;
+	raii::VulkanSwapchain vk_swapchain;
 	{
 		const auto swapchain_ret = vkb::SwapchainBuilder( vk_device )
 									   .set_desired_format( VkSurfaceFormatKHR { .format = swapchain_image_format,
@@ -214,14 +280,94 @@ int main()
 									   .build();
 		if ( !swapchain_ret )
 		{
-			std::println( stderr, "Cannot create hardware device: {}", swapchain_ret.error().message() );
+			std::println( stderr,
+						  "Cannot create hardware "
+						  "device: {}",
+						  swapchain_ret.error().message() );
 			return 1;
 		}
 
-		swapchain = swapchain_ret.value();
+		vk_swapchain = swapchain_ret.value();
+	}
+
+	const auto vk_gfx_queue = vk_device.get_queue( vkb::QueueType::graphics ).value();
+	const auto vk_gfx_queue_family = vk_device.get_queue_index( vkb::QueueType::graphics ).value();
+
+	raii::VkCommandPool vk_command_pool;
+	{
+		const VkCommandPoolCreateInfo commandPoolInfo = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+														  .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+														  .queueFamilyIndex = vk_gfx_queue_family };
+		VkCommandPool pool;
+		const auto ret = vkCreateCommandPool( vk_device, &commandPoolInfo, nullptr, &pool );
+		if ( ret )
+		{
+			std::println( stderr,
+						  "Cannot create command pool: "
+						  "{}",
+						  static_cast<int>( ret ) );
+			return 1;
+		}
+		vk_command_pool = raii::make( vk_device, pool );
+	}
+
+	struct FrameData
+	{
+		VkCommandBuffer command_buffer;
+		raii::VkFence render_fence;
+		raii::VkSemaphore render_semaphore;
+		raii::VkSemaphore swapchain_semaphore;
+	};
+
+	std::array<FrameData, 2> vk_frame_data;
+	for ( int i = 0; i < vk_frame_data.size(); ++i )
+	{
+		const VkCommandBufferAllocateInfo cmdAllocInfo = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+														   .commandPool = vk_command_pool.get(),
+														   .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+														   .commandBufferCount = 1 };
+
+		auto ret = vkAllocateCommandBuffers( vk_device, &cmdAllocInfo, &vk_frame_data[ i ].command_buffer );
+		if ( ret )
+		{
+			std::println( stderr,
+						  "Cannot allocate command "
+						  "buffer: {}",
+						  static_cast<int>( ret ) );
+			return 1;
+		}
+
+		const VkFenceCreateInfo fenceCreateInfo = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
+		VkFence fence;
+		ret = vkCreateFence( vk_device, &fenceCreateInfo, nullptr, &fence );
+		if ( ret )
+		{
+			std::println( stderr, "Cannot create fence: {}", static_cast<int>( ret ) );
+			return 1;
+		}
+		vk_frame_data[ i ].render_fence = raii::make( vk_device, fence );
+
+		const VkSemaphoreCreateInfo semaphoreCreateInfo = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+		VkSemaphore semaphore;
+		ret = vkCreateSemaphore( vk_device, &semaphoreCreateInfo, nullptr, &semaphore );
+		if ( ret )
+		{
+			std::println( stderr, "Cannot create semaphore: {}", static_cast<int>( ret ) );
+			return 1;
+		}
+		vk_frame_data[ i ].render_semaphore = raii::make( vk_device, semaphore );
+
+		ret = vkCreateSemaphore( vk_device, &semaphoreCreateInfo, nullptr, &semaphore );
+		if ( ret )
+		{
+			std::println( stderr, "Cannot create semaphore: {}", static_cast<int>( ret ) );
+			return 1;
+		}
+		vk_frame_data[ i ].swapchain_semaphore = raii::make( vk_device, semaphore );
 	}
 
 	bool quit = false;
+	int frame_count = 0;
 
 	while ( !quit )
 	{
@@ -234,7 +380,88 @@ int main()
 				quit = true;
 			}
 		}
+
+		auto& frame_data = vk_frame_data[ frame_count % 2 ];
+
+		const auto fence = frame_data.render_fence.get();
+		vkWaitForFences( vk_device, 1, &fence, true, 1000000000 );
+		vkResetFences( vk_device, 1, &fence );
+
+		uint32_t swapchainImageIndex;
+		vkAcquireNextImageKHR( vk_device, vk_swapchain, 1000000000, frame_data.render_semaphore.get(), nullptr, &swapchainImageIndex );
+
+		vkResetCommandBuffer( frame_data.command_buffer, 0 );
+
+		const VkCommandBufferBeginInfo cmdBeginInfo { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+													  .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+		vkBeginCommandBuffer( frame_data.command_buffer, &cmdBeginInfo );
+
+		transition_image( frame_data.command_buffer,
+						  vk_swapchain.images[ swapchainImageIndex ],
+						  VK_IMAGE_LAYOUT_UNDEFINED,
+						  VK_IMAGE_LAYOUT_GENERAL );
+
+		VkClearColorValue clearValue;
+		float flash = std::abs( std::sin( frame_count / 120.f ) );
+		clearValue = { { 0.0f, 0.0f, flash, 1.0f } };
+
+		const VkImageSubresourceRange clearRange { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+												   .levelCount = VK_REMAINING_MIP_LEVELS,
+												   .layerCount = VK_REMAINING_ARRAY_LAYERS };
+		vkCmdClearColorImage( frame_data.command_buffer,
+							  vk_swapchain.images[ swapchainImageIndex ],
+							  VK_IMAGE_LAYOUT_GENERAL,
+							  &clearValue,
+							  1,
+							  &clearRange );
+
+		transition_image( frame_data.command_buffer,
+						  vk_swapchain.images[ swapchainImageIndex ],
+						  VK_IMAGE_LAYOUT_GENERAL,
+						  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR );
+
+		vkEndCommandBuffer( frame_data.command_buffer );
+
+		const VkCommandBufferSubmitInfo cmdSubmitInfo { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+														.commandBuffer = frame_data.command_buffer };
+
+		const VkSemaphoreSubmitInfo waitInfo { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+											   .semaphore = frame_data.swapchain_semaphore.get(),
+											   .value = 1,
+											   .stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR };
+
+		const VkSemaphoreSubmitInfo signalInfo { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+												 .semaphore = frame_data.render_semaphore.get(),
+												 .value = 1,
+												 .stageMask = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT };
+
+		const VkSubmitInfo2 submitInfo {
+			.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+			.waitSemaphoreInfoCount = 1,
+			.pWaitSemaphoreInfos = &waitInfo,
+			.commandBufferInfoCount = 1,
+			.pCommandBufferInfos = &cmdSubmitInfo,
+			.signalSemaphoreInfoCount = 1,
+			.pSignalSemaphoreInfos = &signalInfo,
+		};
+		vkQueueSubmit2( vk_gfx_queue, 1, &submitInfo, frame_data.render_fence.get() );
+
+		const auto semaphore = frame_data.render_semaphore.get();
+		const VkPresentInfoKHR presentInfo = {
+			.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+			.waitSemaphoreCount = 1,
+			.pWaitSemaphores = &semaphore,
+			.swapchainCount = 1,
+			.pSwapchains = &vk_swapchain.swapchain,
+			.pImageIndices = &swapchainImageIndex,
+		};
+		vkQueuePresentKHR( vk_gfx_queue, &presentInfo );
+
+		++frame_count;
 	}
+
+	// Wait for the GPU to finish before we roll all the destructors
+	vkDeviceWaitIdle( vk_device );
 
 	return 0;
 }
