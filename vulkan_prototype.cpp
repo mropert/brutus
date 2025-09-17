@@ -33,6 +33,7 @@ namespace raii
 		::VkDevice device;
 		void operator()( ::VkCommandPool command_pool ) const { vkDestroyCommandPool( device, command_pool, nullptr ); }
 		void operator()( ::VkFence fence ) const { vkDestroyFence( device, fence, nullptr ); }
+		void operator()( ::VkImageView image_view ) const { vkDestroyImageView( device, image_view, nullptr ); }
 		void operator()( ::VkPipeline pipeline ) const { vkDestroyPipeline( device, pipeline, nullptr ); }
 		void operator()( ::VkPipelineLayout layout ) const { vkDestroyPipelineLayout( device, layout, nullptr ); }
 		void operator()( ::VkSemaphore semaphore ) const { vkDestroySemaphore( device, semaphore, nullptr ); }
@@ -49,6 +50,7 @@ namespace raii
 
 	using VkCommandPool = VkObject<::VkCommandPool>;
 	using VkFence = VkObject<::VkFence>;
+	using VkImageView = VkObject<::VkImageView>;
 	using VkPipeline = VkObject<::VkPipeline>;
 	using VkPipelineLayout = VkObject<::VkPipelineLayout>;
 	using VkSemaphore = VkObject<::VkSemaphore>;
@@ -161,6 +163,31 @@ namespace raii
 		void operator()( ::VmaAllocator allocator ) const { vmaDestroyAllocator( allocator ); }
 	};
 	using VmaAllocator = std::unique_ptr<::VmaAllocator_T, VmaAllocatorDeleter>;
+
+	struct VmaResourceDeleter
+	{
+		::VmaAllocator allocator;
+		::VmaAllocation allocation;
+		void operator()( ::VkImage image ) const { vmaDestroyImage( allocator, image, allocation ); }
+	};
+	template <typename T>
+	using VmaResource = std::unique_ptr<std::remove_pointer_t<T>, VmaResourceDeleter>;
+
+	template <typename T>
+	auto make( ::VmaAllocator allocator, T object, ::VmaAllocation allocation )
+	{
+		return VmaResource<T> { object, VmaResourceDeleter { allocator, allocation } };
+	}
+
+	using VmaImage = VmaResource<::VkImage>;
+
+	struct VulkanImage
+	{
+		VmaImage image;
+		VkImageView view;
+		::VkExtent3D extent;
+		::VkFormat format;
+	};
 }
 
 std::expected<raii::VmaAllocator, VkResult> make_allocator( VkInstance instance, VkPhysicalDevice phys_device, VkDevice device )
@@ -178,6 +205,61 @@ std::expected<raii::VmaAllocator, VkResult> make_allocator( VkInstance instance,
 		return std::unexpected( ret );
 	}
 	return raii::VmaAllocator( allocator );
+}
+
+std::expected<raii::VulkanImage, VkResult> make_image( VkDevice device,
+													   VmaAllocator allocator,
+													   VkFormat format,
+													   VkExtent3D extent,
+													   VkImageUsageFlags image_usage,
+													   VmaMemoryUsage memory_usage,
+													   VkImageAspectFlags aspect_flags )
+{
+	const VkImageCreateInfo info { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+								   .imageType = VK_IMAGE_TYPE_2D,
+								   .format = format,
+								   .extent = extent,
+								   .mipLevels = 1,
+								   .arrayLayers = 1,
+								   .samples = VK_SAMPLE_COUNT_1_BIT,
+								   .tiling = VK_IMAGE_TILING_OPTIMAL,
+								   .usage = image_usage };
+
+	const VmaAllocationCreateInfo allocinfo { .usage = memory_usage, .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT };
+
+	VkImage image {};
+	VmaAllocation allocation {};
+	auto ret = vmaCreateImage( allocator, &info, &allocinfo, &image, &allocation, nullptr );
+	if ( ret )
+	{
+		return std::unexpected( ret );
+	}
+
+	raii::VulkanImage allocated_image;
+	allocated_image.image = raii::make( allocator, image, allocation );
+	allocated_image.extent = extent;
+	allocated_image.format = format;
+
+	const VkImageViewCreateInfo image_view_info { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+												  .image = image,
+												  .viewType = VK_IMAGE_VIEW_TYPE_2D,
+												  .format = format,
+												  .subresourceRange = {
+													  .aspectMask = aspect_flags,
+													  .baseMipLevel = 0,
+													  .levelCount = 1,
+													  .baseArrayLayer = 0,
+													  .layerCount = 1,
+												  } };
+
+	VkImageView view;
+	ret = vkCreateImageView( device, &image_view_info, nullptr, &view );
+	if ( ret )
+	{
+		return std::unexpected( ret );
+	}
+	allocated_image.view = raii::make( device, view );
+	return allocated_image;
 }
 
 std::expected<raii::VkShaderModule, VkResult>
@@ -310,6 +392,29 @@ void transition_image( VkCommandBuffer cmd, VkImage image, VkImageLayout current
 	vkCmdPipelineBarrier2( cmd, &depInfo );
 }
 
+void blit_image( VkCommandBuffer cmd, VkImage source, VkImage destination, VkExtent2D src_size, VkExtent2D dst_size )
+{
+	const VkImageBlit2 blitRegion {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
+		.srcSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
+		.srcOffsets = { {}, { static_cast<int32_t>( src_size.width ), static_cast<int32_t>( src_size.height ), 1 } },
+		.dstSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
+		.dstOffsets = { {}, { static_cast<int32_t>( dst_size.width ), static_cast<int32_t>( dst_size.height ), 1 } },
+	};
+
+	const VkBlitImageInfo2 blitInfo { .sType = VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2,
+									  .srcImage = source,
+									  .srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+									  .dstImage = destination,
+									  .dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+									  .regionCount = 1,
+									  .pRegions = &blitRegion,
+									  .filter = VK_FILTER_LINEAR };
+
+	vkCmdBlitImage2( cmd, &blitInfo );
+}
+
+
 static constexpr std::string_view vertex_shader_code = R"(#version 450
 
 layout( location = 0 ) out vec3 outColor;
@@ -346,7 +451,9 @@ int main()
 		return 1;
 	}
 
-	const raii::SDL_Window window( SDL_CreateWindow( "Brutus-ng Vulkan", 1024, 768, SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN ) );
+	const VkExtent2D window_extent { .width = 1024, .height = 768 };
+	const raii::SDL_Window window(
+		SDL_CreateWindow( "Brutus-ng Vulkan", window_extent.width, window_extent.height, SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN ) );
 	if ( !window )
 	{
 		std::println( stderr, "Failed to create window: {}", SDL_GetError() );
@@ -431,7 +538,7 @@ int main()
 									   .set_desired_format( VkSurfaceFormatKHR { .format = swapchain_image_format,
 																				 .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR } )
 									   .set_desired_present_mode( VK_PRESENT_MODE_FIFO_KHR )
-									   .set_desired_extent( 1024, 768 )
+									   .set_desired_extent( window_extent.width, window_extent.height )
 									   .add_image_usage_flags( VK_IMAGE_USAGE_TRANSFER_DST_BIT )
 									   .build();
 		if ( !swapchain_ret )
@@ -444,6 +551,17 @@ int main()
 	}
 
 	const auto vk_allocator = make_allocator( vk_instance, vk_device.physical_device, vk_device ).value();
+
+	const VkExtent2D draw_image_extent = window_extent;
+	const auto draw_image = make_image( vk_device,
+										vk_allocator.get(),
+										VK_FORMAT_R16G16B16A16_SFLOAT,
+										VkExtent3D { .width = draw_image_extent.width, .height = draw_image_extent.height, .depth = 1 },
+										VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT
+											| VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+										VMA_MEMORY_USAGE_GPU_ONLY,
+										VK_IMAGE_ASPECT_COLOR_BIT )
+								.value();
 
 	const auto vk_gfx_queue = vk_device.get_queue( vkb::QueueType::graphics ).value();
 	const auto vk_gfx_queue_family = vk_device.get_queue_index( vkb::QueueType::graphics ).value();
@@ -564,10 +682,7 @@ int main()
 													  .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
 		vkBeginCommandBuffer( frame_data.command_buffer, &cmdBeginInfo );
 
-		transition_image( frame_data.command_buffer,
-						  vk_swapchain.images[ swapchainImageIndex ],
-						  VK_IMAGE_LAYOUT_UNDEFINED,
-						  VK_IMAGE_LAYOUT_GENERAL );
+		transition_image( frame_data.command_buffer, draw_image.image.get(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL );
 
 		VkClearColorValue clearValue;
 		float flash = std::abs( std::sin( frame_count / 120.f ) );
@@ -576,23 +691,18 @@ int main()
 		const VkImageSubresourceRange clearRange { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
 												   .levelCount = VK_REMAINING_MIP_LEVELS,
 												   .layerCount = VK_REMAINING_ARRAY_LAYERS };
-		vkCmdClearColorImage( frame_data.command_buffer,
-							  vk_swapchain.images[ swapchainImageIndex ],
-							  VK_IMAGE_LAYOUT_GENERAL,
-							  &clearValue,
-							  1,
-							  &clearRange );
+		vkCmdClearColorImage( frame_data.command_buffer, draw_image.image.get(), VK_IMAGE_LAYOUT_GENERAL, &clearValue, 1, &clearRange );
 
 		const VkRenderingAttachmentInfo color_attachment {
 			.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-			.imageView = vk_swapchain.image_views[ swapchainImageIndex ],
+			.imageView = draw_image.view.get(),
 			.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 			.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
 			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
 		};
 
 		const VkRenderingInfo renderInfo { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-										   .renderArea = VkRect2D { VkOffset2D { 0, 0 }, vk_swapchain.extent },
+										   .renderArea = VkRect2D { VkOffset2D { 0, 0 }, draw_image_extent },
 										   .layerCount = 1,
 										   .colorAttachmentCount = 1,
 										   .pColorAttachments = &color_attachment };
@@ -603,14 +713,14 @@ int main()
 
 		const VkViewport viewport { .x = 0.f,
 									.y = 0.f,
-									.width = static_cast<float>( vk_swapchain.extent.width ),
-									.height = static_cast<float>( vk_swapchain.extent.height ),
+									.width = static_cast<float>( draw_image_extent.width ),
+									.height = static_cast<float>( draw_image_extent.height ),
 									.minDepth = 0.f,
 									.maxDepth = 1.f };
 
 		vkCmdSetViewport( frame_data.command_buffer, 0, 1, &viewport );
 
-		const VkRect2D scissor { .extent = vk_swapchain.extent };
+		const VkRect2D scissor { .extent = draw_image_extent };
 		vkCmdSetScissor( frame_data.command_buffer, 0, 1, &scissor );
 
 		vkCmdDraw( frame_data.command_buffer, 3, 1, 0, 0 );
@@ -618,8 +728,23 @@ int main()
 		vkCmdEndRendering( frame_data.command_buffer );
 
 		transition_image( frame_data.command_buffer,
-						  vk_swapchain.images[ swapchainImageIndex ],
+						  draw_image.image.get(),
 						  VK_IMAGE_LAYOUT_GENERAL,
+						  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL );
+		transition_image( frame_data.command_buffer,
+						  vk_swapchain.images[ swapchainImageIndex ],
+						  VK_IMAGE_LAYOUT_UNDEFINED,
+						  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL );
+
+		blit_image( frame_data.command_buffer,
+					draw_image.image.get(),
+					vk_swapchain.images[ swapchainImageIndex ],
+					VkExtent2D { draw_image.extent.width, draw_image.extent.height },
+					vk_swapchain.extent );
+
+		transition_image( frame_data.command_buffer,
+						  vk_swapchain.images[ swapchainImageIndex ],
+						  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 						  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR );
 
 		vkEndCommandBuffer( frame_data.command_buffer );
