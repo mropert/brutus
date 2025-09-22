@@ -53,6 +53,8 @@ endif()
 
 find_package(Vulkan REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+find_package(fastgltf CONFIG REQUIRED)
+find_package(SDL3_image CONFIG REQUIRED)
 
 add_library(VkBoostrap STATIC)
 target_compile_features(VkBoostrap PRIVATE cxx_std_23)
@@ -63,7 +65,8 @@ target_link_libraries(VkBoostrap PUBLIC Vulkan::Vulkan GPUOpen::VulkanMemoryAllo
 add_executable(brutus-vulkan)
 target_compile_features(brutus-vulkan PRIVATE cxx_std_23)
 target_sources(brutus-vulkan PRIVATE vulkan_prototype.cpp vma_impl.cpp)
-target_link_libraries(brutus-vulkan PRIVATE SDL3::SDL3 Vulkan::Vulkan VkBoostrap unofficial::shaderc::shaderc)
+target_link_libraries(brutus-vulkan PRIVATE SDL3::SDL3 Vulkan::Vulkan VkBoostrap unofficial::shaderc::shaderc fastgltf::fastgltf)
+target_link_libraries(brutus-vulkan PRIVATE $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image-shared>,SDL3_image::SDL3_image-shared,SDL3_image::SDL3_image-static>)
 if(USE_OPTICK)
 	target_compile_definitions(brutus-vulkan PRIVATE USE_OPTICK)
 	target_include_directories(brutus-vulkan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../optick/include)

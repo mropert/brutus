@@ -1,8 +1,10 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
+#include <SDL3_image/SDL_image.h>
 #include <VkBootstrap.h>
 #include <array>
 #include <expected>
+#include <fastgltf/core.hpp>
 #include <memory>
 #include <print>
 #include <shaderc/shaderc.hpp>
@@ -16,6 +18,12 @@ namespace raii
 		void operator()( ::SDL_Window* window ) const { SDL_DestroyWindow( window ); }
 	};
 	using SDL_Window = std::unique_ptr<::SDL_Window, SDL_WindowDeleter>;
+
+	struct SDL_SurfaceDeleter
+	{
+		void operator()( ::SDL_Surface* surface ) const { SDL_DestroySurface( surface ); }
+	};
+	using SDL_Surface = std::unique_ptr<::SDL_Surface, SDL_SurfaceDeleter>;
 
 	struct VkSurfaceKHRDeleter
 	{
@@ -168,17 +176,20 @@ namespace raii
 	{
 		::VmaAllocator allocator;
 		::VmaAllocation allocation;
+		::VmaAllocationInfo info;
+		void operator()( ::VkBuffer buffer ) const { vmaDestroyBuffer( allocator, buffer, allocation ); }
 		void operator()( ::VkImage image ) const { vmaDestroyImage( allocator, image, allocation ); }
 	};
 	template <typename T>
 	using VmaResource = std::unique_ptr<std::remove_pointer_t<T>, VmaResourceDeleter>;
 
 	template <typename T>
-	auto make( ::VmaAllocator allocator, T object, ::VmaAllocation allocation )
+	auto make( ::VmaAllocator allocator, T object, ::VmaAllocation allocation, const ::VmaAllocationInfo& info )
 	{
-		return VmaResource<T> { object, VmaResourceDeleter { allocator, allocation } };
+		return VmaResource<T> { object, VmaResourceDeleter { allocator, allocation, info } };
 	}
 
+	using VmaBuffer = VmaResource<::VkBuffer>;
 	using VmaImage = VmaResource<::VkImage>;
 
 	struct VulkanImage
@@ -207,6 +218,49 @@ std::expected<raii::VmaAllocator, VkResult> make_allocator( VkInstance instance,
 	return raii::VmaAllocator( allocator );
 }
 
+
+std::expected<raii::VkFence, VkResult> make_fence( VkDevice device, VkFenceCreateFlags flags )
+{
+	const VkFenceCreateInfo fenceCreateInfo = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
+	VkFence fence;
+	const auto ret = vkCreateFence( device, &fenceCreateInfo, nullptr, &fence );
+	if ( ret )
+	{
+		return std::unexpected( ret );
+	}
+	return raii::make( device, fence );
+}
+
+std::expected<raii::VkSemaphore, VkResult> make_semaphore( VkDevice device )
+{
+	const VkSemaphoreCreateInfo semaphoreCreateInfo = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+	VkSemaphore semaphore;
+	const auto ret = vkCreateSemaphore( device, &semaphoreCreateInfo, nullptr, &semaphore );
+	if ( ret )
+	{
+		return std::unexpected( ret );
+	}
+	return raii::make( device, semaphore );
+}
+
+std::expected<raii::VmaBuffer, VkResult>
+make_buffer( VmaAllocator allocator, size_t size, VkBufferUsageFlags buffer_usage, VmaMemoryUsage memory_usage )
+{
+	const VkBufferCreateInfo bufferInfo { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = buffer_usage };
+	const VmaAllocationCreateInfo vmaallocInfo = { .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT, .usage = memory_usage };
+
+	VkBuffer buffer {};
+	VmaAllocation allocation {};
+	VmaAllocationInfo info {};
+	const auto ret = vmaCreateBuffer( allocator, &bufferInfo, &vmaallocInfo, &buffer, &allocation, &info );
+	if ( ret )
+	{
+		return std::unexpected( ret );
+	}
+
+	return raii::make( allocator, buffer, allocation, info );
+}
+
 std::expected<raii::VulkanImage, VkResult> make_image( VkDevice device,
 													   VmaAllocator allocator,
 													   VkFormat format,
@@ -229,14 +283,15 @@ std::expected<raii::VulkanImage, VkResult> make_image( VkDevice device,
 
 	VkImage image {};
 	VmaAllocation allocation {};
-	auto ret = vmaCreateImage( allocator, &info, &allocinfo, &image, &allocation, nullptr );
+	VmaAllocationInfo alloc_info {};
+	auto ret = vmaCreateImage( allocator, &info, &allocinfo, &image, &allocation, &alloc_info );
 	if ( ret )
 	{
 		return std::unexpected( ret );
 	}
 
 	raii::VulkanImage allocated_image;
-	allocated_image.image = raii::make( allocator, image, allocation );
+	allocated_image.image = raii::make( allocator, image, allocation, alloc_info );
 	allocated_image.extent = extent;
 	allocated_image.format = format;
 
@@ -412,6 +467,265 @@ void blit_image( VkCommandBuffer cmd, VkImage source, VkImage destination, VkExt
 									  .filter = VK_FILTER_LINEAR };
 
 	vkCmdBlitImage2( cmd, &blitInfo );
+}
+
+struct mesh_attribute
+{
+	std::size_t offset = 0;
+	std::size_t stride = 0;
+	std::size_t length = 0;
+	VkFormat format = VK_FORMAT_UNDEFINED;
+};
+
+struct mesh_texture
+{
+	fastgltf::MimeType type = fastgltf::MimeType::None;
+	std::size_t offset = 0;
+	std::size_t size = 0;
+};
+
+struct mesh
+{
+	mesh_attribute positions;
+	mesh_attribute normals;
+	mesh_attribute tangents;
+	mesh_attribute uvs;
+	mesh_attribute indices;
+	mesh_texture albedo;
+	mesh_texture normal;
+};
+
+struct mesh_vertex
+{
+	float position[ 3 ];
+	float u;
+	float normal[ 3 ];
+	float v;
+	float tangent[ 4 ];
+};
+
+struct gpu_mesh_data
+{
+	raii::VmaBuffer vertices;
+	raii::VmaBuffer indices;
+	VkDeviceAddress vertices_address;
+};
+
+void load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, VkFence fence, VkQueue queue )
+{
+	const std::filesystem::path path = "../assets/player.glb";
+
+	fastgltf::Parser parser;
+	auto data = fastgltf::GltfDataBuffer::FromPath( path );
+	if ( data.error() != fastgltf::Error::None )
+	{
+		return;
+	}
+
+	auto asset = parser.loadGltf( data.get(), path.parent_path(), fastgltf::Options::None );
+	if ( auto error = asset.error(); error != fastgltf::Error::None )
+	{
+		return;
+	}
+
+	auto make_texture = []( const fastgltf::Asset& asset, std::size_t texture_index )
+	{
+		const auto& texture = asset.textures[ texture_index ];
+		const auto& image = asset.images[ *texture.imageIndex ];
+		const auto& data = std::get<fastgltf::sources::BufferView>( image.data );
+		const auto& view = asset.bufferViews[ data.bufferViewIndex ];
+		return mesh_texture { data.mimeType, view.byteOffset, view.byteLength };
+	};
+
+	auto make_attribute = []( const fastgltf::Asset& asset, std::size_t accessor_index )
+	{
+		const auto& accessor = asset.accessors[ accessor_index ];
+		const auto& view = asset.bufferViews[ *accessor.bufferViewIndex ];
+		VkFormat format = VK_FORMAT_UNDEFINED;
+		switch ( accessor.componentType )
+		{
+			case fastgltf::ComponentType::Float:
+			{
+				switch ( accessor.type )
+				{
+					case fastgltf::AccessorType::Scalar:
+						format = VK_FORMAT_R32_SFLOAT;
+						break;
+					case fastgltf::AccessorType::Vec2:
+						format = VK_FORMAT_R32G32_SFLOAT;
+						break;
+					case fastgltf::AccessorType::Vec3:
+						format = VK_FORMAT_R32G32B32_SFLOAT;
+						break;
+					case fastgltf::AccessorType::Vec4:
+						format = VK_FORMAT_R32G32B32A32_SFLOAT;
+						break;
+				}
+				break;
+			}
+			case fastgltf::ComponentType::UnsignedInt:
+			{
+				switch ( accessor.type )
+				{
+					case fastgltf::AccessorType::Scalar:
+						format = VK_FORMAT_R32_UINT;
+						break;
+					case fastgltf::AccessorType::Vec2:
+						format = VK_FORMAT_R32G32_UINT;
+						break;
+					case fastgltf::AccessorType::Vec3:
+						format = VK_FORMAT_R32G32B32_UINT;
+						break;
+					case fastgltf::AccessorType::Vec4:
+						format = VK_FORMAT_R32G32B32A32_UINT;
+						break;
+				}
+				break;
+			}
+		}
+		return mesh_attribute { .offset = accessor.byteOffset + view.byteOffset,
+								.stride = view.byteStride.value_or( 0 ),
+								.length = accessor.count,
+								.format = format };
+	};
+
+	std::vector<mesh> meshes;
+	for ( const auto& mesh : asset->meshes )
+	{
+		auto& m = meshes.emplace_back();
+		if ( mesh.primitives[ 0 ].materialIndex )
+		{
+			const auto& material = asset->materials[ *mesh.primitives[ 0 ].materialIndex ];
+			if ( material.pbrData.baseColorTexture )
+			{
+				m.albedo = make_texture( asset.get(), material.pbrData.baseColorTexture->textureIndex );
+			}
+			if ( material.normalTexture )
+			{
+				m.normal = make_texture( asset.get(), material.normalTexture->textureIndex );
+			}
+		}
+
+		for ( const auto& attribute : mesh.primitives[ 0 ].attributes )
+		{
+			if ( attribute.name == "POSITION" )
+			{
+				m.positions = make_attribute( asset.get(), attribute.accessorIndex );
+			}
+			else if ( attribute.name == "NORMAL" )
+			{
+				m.normals = make_attribute( asset.get(), attribute.accessorIndex );
+			}
+			else if ( attribute.name == "TANGENT" )
+			{
+				m.tangents = make_attribute( asset.get(), attribute.accessorIndex );
+			}
+			else if ( attribute.name == "TEXCOORD_0" )
+			{
+				m.uvs = make_attribute( asset.get(), attribute.accessorIndex );
+			}
+		}
+		if ( mesh.primitives[ 0 ].indicesAccessor )
+		{
+			m.indices = make_attribute( asset.get(), *mesh.primitives[ 0 ].indicesAccessor );
+		}
+	}
+
+	const auto& gltf_buffer = std::get<fastgltf::sources::Array>( asset->buffers[ 0 ].data ).bytes;
+
+	std::size_t alloc_size = 0;
+	std::vector<raii::SDL_Surface> textures;
+	for ( const auto& mesh : meshes )
+	{
+		if ( const auto tex = IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + mesh.albedo.offset, mesh.albedo.size ), true ) )
+		{
+			textures.emplace_back( tex );
+			alloc_size += tex->h * tex->pitch;
+		}
+		if ( const auto tex = IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + mesh.normal.offset, mesh.normal.size ), true ) )
+		{
+			textures.emplace_back( tex );
+			alloc_size += tex->h * tex->pitch;
+		}
+		alloc_size += sizeof( mesh_vertex ) * mesh.positions.length;
+		alloc_size += sizeof( uint32_t ) * mesh.indices.length;
+	}
+
+	vkResetFences( device, 1, &fence );
+	vkResetCommandBuffer( cmd, 0 );
+	const VkCommandBufferBeginInfo cmdBeginInfo { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+												  .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+	vkBeginCommandBuffer( cmd, &cmdBeginInfo );
+
+	std::vector<gpu_mesh_data> gpu_meshes;
+	const auto transfer_buffer = make_buffer( allocator, alloc_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY ).value();
+	const auto ptr = static_cast<std::byte*>( transfer_buffer.get_deleter().info.pMappedData );
+	std::size_t offset = 0;
+	for ( const auto& mesh : meshes )
+	{
+		auto& gpu_data = gpu_meshes.emplace_back();
+		gpu_data.vertices = make_buffer( allocator,
+										 sizeof( mesh_vertex ) * mesh.positions.length,
+										 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+											 | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+										 VMA_MEMORY_USAGE_GPU_ONLY )
+								.value();
+
+		const VkBufferDeviceAddressInfo deviceAdressInfo { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+														   .buffer = gpu_data.vertices.get() };
+		gpu_data.vertices_address = vkGetBufferDeviceAddress( device, &deviceAdressInfo );
+
+		gpu_data.indices = make_buffer( allocator,
+										sizeof( uint32_t ) * mesh.indices.length,
+										VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+										VMA_MEMORY_USAGE_GPU_ONLY )
+							   .value();
+
+		const auto verts = reinterpret_cast<mesh_vertex*>( ptr + offset );
+		const auto positions = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.positions.offset );
+		const auto normals = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.normals.offset );
+		const auto tangents = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.tangents.offset );
+		const auto uvs = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.uvs.offset );
+		for ( int i = 0; i < mesh.positions.length; ++i )
+		{
+			verts[ i ].position[ 0 ] = positions[ i * 3 ];
+			verts[ i ].position[ 1 ] = positions[ i * 3 + 1 ];
+			verts[ i ].position[ 2 ] = positions[ i * 3 + 2 ];
+			verts[ i ].normal[ 0 ] = normals[ i * 3 ];
+			verts[ i ].normal[ 1 ] = normals[ i * 3 + 1 ];
+			verts[ i ].normal[ 2 ] = normals[ i * 3 + 2 ];
+			verts[ i ].u = uvs[ i * 2 ];
+			verts[ i ].v = uvs[ i * 2 + 1 ];
+			verts[ i ].tangent[ 0 ] = tangents[ i * 4 ];
+			verts[ i ].tangent[ 1 ] = tangents[ i * 4 + 1 ];
+			verts[ i ].tangent[ 2 ] = tangents[ i * 4 + 2 ];
+			verts[ i ].tangent[ 3 ] = tangents[ i * 4 + 3 ];
+		}
+		const VkBufferCopy vertexCopy { .srcOffset = offset, .dstOffset = 0, .size = sizeof( mesh_vertex ) * mesh.positions.length };
+		vkCmdCopyBuffer( cmd, transfer_buffer.get(), gpu_data.vertices.get(), 1, &vertexCopy );
+		offset += sizeof( mesh_vertex ) * mesh.positions.length;
+
+		memcpy( ptr + offset, gltf_buffer.data() + mesh.indices.offset, sizeof( uint32_t ) * mesh.indices.length );
+		const VkBufferCopy indexCopy { .srcOffset = offset, .dstOffset = 0, .size = sizeof( uint32_t ) * mesh.indices.length };
+		vkCmdCopyBuffer( cmd, transfer_buffer.get(), gpu_data.indices.get(), 1, &indexCopy );
+		offset += sizeof( uint32_t ) * mesh.indices.length;
+	}
+	for ( const auto& tex : textures )
+	{
+		memcpy( ptr + offset, tex->pixels, tex->h * tex->pitch );
+		offset += tex->h * tex->pitch;
+	}
+
+	vkEndCommandBuffer( cmd );
+	const VkCommandBufferSubmitInfo cmdSubmitInfo { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = cmd };
+	const VkSubmitInfo2 submitInfo {
+		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+		.commandBufferInfoCount = 1,
+		.pCommandBufferInfos = &cmdSubmitInfo,
+	};
+
+	vkQueueSubmit2( queue, 1, &submitInfo, fence );
+	vkWaitForFences( device, 1, &fence, true, 9999999999 );
 }
 
 
@@ -603,34 +917,9 @@ int main()
 			std::println( stderr, "Cannot allocate command buffer: {}", static_cast<int>( ret ) );
 			return 1;
 		}
-
-		const VkFenceCreateInfo fenceCreateInfo = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
-		VkFence fence;
-		ret = vkCreateFence( vk_device, &fenceCreateInfo, nullptr, &fence );
-		if ( ret )
-		{
-			std::println( stderr, "Cannot create fence: {}", static_cast<int>( ret ) );
-			return 1;
-		}
-		vk_frame_data[ i ].render_fence = raii::make( vk_device, fence );
-
-		const VkSemaphoreCreateInfo semaphoreCreateInfo = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-		VkSemaphore semaphore;
-		ret = vkCreateSemaphore( vk_device, &semaphoreCreateInfo, nullptr, &semaphore );
-		if ( ret )
-		{
-			std::println( stderr, "Cannot create semaphore: {}", static_cast<int>( ret ) );
-			return 1;
-		}
-		vk_frame_data[ i ].render_semaphore = raii::make( vk_device, semaphore );
-
-		ret = vkCreateSemaphore( vk_device, &semaphoreCreateInfo, nullptr, &semaphore );
-		if ( ret )
-		{
-			std::println( stderr, "Cannot create semaphore: {}", static_cast<int>( ret ) );
-			return 1;
-		}
-		vk_frame_data[ i ].swapchain_semaphore = raii::make( vk_device, semaphore );
+		vk_frame_data[ i ].render_fence = make_fence( vk_device, VK_FENCE_CREATE_SIGNALED_BIT ).value();
+		vk_frame_data[ i ].render_semaphore = make_semaphore( vk_device ).value();
+		vk_frame_data[ i ].swapchain_semaphore = make_semaphore( vk_device ).value();
 	}
 
 	raii::VkPipelineLayout vk_pipeline_layout;
@@ -651,6 +940,19 @@ int main()
 
 		vk_pipeline = make_pipeline( vk_device, vk_swapchain.image_format, layout, vertex_shader.get(), fragment_shader.get() ).value();
 	}
+
+	VkCommandBuffer transfer_command_buffer {};
+	{
+		const VkCommandBufferAllocateInfo cmdAllocInfo = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+														   .commandPool = vk_command_pool.get(),
+														   .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+														   .commandBufferCount = 1 };
+
+		vkAllocateCommandBuffers( vk_device, &cmdAllocInfo, &transfer_command_buffer );
+	}
+	const auto transfer_fence = make_fence( vk_device, 0 ).value();
+
+	load_model( vk_device, vk_allocator.get(), transfer_command_buffer, transfer_fence.get(), vk_gfx_queue );
 
 	bool quit = false;
 	int frame_count = 0;
