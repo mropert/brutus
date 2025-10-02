@@ -40,10 +40,13 @@ namespace raii
 	{
 		::VkDevice device;
 		void operator()( ::VkCommandPool command_pool ) const { vkDestroyCommandPool( device, command_pool, nullptr ); }
+		void operator()( ::VkDescriptorPool pool ) const { vkDestroyDescriptorPool( device, pool, nullptr ); }
+		void operator()( ::VkDescriptorSetLayout layout ) const { vkDestroyDescriptorSetLayout( device, layout, nullptr ); }
 		void operator()( ::VkFence fence ) const { vkDestroyFence( device, fence, nullptr ); }
 		void operator()( ::VkImageView image_view ) const { vkDestroyImageView( device, image_view, nullptr ); }
 		void operator()( ::VkPipeline pipeline ) const { vkDestroyPipeline( device, pipeline, nullptr ); }
 		void operator()( ::VkPipelineLayout layout ) const { vkDestroyPipelineLayout( device, layout, nullptr ); }
+		void operator()( ::VkSampler sampler ) const { vkDestroySampler( device, sampler, nullptr ); }
 		void operator()( ::VkSemaphore semaphore ) const { vkDestroySemaphore( device, semaphore, nullptr ); }
 		void operator()( ::VkShaderModule shader ) const { vkDestroyShaderModule( device, shader, nullptr ); }
 	};
@@ -57,10 +60,13 @@ namespace raii
 	}
 
 	using VkCommandPool = VkObject<::VkCommandPool>;
+	using VkDescriptorPool = VkObject<::VkDescriptorPool>;
+	using VkDescriptorSetLayout = VkObject<::VkDescriptorSetLayout>;
 	using VkFence = VkObject<::VkFence>;
 	using VkImageView = VkObject<::VkImageView>;
 	using VkPipeline = VkObject<::VkPipeline>;
 	using VkPipelineLayout = VkObject<::VkPipelineLayout>;
+	using VkSampler = VkObject<::VkSampler>;
 	using VkSemaphore = VkObject<::VkSemaphore>;
 	using VkShaderModule = VkObject<::VkShaderModule>;
 
@@ -317,6 +323,18 @@ std::expected<raii::VulkanImage, VkResult> make_image( VkDevice device,
 	return allocated_image;
 }
 
+std::expected<raii::VkSampler, VkResult> make_sampler( VkDevice device, VkFilter filter )
+{
+	const VkSamplerCreateInfo info { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = filter, .minFilter = filter };
+	VkSampler sampler = nullptr;
+	const auto res = vkCreateSampler( device, &info, nullptr, &sampler );
+	if ( res )
+	{
+		return std::unexpected( res );
+	}
+	return raii::make( device, sampler );
+}
+
 std::expected<raii::VkShaderModule, VkResult>
 make_shader( VkDevice device, const std::string_view source, VkShaderStageFlagBits type, const char* filename )
 {
@@ -420,6 +438,70 @@ std::expected<raii::VkPipeline, VkResult> make_pipeline( VkDevice device,
 		return std::unexpected( ret );
 	}
 	return raii::make( device, gfx_pipeline );
+}
+
+std::expected<raii::VkDescriptorSetLayout, VkResult> make_descriptor_set_layout( VkDevice device )
+{
+	const std::array<VkDescriptorSetLayoutBinding, 2> bindings { { { .binding = 0,
+																	 .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+																	 .descriptorCount = 1,
+																	 .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+																   { .binding = 1,
+																	 .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+																	 .descriptorCount = 1,
+																	 .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT } } };
+
+	VkDescriptorSetLayoutCreateInfo info { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+										   .bindingCount = bindings.size(),
+										   .pBindings = bindings.data() };
+
+	VkDescriptorSetLayout set = nullptr;
+	const auto res = vkCreateDescriptorSetLayout( device, &info, nullptr, &set );
+	if ( res )
+	{
+		return std::unexpected( res );
+	}
+	return raii::make( device, set );
+}
+
+std::expected<raii::VkDescriptorPool, VkResult> make_descriptor_pool( VkDevice device, uint32_t count )
+{
+	const std::array<VkDescriptorPoolSize, 1> pools { { { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+														  .descriptorCount = 2 * count } } };
+	const VkDescriptorPoolCreateInfo create_info { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+												   .maxSets = count,
+												   .poolSizeCount = pools.size(),
+												   .pPoolSizes = pools.data() };
+	VkDescriptorPool pool = nullptr;
+	const auto res = vkCreateDescriptorPool( device, &create_info, nullptr, &pool );
+	if ( res )
+	{
+		return std::unexpected( res );
+	}
+	return raii::make( device, pool );
+}
+
+void update_descriptors( VkDevice device, VkDescriptorSet set, VkSampler sampler, VkImageView image1, VkImageView image2 )
+{
+	const std::array<VkDescriptorImageInfo, 2> infos {
+		{ { .sampler = sampler, .imageView = image1, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+		  { .sampler = sampler, .imageView = image2, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL } }
+	};
+
+	const std::array<VkWriteDescriptorSet, 2> writes { { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+														   .dstSet = set,
+														   .dstBinding = 0,
+														   .descriptorCount = 1,
+														   .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+														   .pImageInfo = &infos[ 0 ] },
+														 { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+														   .dstSet = set,
+														   .dstBinding = 1,
+														   .descriptorCount = 1,
+														   .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+														   .pImageInfo = &infos[ 1 ] } } };
+
+	vkUpdateDescriptorSets( device, writes.size(), writes.data(), 0, nullptr );
 }
 
 void transition_image( VkCommandBuffer cmd, VkImage image, VkImageLayout currentLayout, VkImageLayout newLayout )
@@ -599,7 +681,7 @@ std::size_t upload_image_from_surface( VkCommandBuffer cmd,
 	SDL_ConvertPixels( surface.w, surface.h, surface.format, surface.pixels, surface.pitch, gpu_format, buffer + offset, pitch );
 	transition_image( cmd, image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL );
 	const VkBufferImageCopy copy { .bufferOffset = offset,
-								   .imageSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 0 },
+								   .imageSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1 },
 								   .imageExtent = VkExtent3D( surface.w, surface.h, 1 ) };
 	vkCmdCopyBufferToImage( cmd, transfer_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy );
 	transition_image( cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
@@ -607,7 +689,7 @@ std::size_t upload_image_from_surface( VkCommandBuffer cmd,
 	return pitch * surface.h;
 }
 
-void load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, VkFence fence, VkQueue queue )
+std::vector<gpu_mesh_data> load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, VkFence fence, VkQueue queue )
 {
 	const std::filesystem::path path = "../assets/player.glb";
 
@@ -615,13 +697,13 @@ void load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, V
 	auto data = fastgltf::GltfDataBuffer::FromPath( path );
 	if ( data.error() != fastgltf::Error::None )
 	{
-		return;
+		return {};
 	}
 
 	auto asset = parser.loadGltf( data.get(), path.parent_path(), fastgltf::Options::None );
 	if ( auto error = asset.error(); error != fastgltf::Error::None )
 	{
-		return;
+		return {};
 	}
 
 	auto make_texture = []( const fastgltf::Asset& asset, std::size_t texture_index )
@@ -832,6 +914,8 @@ void load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, V
 
 	vkQueueSubmit2( queue, 1, &submitInfo, fence );
 	vkWaitForFences( device, 1, &fence, true, 9999999999 );
+
+	return gpu_meshes;
 }
 
 
@@ -857,9 +941,11 @@ static constexpr std::string_view fragment_shader_code = R"(#version 450
 layout (location = 0) in vec3 inColor;
 layout (location = 0) out vec4 outFragColor;
 
+layout(set = 0, binding = 0) uniform sampler2D albedoTexture;
+layout(set = 0, binding = 1) uniform sampler2D normalTexture;
+
 void main() 
 {
-	//return red
 	outFragColor = vec4(inColor,1.0f);
 })";
 
@@ -1028,11 +1114,18 @@ int main()
 		vk_frame_data[ i ].swapchain_semaphore = make_semaphore( vk_device ).value();
 	}
 
+	const auto vk_descriptor_set_layout = *make_descriptor_set_layout( vk_device );
+	const auto vk_descriptor_pool = *make_descriptor_pool( vk_device, 256 );
+	const auto linear_sampler = *make_sampler( vk_device, VK_FILTER_LINEAR );
+
 	raii::VkPipelineLayout vk_pipeline_layout;
 	raii::VkPipeline vk_pipeline;
 	{
 		VkPipelineLayout layout {};
-		VkPipelineLayoutCreateInfo pipeline_layout_info { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+		const auto desc_layout = vk_descriptor_set_layout.get();
+		VkPipelineLayoutCreateInfo pipeline_layout_info { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+														  .setLayoutCount = 1,
+														  .pSetLayouts = &desc_layout };
 		const auto ret = vkCreatePipelineLayout( vk_device, &pipeline_layout_info, nullptr, &layout );
 		if ( ret )
 		{
@@ -1058,7 +1151,19 @@ int main()
 	}
 	const auto transfer_fence = make_fence( vk_device, 0 ).value();
 
-	load_model( vk_device, vk_allocator.get(), transfer_command_buffer, transfer_fence.get(), vk_gfx_queue );
+	const auto meshes = load_model( vk_device, vk_allocator.get(), transfer_command_buffer, transfer_fence.get(), vk_gfx_queue );
+	std::vector<VkDescriptorSet> mesh_sets;
+	for ( const auto& mesh : meshes )
+	{
+		const auto layout = vk_descriptor_set_layout.get();
+		const VkDescriptorSetAllocateInfo alloc_info { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+													   .descriptorPool = vk_descriptor_pool.get(),
+													   .descriptorSetCount = 1,
+													   .pSetLayouts = &layout };
+		auto& set = mesh_sets.emplace_back( nullptr );
+		vkAllocateDescriptorSets( vk_device, &alloc_info, &set );
+		update_descriptors( vk_device, set, linear_sampler.get(), mesh.albedo_texture.view.get(), mesh.normal_texture.view.get() );
+	}
 
 	bool quit = false;
 	int frame_count = 0;
@@ -1118,6 +1223,14 @@ int main()
 		vkCmdBeginRendering( frame_data.command_buffer, &renderInfo );
 
 		vkCmdBindPipeline( frame_data.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline.get() );
+		vkCmdBindDescriptorSets( frame_data.command_buffer,
+								 VK_PIPELINE_BIND_POINT_GRAPHICS,
+								 vk_pipeline_layout.get(),
+								 0,
+								 1,
+								 &mesh_sets[ frame_count % mesh_sets.size() ],
+								 0,
+								 nullptr );
 
 		const VkViewport viewport { .x = 0.f,
 									.y = 0.f,
