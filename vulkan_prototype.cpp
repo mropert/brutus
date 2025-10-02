@@ -279,19 +279,19 @@ std::expected<raii::VulkanImage, VkResult> make_image( VkDevice device,
 								   .tiling = VK_IMAGE_TILING_OPTIMAL,
 								   .usage = image_usage };
 
-	const VmaAllocationCreateInfo allocinfo { .usage = memory_usage, .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT };
+	const VmaAllocationCreateInfo create_info { .usage = memory_usage, .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT };
 
 	VkImage image {};
 	VmaAllocation allocation {};
-	VmaAllocationInfo alloc_info {};
-	auto ret = vmaCreateImage( allocator, &info, &allocinfo, &image, &allocation, &alloc_info );
+	VmaAllocationInfo allocation_info {};
+	auto ret = vmaCreateImage( allocator, &info, &create_info, &image, &allocation, &allocation_info );
 	if ( ret )
 	{
 		return std::unexpected( ret );
 	}
 
 	raii::VulkanImage allocated_image;
-	allocated_image.image = raii::make( allocator, image, allocation, alloc_info );
+	allocated_image.image = raii::make( allocator, image, allocation, allocation_info );
 	allocated_image.extent = extent;
 	allocated_image.format = format;
 
@@ -482,6 +482,7 @@ struct mesh_texture
 	fastgltf::MimeType type = fastgltf::MimeType::None;
 	std::size_t offset = 0;
 	std::size_t size = 0;
+	raii::SDL_Surface image;
 };
 
 struct mesh
@@ -508,8 +509,103 @@ struct gpu_mesh_data
 {
 	raii::VmaBuffer vertices;
 	raii::VmaBuffer indices;
+	raii::VulkanImage albedo_texture;
+	raii::VulkanImage normal_texture;
 	VkDeviceAddress vertices_address;
 };
+
+SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
+{
+	switch ( format )
+	{
+		case SDL_PIXELFORMAT_BGR565:
+			return SDL_PIXELFORMAT_BGR565;
+		case SDL_PIXELFORMAT_BGRA5551:
+			return SDL_PIXELFORMAT_BGRA5551;
+		case SDL_PIXELFORMAT_BGR24:
+		case SDL_PIXELFORMAT_BGRX32:
+			return SDL_PIXELFORMAT_BGRX32;
+		case SDL_PIXELFORMAT_BGRA32:
+			return SDL_PIXELFORMAT_BGRA32;
+		case SDL_PIXELFORMAT_RGB24:
+		case SDL_PIXELFORMAT_RGBX32:
+			return SDL_PIXELFORMAT_RGBX32;
+		case SDL_PIXELFORMAT_RGBA32:
+			return SDL_PIXELFORMAT_RGBA32;
+		default:
+			return SDL_PIXELFORMAT_UNKNOWN;
+	}
+}
+
+VkFormat sdl_to_vulkan_format( SDL_PixelFormat format )
+{
+	switch ( format )
+	{
+		case SDL_PIXELFORMAT_BGR565:
+			return VK_FORMAT_B5G6R5_UNORM_PACK16;
+		case SDL_PIXELFORMAT_BGRA5551:
+			return VK_FORMAT_B5G5R5A1_UNORM_PACK16;
+		case SDL_PIXELFORMAT_BGRA32:
+		case SDL_PIXELFORMAT_BGRX32:
+			return VK_FORMAT_B8G8R8A8_UNORM;
+		case SDL_PIXELFORMAT_RGBA32:
+		case SDL_PIXELFORMAT_RGBX32:
+			return VK_FORMAT_R8G8B8A8_UNORM;
+		default:
+			return VK_FORMAT_UNDEFINED;
+	}
+}
+
+std::size_t get_format_size( VkFormat format )
+{
+	switch ( format )
+	{
+		case VK_FORMAT_B5G6R5_UNORM_PACK16:
+		case VK_FORMAT_B5G5R5A1_UNORM_PACK16:
+			return 2;
+		case VK_FORMAT_B8G8R8A8_UNORM:
+		case VK_FORMAT_R8G8B8A8_UNORM:
+			return 4;
+		default:
+			return 0;
+	}
+}
+
+std::expected<raii::VulkanImage, VkResult> make_image_from_surface( VkDevice device, VmaAllocator allocator, const SDL_Surface& surface )
+{
+	const auto format = sdl_to_vulkan_format( sdl_gpu_format( surface.format ) );
+	if ( format == VK_FORMAT_UNDEFINED )
+	{
+		return std::unexpected( VK_ERROR_FORMAT_NOT_SUPPORTED );
+	}
+	return make_image( device,
+					   allocator,
+					   format,
+					   VkExtent3D( surface.w, surface.h, 1 ),
+					   VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+					   VMA_MEMORY_USAGE_GPU_ONLY,
+					   VK_IMAGE_ASPECT_COLOR_BIT );
+}
+
+std::size_t upload_image_from_surface( VkCommandBuffer cmd,
+									   VkBuffer transfer_buffer,
+									   std::byte* buffer,
+									   std::size_t offset,
+									   VkImage image,
+									   const SDL_Surface& surface )
+{
+	const auto gpu_format = sdl_gpu_format( surface.format );
+	const auto pitch = surface.w * get_format_size( sdl_to_vulkan_format( gpu_format ) );
+	SDL_ConvertPixels( surface.w, surface.h, surface.format, surface.pixels, surface.pitch, gpu_format, buffer + offset, pitch );
+	transition_image( cmd, image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL );
+	const VkBufferImageCopy copy { .bufferOffset = offset,
+								   .imageSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 0 },
+								   .imageExtent = VkExtent3D( surface.w, surface.h, 1 ) };
+	vkCmdCopyBufferToImage( cmd, transfer_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy );
+	transition_image( cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+
+	return pitch * surface.h;
+}
 
 void load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, VkFence fence, VkQueue queue )
 {
@@ -634,18 +730,17 @@ void load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, V
 	const auto& gltf_buffer = std::get<fastgltf::sources::Array>( asset->buffers[ 0 ].data ).bytes;
 
 	std::size_t alloc_size = 0;
-	std::vector<raii::SDL_Surface> textures;
-	for ( const auto& mesh : meshes )
+	for ( auto& mesh : meshes )
 	{
 		if ( const auto tex = IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + mesh.albedo.offset, mesh.albedo.size ), true ) )
 		{
-			textures.emplace_back( tex );
-			alloc_size += tex->h * tex->pitch;
+			mesh.albedo.image.reset( tex );
+			alloc_size += tex->w * tex->h * get_format_size( sdl_to_vulkan_format( sdl_gpu_format( tex->format ) ) );
 		}
 		if ( const auto tex = IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + mesh.normal.offset, mesh.normal.size ), true ) )
 		{
-			textures.emplace_back( tex );
-			alloc_size += tex->h * tex->pitch;
+			mesh.normal.image.reset( tex );
+			alloc_size += tex->w * tex->h * get_format_size( sdl_to_vulkan_format( sdl_gpu_format( tex->format ) ) );
 		}
 		alloc_size += sizeof( mesh_vertex ) * mesh.positions.length;
 		alloc_size += sizeof( uint32_t ) * mesh.indices.length;
@@ -709,11 +804,22 @@ void load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, V
 		const VkBufferCopy indexCopy { .srcOffset = offset, .dstOffset = 0, .size = sizeof( uint32_t ) * mesh.indices.length };
 		vkCmdCopyBuffer( cmd, transfer_buffer.get(), gpu_data.indices.get(), 1, &indexCopy );
 		offset += sizeof( uint32_t ) * mesh.indices.length;
-	}
-	for ( const auto& tex : textures )
-	{
-		memcpy( ptr + offset, tex->pixels, tex->h * tex->pitch );
-		offset += tex->h * tex->pitch;
+
+		gpu_data.albedo_texture = *make_image_from_surface( device, allocator, *mesh.albedo.image );
+		offset += upload_image_from_surface( cmd,
+											 transfer_buffer.get(),
+											 ptr,
+											 offset,
+											 gpu_data.albedo_texture.image.get(),
+											 *mesh.albedo.image );
+
+		gpu_data.normal_texture = *make_image_from_surface( device, allocator, *mesh.normal.image );
+		offset += upload_image_from_surface( cmd,
+											 transfer_buffer.get(),
+											 ptr,
+											 offset,
+											 gpu_data.normal_texture.image.get(),
+											 *mesh.normal.image );
 	}
 
 	vkEndCommandBuffer( cmd );
