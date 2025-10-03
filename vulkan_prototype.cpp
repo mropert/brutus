@@ -412,7 +412,9 @@ std::expected<raii::VkPipeline, VkResult> make_pipeline( VkDevice device,
 															   .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
 															   .minSampleShading = 1.0f };
 	const VkPipelineDepthStencilStateCreateInfo depth_stencil = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-																  .depthCompareOp = VK_COMPARE_OP_NEVER,
+																  .depthTestEnable = VK_TRUE,
+																  .depthWriteEnable = VK_TRUE,
+																  .depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL,
 																  .maxDepthBounds = 1.f };
 
 	const VkPipelineColorBlendAttachmentState blend_attachment { .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
@@ -424,7 +426,7 @@ std::expected<raii::VkPipeline, VkResult> make_pipeline( VkDevice device,
 	const VkPipelineRenderingCreateInfo render_info { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
 													  .colorAttachmentCount = 1,
 													  .pColorAttachmentFormats = &color_format,
-													  .depthAttachmentFormat = VK_FORMAT_UNDEFINED };
+													  .depthAttachmentFormat = VK_FORMAT_D32_SFLOAT };
 
 	const std::array<VkDynamicState, 2> state { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
 	const VkPipelineDynamicStateCreateInfo dynamic_state { .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
@@ -1098,11 +1100,19 @@ int main()
 										vk_allocator.get(),
 										VK_FORMAT_R16G16B16A16_SFLOAT,
 										VkExtent3D { .width = draw_image_extent.width, .height = draw_image_extent.height, .depth = 1 },
-										VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT
+										VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
 											| VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
 										VMA_MEMORY_USAGE_GPU_ONLY,
 										VK_IMAGE_ASPECT_COLOR_BIT )
 								.value();
+	const auto depth_image = make_image( vk_device,
+										 vk_allocator.get(),
+										 VK_FORMAT_D32_SFLOAT,
+										 VkExtent3D { .width = draw_image_extent.width, .height = draw_image_extent.height, .depth = 1 },
+										 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+										 VMA_MEMORY_USAGE_GPU_ONLY,
+										 VK_IMAGE_ASPECT_DEPTH_BIT )
+								 .value();
 
 	const auto vk_gfx_queue = vk_device.get_queue( vkb::QueueType::graphics ).value();
 	const auto vk_gfx_queue_family = vk_device.get_queue_index( vkb::QueueType::graphics ).value();
@@ -1248,6 +1258,10 @@ int main()
 		vkBeginCommandBuffer( frame_data.command_buffer, &cmdBeginInfo );
 
 		transition_image( frame_data.command_buffer, draw_image.image.get(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL );
+		transition_image( frame_data.command_buffer,
+						  depth_image.image.get(),
+						  VK_IMAGE_LAYOUT_UNDEFINED,
+						  VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL );
 
 		VkClearColorValue clearValue;
 		float flash = std::abs( std::sin( frame_count / 120.f ) );
@@ -1266,11 +1280,18 @@ int main()
 			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
 		};
 
+		const VkRenderingAttachmentInfo depth_attachment { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+														   .imageView = depth_image.view.get(),
+														   .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+														   .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+														   .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
+
 		const VkRenderingInfo renderInfo { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
 										   .renderArea = VkRect2D { VkOffset2D { 0, 0 }, draw_image_extent },
 										   .layerCount = 1,
 										   .colorAttachmentCount = 1,
-										   .pColorAttachments = &color_attachment };
+										   .pColorAttachments = &color_attachment,
+										   .pDepthAttachment = &depth_attachment };
 
 		vkCmdBeginRendering( frame_data.command_buffer, &renderInfo );
 
@@ -1288,11 +1309,11 @@ int main()
 		const VkRect2D scissor { .extent = draw_image_extent };
 		vkCmdSetScissor( frame_data.command_buffer, 0, 1, &scissor );
 
-		const glm::mat4 view = glm::translate( glm::identity<glm::mat4>(), glm::vec3 { 0, 0, -2.5 } );
+		const glm::mat4 view = glm::translate( glm::identity<glm::mat4>(), glm::vec3 { 0, -1, -2.5 } );
 		glm::mat4 projection = glm::perspective( glm::radians( 70.f ),
 												 static_cast<float>( draw_image_extent.width ) / draw_image_extent.height,
-												 0.1f,
-												 10000.f );
+												 10000.f,
+												 0.1f );
 
 		// invert the Y direction on projection matrix so that we are more similar
 		// to opengl and gltf axis

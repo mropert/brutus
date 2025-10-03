@@ -26,7 +26,7 @@ void main()
 {	
 	Vertex v = PushConstants.vertexBuffer.vertices[gl_VertexIndex];
 
-	gl_Position = PushConstants.render_matrix *vec4(v.position, 1.0f);
+	gl_Position = PushConstants.render_matrix * vec4(v.position, 1.0f);
 	outUV.x = v.uv_x;
 	outUV.y = v.uv_y;
 }
