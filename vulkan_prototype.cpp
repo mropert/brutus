@@ -7,6 +7,7 @@
 #include <fastgltf/core.hpp>
 #include <filesystem>
 #include <memory>
+#include <optick.h>
 #include <print>
 #include <shaderc/shaderc.hpp>
 #include <span>
@@ -339,6 +340,7 @@ std::expected<raii::VkSampler, VkResult> make_sampler( VkDevice device, VkFilter
 std::expected<raii::VkShaderModule, VkResult>
 make_shader( VkDevice device, const std::string_view source, VkShaderStageFlagBits type, const char* filename )
 {
+	OPTICK_EVENT();
 	shaderc::Compiler compiler;
 	shaderc::CompileOptions options;
 
@@ -372,6 +374,7 @@ make_shader( VkDevice device, const std::string_view source, VkShaderStageFlagBi
 
 std::expected<raii::VkShaderModule, VkResult> make_shader( VkDevice device, const std::filesystem::path& path, VkShaderStageFlagBits type )
 {
+	OPTICK_EVENT();
 	std::string source;
 	{
 		std::ifstream istream( path );
@@ -391,6 +394,7 @@ std::expected<raii::VkPipeline, VkResult> make_pipeline( VkDevice device,
 														 VkShaderModule vertex_shader,
 														 VkShaderModule fragment_shader )
 {
+	OPTICK_EVENT();
 	const VkPipelineVertexInputStateCreateInfo vertex_input { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
 	const VkPipelineInputAssemblyStateCreateInfo ia { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
 													  .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
@@ -671,6 +675,7 @@ std::size_t get_format_size( VkFormat format )
 
 std::expected<raii::VulkanImage, VkResult> make_image_from_surface( VkDevice device, VmaAllocator allocator, const SDL_Surface& surface )
 {
+	OPTICK_EVENT();
 	const auto format = sdl_to_vulkan_format( sdl_gpu_format( surface.format ) );
 	if ( format == VK_FORMAT_UNDEFINED )
 	{
@@ -692,6 +697,7 @@ std::size_t upload_image_from_surface( VkCommandBuffer cmd,
 									   VkImage image,
 									   const SDL_Surface& surface )
 {
+	OPTICK_EVENT();
 	const auto gpu_format = sdl_gpu_format( surface.format );
 	const auto pitch = surface.w * get_format_size( sdl_to_vulkan_format( gpu_format ) );
 	SDL_ConvertPixels( surface.w, surface.h, surface.format, surface.pixels, surface.pitch, gpu_format, buffer + offset, pitch );
@@ -707,19 +713,30 @@ std::size_t upload_image_from_surface( VkCommandBuffer cmd,
 
 std::vector<gpu_mesh_data> load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, VkFence fence, VkQueue queue )
 {
+	OPTICK_EVENT();
 	const std::filesystem::path path = "../assets/player.glb";
 
 	fastgltf::Parser parser;
-	auto data = fastgltf::GltfDataBuffer::FromPath( path );
-	if ( data.error() != fastgltf::Error::None )
+	fastgltf::GltfDataBuffer data;
 	{
-		return {};
+		OPTICK_EVENT( "gltf_read_io" );
+		auto res = fastgltf::GltfDataBuffer::FromPath( path );
+		if ( res.error() != fastgltf::Error::None )
+		{
+			return {};
+		}
+		data = std::move( res.get() );
 	}
 
-	auto asset = parser.loadGltf( data.get(), path.parent_path(), fastgltf::Options::None );
-	if ( auto error = asset.error(); error != fastgltf::Error::None )
+	fastgltf::Asset asset;
 	{
-		return {};
+		OPTICK_EVENT( "gltf_parse" );
+		auto res = parser.loadGltf( data, path.parent_path(), fastgltf::Options::None );
+		if ( auto error = res.error(); error != fastgltf::Error::None )
+		{
+			return {};
+		}
+		asset = std::move( res.get() );
 	}
 
 	auto make_texture = []( const fastgltf::Asset& asset, std::size_t texture_index )
@@ -784,19 +801,19 @@ std::vector<gpu_mesh_data> load_model( VkDevice device, VmaAllocator allocator, 
 	};
 
 	std::vector<mesh> meshes;
-	for ( const auto& mesh : asset->meshes )
+	for ( const auto& mesh : asset.meshes )
 	{
 		auto& m = meshes.emplace_back();
 		if ( mesh.primitives[ 0 ].materialIndex )
 		{
-			const auto& material = asset->materials[ *mesh.primitives[ 0 ].materialIndex ];
+			const auto& material = asset.materials[ *mesh.primitives[ 0 ].materialIndex ];
 			if ( material.pbrData.baseColorTexture )
 			{
-				m.albedo = make_texture( asset.get(), material.pbrData.baseColorTexture->textureIndex );
+				m.albedo = make_texture( asset, material.pbrData.baseColorTexture->textureIndex );
 			}
 			if ( material.normalTexture )
 			{
-				m.normal = make_texture( asset.get(), material.normalTexture->textureIndex );
+				m.normal = make_texture( asset, material.normalTexture->textureIndex );
 			}
 		}
 
@@ -804,44 +821,47 @@ std::vector<gpu_mesh_data> load_model( VkDevice device, VmaAllocator allocator, 
 		{
 			if ( attribute.name == "POSITION" )
 			{
-				m.positions = make_attribute( asset.get(), attribute.accessorIndex );
+				m.positions = make_attribute( asset, attribute.accessorIndex );
 			}
 			else if ( attribute.name == "NORMAL" )
 			{
-				m.normals = make_attribute( asset.get(), attribute.accessorIndex );
+				m.normals = make_attribute( asset, attribute.accessorIndex );
 			}
 			else if ( attribute.name == "TANGENT" )
 			{
-				m.tangents = make_attribute( asset.get(), attribute.accessorIndex );
+				m.tangents = make_attribute( asset, attribute.accessorIndex );
 			}
 			else if ( attribute.name == "TEXCOORD_0" )
 			{
-				m.uvs = make_attribute( asset.get(), attribute.accessorIndex );
+				m.uvs = make_attribute( asset, attribute.accessorIndex );
 			}
 		}
 		if ( mesh.primitives[ 0 ].indicesAccessor )
 		{
-			m.indices = make_attribute( asset.get(), *mesh.primitives[ 0 ].indicesAccessor );
+			m.indices = make_attribute( asset, *mesh.primitives[ 0 ].indicesAccessor );
 		}
 	}
 
-	const auto& gltf_buffer = std::get<fastgltf::sources::Array>( asset->buffers[ 0 ].data ).bytes;
+	const auto& gltf_buffer = std::get<fastgltf::sources::Array>( asset.buffers[ 0 ].data ).bytes;
 
 	std::size_t alloc_size = 0;
-	for ( auto& mesh : meshes )
 	{
-		if ( const auto tex = IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + mesh.albedo.offset, mesh.albedo.size ), true ) )
+		OPTICK_EVENT( "load_images" );
+		for ( auto& mesh : meshes )
 		{
-			mesh.albedo.image.reset( tex );
-			alloc_size += tex->w * tex->h * get_format_size( sdl_to_vulkan_format( sdl_gpu_format( tex->format ) ) );
+			if ( const auto tex = IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + mesh.albedo.offset, mesh.albedo.size ), true ) )
+			{
+				mesh.albedo.image.reset( tex );
+				alloc_size += tex->w * tex->h * get_format_size( sdl_to_vulkan_format( sdl_gpu_format( tex->format ) ) );
+			}
+			if ( const auto tex = IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + mesh.normal.offset, mesh.normal.size ), true ) )
+			{
+				mesh.normal.image.reset( tex );
+				alloc_size += tex->w * tex->h * get_format_size( sdl_to_vulkan_format( sdl_gpu_format( tex->format ) ) );
+			}
+			alloc_size += sizeof( mesh_vertex ) * mesh.positions.length;
+			alloc_size += sizeof( uint32_t ) * mesh.indices.length;
 		}
-		if ( const auto tex = IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + mesh.normal.offset, mesh.normal.size ), true ) )
-		{
-			mesh.normal.image.reset( tex );
-			alloc_size += tex->w * tex->h * get_format_size( sdl_to_vulkan_format( sdl_gpu_format( tex->format ) ) );
-		}
-		alloc_size += sizeof( mesh_vertex ) * mesh.positions.length;
-		alloc_size += sizeof( uint32_t ) * mesh.indices.length;
 	}
 
 	vkResetFences( device, 1, &fence );
@@ -874,25 +894,28 @@ std::vector<gpu_mesh_data> load_model( VkDevice device, VmaAllocator allocator, 
 										VMA_MEMORY_USAGE_GPU_ONLY )
 							   .value();
 
-		const auto verts = reinterpret_cast<mesh_vertex*>( ptr + offset );
-		const auto positions = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.positions.offset );
-		const auto normals = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.normals.offset );
-		const auto tangents = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.tangents.offset );
-		const auto uvs = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.uvs.offset );
-		for ( int i = 0; i < mesh.positions.length; ++i )
 		{
-			verts[ i ].position[ 0 ] = positions[ i * 3 ];
-			verts[ i ].position[ 1 ] = positions[ i * 3 + 1 ];
-			verts[ i ].position[ 2 ] = positions[ i * 3 + 2 ];
-			verts[ i ].normal[ 0 ] = normals[ i * 3 ];
-			verts[ i ].normal[ 1 ] = normals[ i * 3 + 1 ];
-			verts[ i ].normal[ 2 ] = normals[ i * 3 + 2 ];
-			verts[ i ].u = uvs[ i * 2 ];
-			verts[ i ].v = uvs[ i * 2 + 1 ];
-			verts[ i ].tangent[ 0 ] = tangents[ i * 4 ];
-			verts[ i ].tangent[ 1 ] = tangents[ i * 4 + 1 ];
-			verts[ i ].tangent[ 2 ] = tangents[ i * 4 + 2 ];
-			verts[ i ].tangent[ 3 ] = tangents[ i * 4 + 3 ];
+			OPTICK_EVENT( "repack_vertices" );
+			const auto verts = reinterpret_cast<mesh_vertex*>( ptr + offset );
+			const auto positions = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.positions.offset );
+			const auto normals = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.normals.offset );
+			const auto tangents = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.tangents.offset );
+			const auto uvs = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.uvs.offset );
+			for ( int i = 0; i < mesh.positions.length; ++i )
+			{
+				verts[ i ].position[ 0 ] = positions[ i * 3 ];
+				verts[ i ].position[ 1 ] = positions[ i * 3 + 1 ];
+				verts[ i ].position[ 2 ] = positions[ i * 3 + 2 ];
+				verts[ i ].normal[ 0 ] = normals[ i * 3 ];
+				verts[ i ].normal[ 1 ] = normals[ i * 3 + 1 ];
+				verts[ i ].normal[ 2 ] = normals[ i * 3 + 2 ];
+				verts[ i ].u = uvs[ i * 2 ];
+				verts[ i ].v = uvs[ i * 2 + 1 ];
+				verts[ i ].tangent[ 0 ] = tangents[ i * 4 ];
+				verts[ i ].tangent[ 1 ] = tangents[ i * 4 + 1 ];
+				verts[ i ].tangent[ 2 ] = tangents[ i * 4 + 2 ];
+				verts[ i ].tangent[ 3 ] = tangents[ i * 4 + 3 ];
+			}
 		}
 		const VkBufferCopy vertexCopy { .srcOffset = offset, .dstOffset = 0, .size = sizeof( mesh_vertex ) * mesh.positions.length };
 		vkCmdCopyBuffer( cmd, transfer_buffer.get(), gpu_data.vertices.get(), 1, &vertexCopy );
@@ -936,10 +959,22 @@ std::vector<gpu_mesh_data> load_model( VkDevice device, VmaAllocator allocator, 
 
 int main()
 {
-	if ( !SDL_Init( SDL_INIT_VIDEO ) )
+	constexpr bool profile_startup = false;
+
+	if ( profile_startup )
 	{
-		std::println( stderr, "Failed to initialize SDL: {}", SDL_GetError() );
-		return 1;
+		OPTICK_START_CAPTURE();
+	}
+
+	OPTICK_PUSH( "Startup" );
+
+	{
+		OPTICK_EVENT( "SDL_init" );
+		if ( !SDL_Init( SDL_INIT_VIDEO ) )
+		{
+			std::println( stderr, "Failed to initialize SDL: {}", SDL_GetError() );
+			return 1;
+		}
 	}
 
 	const VkExtent2D window_extent { .width = 1024, .height = 768 };
@@ -953,6 +988,7 @@ int main()
 
 	raii::VulkanInstance vk_instance;
 	{
+		OPTICK_EVENT( "create_vk_instance" );
 		Uint32 ext_count = 0;
 		const auto exts = SDL_Vulkan_GetInstanceExtensions( &ext_count );
 
@@ -975,6 +1011,7 @@ int main()
 
 	raii::VkSurfaceKHR vk_surface;
 	{
+		OPTICK_EVENT( "create_vk_surface" );
 		VkSurfaceKHR tmp {};
 		if ( !SDL_Vulkan_CreateSurface( window.get(), vk_instance.instance, nullptr, &tmp ) )
 		{
@@ -986,6 +1023,7 @@ int main()
 
 	raii::VulkanDevice vk_device;
 	{
+		OPTICK_EVENT( "create_vk_device" );
 		const VkPhysicalDeviceVulkan13Features features13 { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
 															.synchronization2 = true,
 															.dynamicRendering = true };
@@ -1025,6 +1063,7 @@ int main()
 	constexpr auto swapchain_image_format = VK_FORMAT_B8G8R8A8_UNORM;
 	raii::VulkanSwapchain vk_swapchain;
 	{
+		OPTICK_EVENT( "create_vk_swapchain" );
 		const auto swapchain_ret = vkb::SwapchainBuilder( vk_device )
 									   .set_desired_format( VkSurfaceFormatKHR { .format = swapchain_image_format,
 																				 .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR } )
@@ -1106,6 +1145,7 @@ int main()
 	raii::VkPipelineLayout vk_pipeline_layout;
 	raii::VkPipeline vk_pipeline;
 	{
+		OPTICK_EVENT( "create_vk_pipeline" );
 		VkPipelineLayout layout {};
 		const auto desc_layout = vk_descriptor_set_layout.get();
 		VkPipelineLayoutCreateInfo pipeline_layout_info { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1150,11 +1190,24 @@ int main()
 		update_descriptors( vk_device, set, linear_sampler.get(), mesh.albedo_texture.view.get(), mesh.normal_texture.view.get() );
 	}
 
+	OPTICK_POP();
+
+	if ( profile_startup )
+	{
+		OPTICK_STOP_CAPTURE();
+#ifdef _DEBUG
+		OPTICK_SAVE_CAPTURE( "startup_debug.opt" );
+#else
+		OPTICK_SAVE_CAPTURE( "startup_release.opt" );
+#endif
+	}
+
 	bool quit = false;
 	int frame_count = 0;
 
 	while ( !quit )
 	{
+		OPTICK_FRAME( "MainThread" );
 		SDL_Event event;
 		while ( SDL_PollEvent( &event ) )
 		{
