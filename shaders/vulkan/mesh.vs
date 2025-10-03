@@ -2,6 +2,9 @@
 #extension GL_EXT_buffer_reference : require
 
 layout (location = 0) out vec2 outUV;
+layout (location = 1) out vec3 outWorldPos;
+layout (location = 2) out vec3 outNormal;
+layout (location = 3) out vec4 outTangent;
 
 struct Vertex {
 
@@ -29,4 +32,7 @@ void main()
 	gl_Position = PushConstants.render_matrix * vec4(v.position, 1.0f);
 	outUV.x = v.uv_x;
 	outUV.y = v.uv_y;
+    outNormal = v.normal;
+    outWorldPos = v.position;
+    outTangent = v.tangent;
 }

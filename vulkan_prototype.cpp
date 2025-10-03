@@ -1307,7 +1307,7 @@ int main()
 		vkCmdSetViewport( frame_data.command_buffer, 0, 1, &viewport );
 
 		const VkRect2D scissor { .extent = draw_image_extent };
-		vkCmdSetScissor( frame_data.command_buffer, 0, 1, &scissor );
+		vkCmdSetScissor( frame_data.command_buffer, 0, 1, &scissor );	
 
 		const glm::mat4 view = glm::translate( glm::identity<glm::mat4>(), glm::vec3 { 0, -1, -2.5 } );
 		glm::mat4 projection = glm::perspective( glm::radians( 70.f ),
