@@ -5,6 +5,7 @@
 #include <array>
 #include <expected>
 #include <fastgltf/core.hpp>
+#include <filesystem>
 #include <memory>
 #include <print>
 #include <shaderc/shaderc.hpp>
@@ -367,6 +368,21 @@ make_shader( VkDevice device, const std::string_view source, VkShaderStageFlagBi
 		return std::unexpected( ret );
 	}
 	return raii::make( device, shader );
+}
+
+std::expected<raii::VkShaderModule, VkResult> make_shader( VkDevice device, const std::filesystem::path& path, VkShaderStageFlagBits type )
+{
+	std::string source;
+	{
+		std::ifstream istream( path );
+		if ( !istream )
+		{
+			// TODO: return proper file error
+			return std::unexpected( VK_ERROR_UNKNOWN );
+		}
+		source.assign( ( std::istreambuf_iterator<char>( istream ) ), std::istreambuf_iterator<char>() );
+	}
+	return make_shader( device, std::string_view( source ), type, path.filename().string().c_str() );
 }
 
 std::expected<raii::VkPipeline, VkResult> make_pipeline( VkDevice device,
@@ -918,37 +934,6 @@ std::vector<gpu_mesh_data> load_model( VkDevice device, VmaAllocator allocator, 
 	return gpu_meshes;
 }
 
-
-static constexpr std::string_view vertex_shader_code = R"(#version 450
-
-layout( location = 0 ) out vec3 outColor;
-
-void main()
-{
-	const vec3 positions[ 3 ] = vec3[ 3 ]( vec3( 1.f, 1.f, 0.0f ), vec3( -1.f, 1.f, 0.0f ), vec3( 0.f, -1.f, 0.0f ) );
-
-	const vec3 colors[ 3 ] = vec3[ 3 ]( vec3( 1.0f, 0.0f, 0.0f ), //red
-										vec3( 0.0f, 1.0f, 0.0f ), //green
-										vec3( 00.f, 0.0f, 1.0f ) //blue
-	);
-
-	gl_Position = vec4( positions[ gl_VertexIndex ], 1.0f );
-	outColor = colors[ gl_VertexIndex ];
-})";
-
-static constexpr std::string_view fragment_shader_code = R"(#version 450
-
-layout (location = 0) in vec3 inColor;
-layout (location = 0) out vec4 outFragColor;
-
-layout(set = 0, binding = 0) uniform sampler2D albedoTexture;
-layout(set = 0, binding = 1) uniform sampler2D normalTexture;
-
-void main() 
-{
-	outFragColor = vec4(inColor,1.0f);
-})";
-
 int main()
 {
 	if ( !SDL_Init( SDL_INIT_VIDEO ) )
@@ -1134,8 +1119,8 @@ int main()
 		}
 		vk_pipeline_layout = raii::make( vk_device, layout );
 
-		const auto vertex_shader = make_shader( vk_device, vertex_shader_code, VK_SHADER_STAGE_VERTEX_BIT, "triangle.vs" ).value();
-		const auto fragment_shader = make_shader( vk_device, fragment_shader_code, VK_SHADER_STAGE_FRAGMENT_BIT, "triangle.fs" ).value();
+		const auto vertex_shader = make_shader( vk_device, "../shaders/vulkan/triangle.vs", VK_SHADER_STAGE_VERTEX_BIT ).value();
+		const auto fragment_shader = make_shader( vk_device, "../shaders/vulkan/triangle.fs", VK_SHADER_STAGE_FRAGMENT_BIT ).value();
 
 		vk_pipeline = make_pipeline( vk_device, vk_swapchain.image_format, layout, vertex_shader.get(), fragment_shader.get() ).value();
 	}
