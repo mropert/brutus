@@ -6,6 +6,9 @@
 #include <expected>
 #include <fastgltf/core.hpp>
 #include <filesystem>
+#include <glm/ext/matrix_clip_space.hpp>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <memory>
 #include <optick.h>
 #include <print>
@@ -600,17 +603,18 @@ struct mesh
 
 struct mesh_vertex
 {
-	float position[ 3 ];
+	glm::vec3 position;
 	float u;
-	float normal[ 3 ];
+	glm::vec3 normal;
 	float v;
-	float tangent[ 4 ];
+	glm::vec4 tangent;
 };
 
 struct gpu_mesh_data
 {
 	raii::VmaBuffer vertices;
 	raii::VmaBuffer indices;
+	uint32_t indices_count;
 	raii::VulkanImage albedo_texture;
 	raii::VulkanImage normal_texture;
 	VkDeviceAddress vertices_address;
@@ -893,6 +897,7 @@ std::vector<gpu_mesh_data> load_model( VkDevice device, VmaAllocator allocator, 
 										VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 										VMA_MEMORY_USAGE_GPU_ONLY )
 							   .value();
+		gpu_data.indices_count = mesh.indices.length;
 
 		{
 			OPTICK_EVENT( "repack_vertices" );
@@ -956,6 +961,12 @@ std::vector<gpu_mesh_data> load_model( VkDevice device, VmaAllocator allocator, 
 
 	return gpu_meshes;
 }
+
+struct GPUDrawPushConstants
+{
+	glm::mat4 worldMatrix;
+	VkDeviceAddress vertexBuffer;
+};
 
 int main()
 {
@@ -1146,11 +1157,14 @@ int main()
 	raii::VkPipeline vk_pipeline;
 	{
 		OPTICK_EVENT( "create_vk_pipeline" );
+		const VkPushConstantRange constant_range { .stageFlags = VK_SHADER_STAGE_VERTEX_BIT, .size = sizeof( GPUDrawPushConstants ) };
 		VkPipelineLayout layout {};
 		const auto desc_layout = vk_descriptor_set_layout.get();
 		VkPipelineLayoutCreateInfo pipeline_layout_info { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 														  .setLayoutCount = 1,
-														  .pSetLayouts = &desc_layout };
+														  .pSetLayouts = &desc_layout,
+														  .pushConstantRangeCount = 1,
+														  .pPushConstantRanges = &constant_range };
 		const auto ret = vkCreatePipelineLayout( vk_device, &pipeline_layout_info, nullptr, &layout );
 		if ( ret )
 		{
@@ -1159,8 +1173,8 @@ int main()
 		}
 		vk_pipeline_layout = raii::make( vk_device, layout );
 
-		const auto vertex_shader = make_shader( vk_device, "../shaders/vulkan/triangle.vs", VK_SHADER_STAGE_VERTEX_BIT ).value();
-		const auto fragment_shader = make_shader( vk_device, "../shaders/vulkan/triangle.fs", VK_SHADER_STAGE_FRAGMENT_BIT ).value();
+		const auto vertex_shader = make_shader( vk_device, "../shaders/vulkan/mesh.vs", VK_SHADER_STAGE_VERTEX_BIT ).value();
+		const auto fragment_shader = make_shader( vk_device, "../shaders/vulkan/mesh.fs", VK_SHADER_STAGE_FRAGMENT_BIT ).value();
 
 		vk_pipeline = make_pipeline( vk_device, vk_swapchain.image_format, layout, vertex_shader.get(), fragment_shader.get() ).value();
 	}
@@ -1261,14 +1275,6 @@ int main()
 		vkCmdBeginRendering( frame_data.command_buffer, &renderInfo );
 
 		vkCmdBindPipeline( frame_data.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline.get() );
-		vkCmdBindDescriptorSets( frame_data.command_buffer,
-								 VK_PIPELINE_BIND_POINT_GRAPHICS,
-								 vk_pipeline_layout.get(),
-								 0,
-								 1,
-								 &mesh_sets[ frame_count % mesh_sets.size() ],
-								 0,
-								 nullptr );
 
 		const VkViewport viewport { .x = 0.f,
 									.y = 0.f,
@@ -1282,7 +1288,39 @@ int main()
 		const VkRect2D scissor { .extent = draw_image_extent };
 		vkCmdSetScissor( frame_data.command_buffer, 0, 1, &scissor );
 
-		vkCmdDraw( frame_data.command_buffer, 3, 1, 0, 0 );
+		const glm::mat4 view = glm::translate( glm::identity<glm::mat4>(), glm::vec3 { 0, 0, -2.5 } );
+		glm::mat4 projection = glm::perspective( glm::radians( 70.f ),
+												 static_cast<float>( draw_image_extent.width ) / draw_image_extent.height,
+												 0.1f,
+												 10000.f );
+
+		// invert the Y direction on projection matrix so that we are more similar
+		// to opengl and gltf axis
+		projection[ 1 ][ 1 ] *= -1;
+
+		for ( int i = 0; i < meshes.size(); ++i )
+		{
+			const GPUDrawPushConstants push_constants { .worldMatrix = projection * view, .vertexBuffer = meshes[ i ].vertices_address };
+
+			vkCmdPushConstants( frame_data.command_buffer,
+								vk_pipeline_layout.get(),
+								VK_SHADER_STAGE_VERTEX_BIT,
+								0,
+								sizeof( GPUDrawPushConstants ),
+								&push_constants );
+			vkCmdBindIndexBuffer( frame_data.command_buffer, meshes[ i ].indices.get(), 0, VK_INDEX_TYPE_UINT32 );
+
+			vkCmdBindDescriptorSets( frame_data.command_buffer,
+									 VK_PIPELINE_BIND_POINT_GRAPHICS,
+									 vk_pipeline_layout.get(),
+									 0,
+									 1,
+									 &mesh_sets[ i ],
+									 0,
+									 nullptr );
+
+			vkCmdDrawIndexed( frame_data.command_buffer, meshes[ i ].indices_count, 1, 0, 0, 0 );
+		}
 
 		vkCmdEndRendering( frame_data.command_buffer );
 
