@@ -576,52 +576,6 @@ void blit_image( VkCommandBuffer cmd, VkImage source, VkImage destination, VkExt
 	vkCmdBlitImage2( cmd, &blitInfo );
 }
 
-struct mesh_attribute
-{
-	std::size_t offset = 0;
-	std::size_t stride = 0;
-	std::size_t length = 0;
-	VkFormat format = VK_FORMAT_UNDEFINED;
-};
-
-struct mesh_texture
-{
-	fastgltf::MimeType type = fastgltf::MimeType::None;
-	std::size_t offset = 0;
-	std::size_t size = 0;
-	raii::SDL_Surface image;
-};
-
-struct mesh
-{
-	mesh_attribute positions;
-	mesh_attribute normals;
-	mesh_attribute tangents;
-	mesh_attribute uvs;
-	mesh_attribute indices;
-	mesh_texture albedo;
-	mesh_texture normal;
-};
-
-struct mesh_vertex
-{
-	glm::vec3 position;
-	float u;
-	glm::vec3 normal;
-	float v;
-	glm::vec4 tangent;
-};
-
-struct gpu_mesh_data
-{
-	raii::VmaBuffer vertices;
-	raii::VmaBuffer indices;
-	uint32_t indices_count;
-	raii::VulkanImage albedo_texture;
-	raii::VulkanImage normal_texture;
-	VkDeviceAddress vertices_address;
-};
-
 SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
 {
 	switch ( format )
@@ -678,6 +632,61 @@ std::size_t get_format_size( VkFormat format )
 			return 0;
 	}
 }
+
+struct mesh_attribute
+{
+	std::size_t offset = 0;
+	std::size_t stride = 0;
+	std::size_t length = 0;
+	VkFormat format = VK_FORMAT_UNDEFINED;
+};
+
+struct mesh_texture
+{
+	fastgltf::MimeType type = fastgltf::MimeType::None;
+	std::size_t offset = 0;
+	std::size_t size = 0;
+	raii::SDL_Surface image;
+};
+
+struct pbr_data
+{
+	float metalness;
+	float roughness;
+	glm::vec4 base_color;
+};
+
+struct mesh
+{
+	mesh_attribute positions;
+	mesh_attribute normals;
+	mesh_attribute tangents;
+	mesh_attribute uvs;
+	mesh_attribute indices;
+	mesh_texture albedo;
+	mesh_texture normal;
+	pbr_data pbr_data;
+};
+
+struct mesh_vertex
+{
+	glm::vec3 position;
+	float u;
+	glm::vec3 normal;
+	float v;
+	glm::vec4 tangent;
+};
+
+struct gpu_mesh_data
+{
+	raii::VmaBuffer vertices;
+	VkDeviceAddress vertices_address;
+	raii::VmaBuffer indices;
+	uint32_t indices_count;
+	raii::VulkanImage albedo_texture;
+	raii::VulkanImage normal_texture;
+	pbr_data pbr_data;
+};
 
 std::expected<raii::VulkanImage, VkResult> make_image_from_surface( VkDevice device, VmaAllocator allocator, const SDL_Surface& surface )
 {
@@ -821,6 +830,12 @@ std::vector<gpu_mesh_data> load_model( VkDevice device, VmaAllocator allocator, 
 			{
 				m.normal = make_texture( asset, material.normalTexture->textureIndex );
 			}
+			m.pbr_data.base_color.x = material.pbrData.baseColorFactor.x();
+			m.pbr_data.base_color.y = material.pbrData.baseColorFactor.y();
+			m.pbr_data.base_color.z = material.pbrData.baseColorFactor.z();
+			m.pbr_data.base_color.w = material.pbrData.baseColorFactor.w();
+			m.pbr_data.metalness = material.pbrData.metallicFactor;
+			m.pbr_data.roughness = material.pbrData.roughnessFactor;
 		}
 
 		for ( const auto& attribute : mesh.primitives[ 0 ].attributes )
@@ -948,6 +963,8 @@ std::vector<gpu_mesh_data> load_model( VkDevice device, VmaAllocator allocator, 
 											 offset,
 											 gpu_data.normal_texture.image.get(),
 											 *mesh.normal.image );
+
+		gpu_data.pbr_data = mesh.pbr_data;
 	}
 
 	vkEndCommandBuffer( cmd );
@@ -1167,14 +1184,17 @@ int main()
 	raii::VkPipeline vk_pipeline;
 	{
 		OPTICK_EVENT( "create_vk_pipeline" );
-		const VkPushConstantRange constant_range { .stageFlags = VK_SHADER_STAGE_VERTEX_BIT, .size = sizeof( GPUDrawPushConstants ) };
+		const std::array<VkPushConstantRange, 2> constants {
+			{ { .stageFlags = VK_SHADER_STAGE_VERTEX_BIT, .size = sizeof( GPUDrawPushConstants ) },
+			  { .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT, .offset = sizeof( GPUDrawPushConstants ), .size = sizeof( pbr_data ) } }
+		};
 		VkPipelineLayout layout {};
 		const auto desc_layout = vk_descriptor_set_layout.get();
 		VkPipelineLayoutCreateInfo pipeline_layout_info { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 														  .setLayoutCount = 1,
 														  .pSetLayouts = &desc_layout,
-														  .pushConstantRangeCount = 1,
-														  .pPushConstantRanges = &constant_range };
+														  .pushConstantRangeCount = constants.size(),
+														  .pPushConstantRanges = constants.data() };
 		const auto ret = vkCreatePipelineLayout( vk_device, &pipeline_layout_info, nullptr, &layout );
 		if ( ret )
 		{
@@ -1307,7 +1327,7 @@ int main()
 		vkCmdSetViewport( frame_data.command_buffer, 0, 1, &viewport );
 
 		const VkRect2D scissor { .extent = draw_image_extent };
-		vkCmdSetScissor( frame_data.command_buffer, 0, 1, &scissor );	
+		vkCmdSetScissor( frame_data.command_buffer, 0, 1, &scissor );
 
 		const glm::mat4 view = glm::translate( glm::identity<glm::mat4>(), glm::vec3 { 0, -1, -2.5 } );
 		glm::mat4 projection = glm::perspective( glm::radians( 70.f ),
@@ -1329,6 +1349,12 @@ int main()
 								0,
 								sizeof( GPUDrawPushConstants ),
 								&push_constants );
+			vkCmdPushConstants( frame_data.command_buffer,
+								vk_pipeline_layout.get(),
+								VK_SHADER_STAGE_FRAGMENT_BIT,
+								sizeof( GPUDrawPushConstants ),
+								sizeof( pbr_data ),
+								&meshes[ i ].pbr_data );
 			vkCmdBindIndexBuffer( frame_data.command_buffer, meshes[ i ].indices.get(), 0, VK_INDEX_TYPE_UINT32 );
 
 			vkCmdBindDescriptorSets( frame_data.command_buffer,
