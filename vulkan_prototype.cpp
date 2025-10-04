@@ -276,6 +276,7 @@ std::expected<raii::VulkanImage, VkResult> make_image( VkDevice device,
 													   VmaAllocator allocator,
 													   VkFormat format,
 													   VkExtent3D extent,
+													   VkSampleCountFlagBits samples,
 													   VkImageUsageFlags image_usage,
 													   VmaMemoryUsage memory_usage,
 													   VkImageAspectFlags aspect_flags )
@@ -286,7 +287,7 @@ std::expected<raii::VulkanImage, VkResult> make_image( VkDevice device,
 								   .extent = extent,
 								   .mipLevels = 1,
 								   .arrayLayers = 1,
-								   .samples = VK_SAMPLE_COUNT_1_BIT,
+								   .samples = samples,
 								   .tiling = VK_IMAGE_TILING_OPTIMAL,
 								   .usage = image_usage };
 
@@ -409,7 +410,7 @@ std::expected<raii::VkPipeline, VkResult> make_pipeline( VkDevice device,
 															  .cullMode = VK_CULL_MODE_NONE,
 															  .frontFace = VK_FRONT_FACE_CLOCKWISE };
 	const VkPipelineMultisampleStateCreateInfo multisampling { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-															   .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+															   .rasterizationSamples = VK_SAMPLE_COUNT_4_BIT,
 															   .minSampleShading = 1.0f };
 	const VkPipelineDepthStencilStateCreateInfo depth_stencil = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
 																  .depthTestEnable = VK_TRUE,
@@ -576,6 +577,23 @@ void blit_image( VkCommandBuffer cmd, VkImage source, VkImage destination, VkExt
 	vkCmdBlitImage2( cmd, &blitInfo );
 }
 
+void resolve_image( VkCommandBuffer cmd, VkImage source, VkImage destination, VkExtent2D size )
+{
+	const VkImageResolve resolveRegion {
+		.srcSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
+		.dstSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
+		.extent = { .width = size.width, .height = size.height, .depth = 1 }
+	};
+
+	vkCmdResolveImage( cmd,
+					   source,
+					   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					   destination,
+					   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					   1,
+					   &resolveRegion );
+}
+
 SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
 {
 	switch ( format )
@@ -700,6 +718,7 @@ std::expected<raii::VulkanImage, VkResult> make_image_from_surface( VkDevice dev
 					   allocator,
 					   format,
 					   VkExtent3D( surface.w, surface.h, 1 ),
+					   VK_SAMPLE_COUNT_1_BIT,
 					   VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
 					   VMA_MEMORY_USAGE_GPU_ONLY,
 					   VK_IMAGE_ASPECT_COLOR_BIT );
@@ -1117,6 +1136,7 @@ int main()
 										vk_allocator.get(),
 										VK_FORMAT_R16G16B16A16_SFLOAT,
 										VkExtent3D { .width = draw_image_extent.width, .height = draw_image_extent.height, .depth = 1 },
+										VK_SAMPLE_COUNT_4_BIT,
 										VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
 											| VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
 										VMA_MEMORY_USAGE_GPU_ONLY,
@@ -1126,6 +1146,7 @@ int main()
 										 vk_allocator.get(),
 										 VK_FORMAT_D32_SFLOAT,
 										 VkExtent3D { .width = draw_image_extent.width, .height = draw_image_extent.height, .depth = 1 },
+										 VK_SAMPLE_COUNT_4_BIT,
 										 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
 										 VMA_MEMORY_USAGE_GPU_ONLY,
 										 VK_IMAGE_ASPECT_DEPTH_BIT )
@@ -1380,11 +1401,10 @@ int main()
 						  VK_IMAGE_LAYOUT_UNDEFINED,
 						  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL );
 
-		blit_image( frame_data.command_buffer,
+		resolve_image( frame_data.command_buffer,
 					draw_image.image.get(),
 					vk_swapchain.images[ swapchainImageIndex ],
-					VkExtent2D { draw_image.extent.width, draw_image.extent.height },
-					vk_swapchain.extent );
+					VkExtent2D { draw_image.extent.width, draw_image.extent.height } );
 
 		transition_image( frame_data.command_buffer,
 						  vk_swapchain.images[ swapchainImageIndex ],

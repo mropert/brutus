@@ -17,8 +17,9 @@ layout(push_constant) uniform constants
 } PushConstants;
 
 const float PI = 3.14159265359;
-const vec3 lightPos = vec3(-1.0, 1.5, -0.5);
+const vec3 lightPos = vec3(-5.0, 2.0, -5.0);
 const vec3 camPos = vec3(0, -1, -2.5);
+const float lightIntensity = 75.f;
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0)
 {
@@ -78,7 +79,7 @@ void main()
 	vec3 H = normalize(V + L);
 	float distance    = length(lightPos - inFragPos);
 	float attenuation = 1.0 / (distance * distance);
-	vec3 radiance     = vec3(1.0, 1.0, 1.0) * attenuation;
+	vec3 radiance     = vec3(1.0, 1.0, 1.0) * attenuation * lightIntensity;
 
 	// cook-torrance brdf
 	float NDF = DistributionGGX(N, H, PushConstants.roughness);
