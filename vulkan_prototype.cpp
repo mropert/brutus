@@ -1402,9 +1402,9 @@ int main()
 						  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL );
 
 		resolve_image( frame_data.command_buffer,
-					draw_image.image.get(),
-					vk_swapchain.images[ swapchainImageIndex ],
-					VkExtent2D { draw_image.extent.width, draw_image.extent.height } );
+					   draw_image.image.get(),
+					   vk_swapchain.images[ swapchainImageIndex ],
+					   VkExtent2D { draw_image.extent.width, draw_image.extent.height } );
 
 		transition_image( frame_data.command_buffer,
 						  vk_swapchain.images[ swapchainImageIndex ],
