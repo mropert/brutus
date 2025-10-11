@@ -6,14 +6,16 @@ layout (location = 2) in vec3 inNormal;
 layout (location = 3) in vec4 inTangent;
 layout (location = 0) out vec4 outFragColor;
 
-layout(set = 0, binding = 0) uniform sampler2D albedoTexture;
-layout(set = 0, binding = 1) uniform sampler2D normalTexture;
+layout(set = 0, binding = 0) uniform texture2D textures[1024];
+layout(set = 0, binding = 1) uniform sampler sampl;
 
 layout(push_constant) uniform constants
 {
-	layout(offset = 72) float metalness;
+	layout(offset = 80) vec4 baseColor;
+	float metalness;
 	float roughness;
-	vec4 baseColor;
+	uint albedo_index;
+	uint normal_index;
 } PushConstants;
 
 const float PI = 3.14159265359;
@@ -62,13 +64,13 @@ float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness)
 
 void main()
 {
-	vec3 albedo = texture(albedoTexture, inUV).xyz * PushConstants.baseColor.xyz;
+	vec3 albedo = texture(sampler2D(textures[PushConstants.albedo_index], sampl), inUV).xyz * PushConstants.baseColor.xyz;
 	vec3 F0 = vec3(0.04);
     F0 = mix(F0, albedo, PushConstants.metalness);
 
 	vec3 normal = normalize(inNormal);
 	vec3 tangent = normalize(inTangent.xyz);
-	vec3 normalDisplacement = normalize((texture(normalTexture, inUV).xyz * 2.0) - 1.0);
+	vec3 normalDisplacement = normalize((texture(sampler2D(textures[PushConstants.normal_index], sampl), inUV).xyz * 2.0) - 1.0);
 	normalDisplacement.y *= inTangent.w;
 	mat3 TBN = mat3(tangent, cross(normal, tangent), normal	);
 	vec3 N = normalize(TBN * normalDisplacement);

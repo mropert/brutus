@@ -466,16 +466,15 @@ std::expected<raii::VkPipeline, VkResult> make_pipeline( VkDevice device,
 	return raii::make( device, gfx_pipeline );
 }
 
-std::expected<raii::VkDescriptorSetLayout, VkResult> make_descriptor_set_layout( VkDevice device )
+std::expected<raii::VkDescriptorSetLayout, VkResult> make_descriptor_set_layout( VkDevice device, uint32_t image_count )
 {
-	const std::array<VkDescriptorSetLayoutBinding, 2> bindings { { { .binding = 0,
-																	 .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-																	 .descriptorCount = 1,
-																	 .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
-																   { .binding = 1,
-																	 .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-																	 .descriptorCount = 1,
-																	 .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT } } };
+	const std::array<VkDescriptorSetLayoutBinding, 2> bindings {
+		{ { .binding = 0,
+			.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+			.descriptorCount = image_count,
+			.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+		  { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT } }
+	};
 
 	VkDescriptorSetLayoutCreateInfo info { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
 										   .bindingCount = bindings.size(),
@@ -490,12 +489,12 @@ std::expected<raii::VkDescriptorSetLayout, VkResult> make_descriptor_set_layout(
 	return raii::make( device, set );
 }
 
-std::expected<raii::VkDescriptorPool, VkResult> make_descriptor_pool( VkDevice device, uint32_t count )
+std::expected<raii::VkDescriptorPool, VkResult> make_descriptor_pool( VkDevice device, uint32_t image_count )
 {
-	const std::array<VkDescriptorPoolSize, 1> pools { { { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-														  .descriptorCount = 2 * count } } };
+	const std::array<VkDescriptorPoolSize, 2> pools { { { .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = image_count },
+														{ .type = VK_DESCRIPTOR_TYPE_SAMPLER, .descriptorCount = 1 } } };
 	const VkDescriptorPoolCreateInfo create_info { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-												   .maxSets = count,
+												   .maxSets = image_count + 1,
 												   .poolSizeCount = pools.size(),
 												   .pPoolSizes = pools.data() };
 	VkDescriptorPool pool = nullptr;
@@ -507,25 +506,28 @@ std::expected<raii::VkDescriptorPool, VkResult> make_descriptor_pool( VkDevice d
 	return raii::make( device, pool );
 }
 
-void update_descriptors( VkDevice device, VkDescriptorSet set, VkSampler sampler, VkImageView image1, VkImageView image2 )
+void update_descriptors( VkDevice device, VkDescriptorSet set, VkSampler sampler, std::span<VkImageView> images )
 {
-	const std::array<VkDescriptorImageInfo, 2> infos {
-		{ { .sampler = sampler, .imageView = image1, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
-		  { .sampler = sampler, .imageView = image2, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL } }
-	};
+	std::vector<VkDescriptorImageInfo> images_info;
+	for ( const auto image : images )
+	{
+		images_info.emplace_back( nullptr, image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	}
+
+	const VkDescriptorImageInfo sampler_info { .sampler = sampler };
 
 	const std::array<VkWriteDescriptorSet, 2> writes { { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 														   .dstSet = set,
 														   .dstBinding = 0,
-														   .descriptorCount = 1,
-														   .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-														   .pImageInfo = &infos[ 0 ] },
+														   .descriptorCount = static_cast<uint32_t>( images_info.size() ),
+														   .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+														   .pImageInfo = images_info.data() },
 														 { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 														   .dstSet = set,
 														   .dstBinding = 1,
 														   .descriptorCount = 1,
-														   .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-														   .pImageInfo = &infos[ 1 ] } } };
+														   .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
+														   .pImageInfo = &sampler_info } } };
 
 	vkUpdateDescriptorSets( device, writes.size(), writes.data(), 0, nullptr );
 }
@@ -669,9 +671,9 @@ struct mesh_texture
 
 struct pbr_data
 {
+	glm::vec4 base_color;
 	float metalness;
 	float roughness;
-	glm::vec4 base_color;
 };
 
 struct mesh
@@ -1000,10 +1002,20 @@ std::vector<gpu_mesh_data> load_model( VkDevice device, VmaAllocator allocator, 
 	return gpu_meshes;
 }
 
-struct GPUDrawPushConstants
+struct gpu_vertex_constants
 {
 	glm::mat4 worldMatrix;
 	VkDeviceAddress vertexBuffer;
+	std::byte padding[ 8 ];
+};
+
+static_assert( sizeof( gpu_vertex_constants ) % 16 == 0, "GPU vertex constants should be a multiple of 16 bytes" );
+
+struct gpu_fragment_constants
+{
+	pbr_data pbr_data;
+	uint32_t albedo_texture_index;
+	uint32_t normal_texture_index;
 };
 
 int main()
@@ -1197,18 +1209,38 @@ int main()
 		vk_frame_data[ i ].swapchain_semaphore = make_semaphore( vk_device ).value();
 	}
 
-	const auto vk_descriptor_set_layout = *make_descriptor_set_layout( vk_device );
-	const auto vk_descriptor_pool = *make_descriptor_pool( vk_device, 256 );
+	VkCommandBuffer transfer_command_buffer {};
+	{
+		const VkCommandBufferAllocateInfo cmdAllocInfo = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+														   .commandPool = vk_command_pool.get(),
+														   .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+														   .commandBufferCount = 1 };
+
+		vkAllocateCommandBuffers( vk_device, &cmdAllocInfo, &transfer_command_buffer );
+	}
+	const auto transfer_fence = make_fence( vk_device, 0 ).value();
+
+	const auto meshes = load_model( vk_device, vk_allocator.get(), transfer_command_buffer, transfer_fence.get(), vk_gfx_queue );
+	std::vector<VkImageView> textures;
+	for ( const auto& mesh : meshes )
+	{
+		textures.emplace_back( mesh.albedo_texture.view.get() );
+		textures.emplace_back( mesh.normal_texture.view.get() );
+	}
+
+	const auto vk_descriptor_set_layout = *make_descriptor_set_layout( vk_device, textures.size() );
+	const auto vk_descriptor_pool = *make_descriptor_pool( vk_device, textures.size() );
 	const auto linear_sampler = *make_sampler( vk_device, VK_FILTER_LINEAR );
 
 	raii::VkPipelineLayout vk_pipeline_layout;
 	raii::VkPipeline vk_pipeline;
 	{
 		OPTICK_EVENT( "create_vk_pipeline" );
-		const std::array<VkPushConstantRange, 2> constants {
-			{ { .stageFlags = VK_SHADER_STAGE_VERTEX_BIT, .size = sizeof( GPUDrawPushConstants ) },
-			  { .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT, .offset = sizeof( GPUDrawPushConstants ), .size = sizeof( pbr_data ) } }
-		};
+		const std::array<VkPushConstantRange, 2> constants { { { .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+																 .size = sizeof( gpu_vertex_constants ) },
+															   { .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+																 .offset = sizeof( gpu_vertex_constants ),
+																 .size = sizeof( gpu_fragment_constants ) } } };
 		VkPipelineLayout layout {};
 		const auto desc_layout = vk_descriptor_set_layout.get();
 		VkPipelineLayoutCreateInfo pipeline_layout_info { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1230,29 +1262,15 @@ int main()
 		vk_pipeline = make_pipeline( vk_device, vk_swapchain.image_format, layout, vertex_shader.get(), fragment_shader.get() ).value();
 	}
 
-	VkCommandBuffer transfer_command_buffer {};
-	{
-		const VkCommandBufferAllocateInfo cmdAllocInfo = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-														   .commandPool = vk_command_pool.get(),
-														   .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-														   .commandBufferCount = 1 };
-
-		vkAllocateCommandBuffers( vk_device, &cmdAllocInfo, &transfer_command_buffer );
-	}
-	const auto transfer_fence = make_fence( vk_device, 0 ).value();
-
-	const auto meshes = load_model( vk_device, vk_allocator.get(), transfer_command_buffer, transfer_fence.get(), vk_gfx_queue );
-	std::vector<VkDescriptorSet> mesh_sets;
-	for ( const auto& mesh : meshes )
+	VkDescriptorSet mesh_set;
 	{
 		const auto layout = vk_descriptor_set_layout.get();
 		const VkDescriptorSetAllocateInfo alloc_info { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
 													   .descriptorPool = vk_descriptor_pool.get(),
 													   .descriptorSetCount = 1,
 													   .pSetLayouts = &layout };
-		auto& set = mesh_sets.emplace_back( nullptr );
-		vkAllocateDescriptorSets( vk_device, &alloc_info, &set );
-		update_descriptors( vk_device, set, linear_sampler.get(), mesh.albedo_texture.view.get(), mesh.normal_texture.view.get() );
+		vkAllocateDescriptorSets( vk_device, &alloc_info, &mesh_set );
+		update_descriptors( vk_device, mesh_set, linear_sampler.get(), textures );
 	}
 
 	OPTICK_POP();
@@ -1350,6 +1368,15 @@ int main()
 		const VkRect2D scissor { .extent = draw_image_extent };
 		vkCmdSetScissor( frame_data.command_buffer, 0, 1, &scissor );
 
+		vkCmdBindDescriptorSets( frame_data.command_buffer,
+								 VK_PIPELINE_BIND_POINT_GRAPHICS,
+								 vk_pipeline_layout.get(),
+								 0,
+								 1,
+								 &mesh_set,
+								 0,
+								 nullptr );
+
 		const glm::mat4 view = glm::translate( glm::identity<glm::mat4>(), glm::vec3 { 0, -1, -2.5 } );
 		glm::mat4 projection = glm::perspective( glm::radians( 70.f ),
 												 static_cast<float>( draw_image_extent.width ) / draw_image_extent.height,
@@ -1360,32 +1387,26 @@ int main()
 		// to opengl and gltf axis
 		projection[ 1 ][ 1 ] *= -1;
 
-		for ( int i = 0; i < meshes.size(); ++i )
+		for ( uint32_t i = 0; i < meshes.size(); ++i )
 		{
-			const GPUDrawPushConstants push_constants { .worldMatrix = projection * view, .vertexBuffer = meshes[ i ].vertices_address };
+			const gpu_vertex_constants vertex_constants { .worldMatrix = projection * view, .vertexBuffer = meshes[ i ].vertices_address };
+			const gpu_fragment_constants fragment_constants { .pbr_data = meshes[ i ].pbr_data,
+															  .albedo_texture_index = i * 2,
+															  .normal_texture_index = i * 2 + 1 };
 
 			vkCmdPushConstants( frame_data.command_buffer,
 								vk_pipeline_layout.get(),
 								VK_SHADER_STAGE_VERTEX_BIT,
 								0,
-								sizeof( GPUDrawPushConstants ),
-								&push_constants );
+								sizeof( gpu_vertex_constants ),
+								&vertex_constants );
 			vkCmdPushConstants( frame_data.command_buffer,
 								vk_pipeline_layout.get(),
 								VK_SHADER_STAGE_FRAGMENT_BIT,
-								sizeof( GPUDrawPushConstants ),
-								sizeof( pbr_data ),
-								&meshes[ i ].pbr_data );
+								sizeof( gpu_vertex_constants ),
+								sizeof( gpu_fragment_constants ),
+								&fragment_constants );
 			vkCmdBindIndexBuffer( frame_data.command_buffer, meshes[ i ].indices.get(), 0, VK_INDEX_TYPE_UINT32 );
-
-			vkCmdBindDescriptorSets( frame_data.command_buffer,
-									 VK_PIPELINE_BIND_POINT_GRAPHICS,
-									 vk_pipeline_layout.get(),
-									 0,
-									 1,
-									 &mesh_sets[ i ],
-									 0,
-									 nullptr );
 
 			vkCmdDrawIndexed( frame_data.command_buffer, meshes[ i ].indices_count, 1, 0, 0, 0 );
 		}
