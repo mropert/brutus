@@ -63,12 +63,23 @@ target_sources(VkBoostrap PRIVATE third_party/vk-bootstrap/v1.4.305/VkBootstrap.
 target_include_directories(VkBoostrap PUBLIC third_party/vk-bootstrap/v1.4.305)
 target_link_libraries(VkBoostrap PUBLIC Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator)
 
+add_library( VulkanHppModule )
+target_sources( VulkanHppModule PRIVATE
+  FILE_SET CXX_MODULES
+  BASE_DIRS ${Vulkan_INCLUDE_DIR}
+  FILES ${Vulkan_INCLUDE_DIR}/vulkan/vulkan.cppm
+)
+target_compile_features( VulkanHppModule PUBLIC cxx_std_23 )
+target_link_libraries( VulkanHppModule PUBLIC Vulkan::Vulkan )
+
 add_executable(brutus-vulkan)
 target_compile_features(brutus-vulkan PRIVATE cxx_std_23)
 target_sources(brutus-vulkan PRIVATE vulkan_prototype.cpp vma_impl.cpp)
 target_compile_definitions(brutus-vulkan PRIVATE GLM_FORCE_INTRINSICS GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_link_libraries(brutus-vulkan PRIVATE SDL3::SDL3 Vulkan::Vulkan VkBoostrap unofficial::shaderc::shaderc fastgltf::fastgltf glm::glm-header-only)
 target_link_libraries(brutus-vulkan PRIVATE $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image-shared>,SDL3_image::SDL3_image-shared,SDL3_image::SDL3_image-static>)
+target_link_libraries(brutus-vulkan PRIVATE VulkanHppModule)
+
 if(USE_OPTICK)
 	target_compile_definitions(brutus-vulkan PRIVATE USE_OPTICK)
 	target_include_directories(brutus-vulkan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../optick/include)

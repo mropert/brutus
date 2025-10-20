@@ -17,6 +17,13 @@
 #include <stdexcept>
 #include <vma/vk_mem_alloc.h>
 
+#if defined( __INTELLISENSE__ )
+#include <vulkan/vulkan.hpp>
+#include <vulkan/vulkan_raii.hpp>
+#else
+import vulkan_hpp;
+#endif
+
 namespace raii
 {
 	struct SDL_WindowDeleter
@@ -317,7 +324,7 @@ std::expected<raii::VulkanImage, VkResult> make_image( VkDevice device,
 													  .baseMipLevel = 0,
 													  .levelCount = 1,
 													  .baseArrayLayer = 0,
-													  .layerCount = 1,
+													  .layerCount = 1
 												  } };
 
 	VkImageView view;
@@ -612,6 +619,7 @@ void blit_image( VkCommandBuffer cmd, VkImage source, VkImage destination, VkExt
 
 void resolve_image( VkCommandBuffer cmd, VkImage source, VkImage destination, VkExtent2D size )
 {
+	OPTICK_GPU_EVENT( "Resolve Image" );
 	const VkImageResolve resolveRegion {
 		.srcSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
 		.dstSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
@@ -1060,7 +1068,7 @@ int main()
 		}
 	}
 
-	const VkExtent2D window_extent { .width = 1024, .height = 768 };
+	const VkExtent2D window_extent { .width = 1920, .height = 1080 };
 	const raii::SDL_Window window(
 		SDL_CreateWindow( "Brutus-ng Vulkan", window_extent.width, window_extent.height, SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN ) );
 	if ( !window )
@@ -1143,6 +1151,16 @@ int main()
 		std::println( "Using hardware device: {}", props.properties.deviceName );
 	}
 
+	const auto vk_gfx_queue = vk_device.get_queue( vkb::QueueType::graphics ).value();
+	const auto vk_gfx_queue_family = vk_device.get_queue_index( vkb::QueueType::graphics ).value();
+
+	OPTICK_GPU_INIT_VULKAN( &vk_device.device,
+							&vk_device.physical_device.physical_device,
+							const_cast<VkQueue*>( &vk_gfx_queue ),
+							const_cast<uint32_t*>( &vk_gfx_queue_family ),
+							1,
+							nullptr );
+
 	constexpr auto swapchain_image_format = VK_FORMAT_B8G8R8A8_UNORM;
 	raii::VulkanSwapchain vk_swapchain;
 	{
@@ -1185,9 +1203,6 @@ int main()
 										 VMA_MEMORY_USAGE_GPU_ONLY,
 										 VK_IMAGE_ASPECT_DEPTH_BIT )
 								 .value();
-
-	const auto vk_gfx_queue = vk_device.get_queue( vkb::QueueType::graphics ).value();
-	const auto vk_gfx_queue_family = vk_device.get_queue_index( vkb::QueueType::graphics ).value();
 
 	raii::VkCommandPool vk_command_pool;
 	{
@@ -1311,13 +1326,20 @@ int main()
 
 		auto& frame_data = vk_frame_data[ frame_count % 2 ];
 
-		const auto fence = frame_data.render_fence.get();
-		vkWaitForFences( vk_device, 1, &fence, true, 1000000000 );
-		vkResetFences( vk_device, 1, &fence );
+		{
+			OPTICK_EVENT( "Await RenderFence" );
+			const auto fence = frame_data.render_fence.get();
+			vkWaitForFences( vk_device, 1, &fence, true, 1000000000 );
+			vkResetFences( vk_device, 1, &fence );
+		}
 
 		uint32_t swapchainImageIndex;
-		vkAcquireNextImageKHR( vk_device, vk_swapchain, 1000000000, frame_data.render_semaphore.get(), nullptr, &swapchainImageIndex );
+		{
+			OPTICK_EVENT( "Acquire Swapchain" );
+			vkAcquireNextImageKHR( vk_device, vk_swapchain, 1000000000, frame_data.render_semaphore.get(), nullptr, &swapchainImageIndex );
+		}
 
+		OPTICK_GPU_CONTEXT( frame_data.command_buffer );
 		vkResetCommandBuffer( frame_data.command_buffer, 0 );
 
 		const VkCommandBufferBeginInfo cmdBeginInfo { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -1332,7 +1354,7 @@ int main()
 
 		VkClearColorValue clearValue;
 		float flash = std::abs( std::sin( frame_count / 120.f ) );
-		clearValue = { { 0.0f, 0.0f, flash, 1.0f } };
+		clearValue = { { flash, flash, flash, 1.0f } };
 
 		const VkImageSubresourceRange clearRange { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
 												   .levelCount = VK_REMAINING_MIP_LEVELS,
@@ -1385,7 +1407,7 @@ int main()
 								 0,
 								 nullptr );
 
-		const glm::mat4 view = glm::translate( glm::identity<glm::mat4>(), glm::vec3 { 0, -1, -2.5 } );
+		const glm::mat4 view = glm::translate( glm::identity<glm::mat4>(), glm::vec3 { 0, -0.9, -1.5 } );
 		glm::mat4 projection = glm::perspective( glm::radians( 70.f ),
 												 static_cast<float>( draw_image_extent.width ) / draw_image_extent.height,
 												 10000.f,
@@ -1397,6 +1419,8 @@ int main()
 
 		for ( const auto& mesh : meshes )
 		{
+			OPTICK_GPU_EVENT( "Draw Mesh" );
+
 			const gpu_vertex_constants vertex_constants { .worldMatrix = projection * view, .vertexBuffer = mesh.vertices_address };
 
 			vkCmdPushConstants( frame_data.command_buffer,
@@ -1463,6 +1487,8 @@ int main()
 		};
 		vkQueueSubmit2( vk_gfx_queue, 1, &submitInfo, frame_data.render_fence.get() );
 
+		OPTICK_GPU_FLIP( vk_swapchain.swapchain );
+
 		const auto semaphore = frame_data.render_semaphore.get();
 		const VkPresentInfoKHR presentInfo = {
 			.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -1479,6 +1505,8 @@ int main()
 
 	// Wait for the GPU to finish before we roll all the destructors
 	vkDeviceWaitIdle( vk_device );
+
+	OPTICK_SHUTDOWN();
 
 	return 0;
 }
