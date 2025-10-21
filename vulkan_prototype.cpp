@@ -315,17 +315,13 @@ std::expected<raii::VulkanImage, VkResult> make_image( VkDevice device,
 	allocated_image.extent = extent;
 	allocated_image.format = format;
 
-	const VkImageViewCreateInfo image_view_info { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-												  .image = image,
-												  .viewType = VK_IMAGE_VIEW_TYPE_2D,
-												  .format = format,
-												  .subresourceRange = {
-													  .aspectMask = aspect_flags,
-													  .baseMipLevel = 0,
-													  .levelCount = 1,
-													  .baseArrayLayer = 0,
-													  .layerCount = 1
-												  } };
+	const VkImageViewCreateInfo image_view_info {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+		.image = image,
+		.viewType = VK_IMAGE_VIEW_TYPE_2D,
+		.format = format,
+		.subresourceRange = { .aspectMask = aspect_flags, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 }
+	};
 
 	VkImageView view;
 	ret = vkCreateImageView( device, &image_view_info, nullptr, &view );
@@ -658,7 +654,7 @@ SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
 	}
 }
 
-VkFormat sdl_to_vulkan_format( SDL_PixelFormat format )
+VkFormat sdl_to_vulkan_format( SDL_PixelFormat format, bool sRGB = false )
 {
 	switch ( format )
 	{
@@ -668,10 +664,10 @@ VkFormat sdl_to_vulkan_format( SDL_PixelFormat format )
 			return VK_FORMAT_B5G5R5A1_UNORM_PACK16;
 		case SDL_PIXELFORMAT_BGRA32:
 		case SDL_PIXELFORMAT_BGRX32:
-			return VK_FORMAT_B8G8R8A8_UNORM;
+			return sRGB ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM;
 		case SDL_PIXELFORMAT_RGBA32:
 		case SDL_PIXELFORMAT_RGBX32:
-			return VK_FORMAT_R8G8B8A8_UNORM;
+			return sRGB ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
 		default:
 			return VK_FORMAT_UNDEFINED;
 	}
@@ -752,10 +748,10 @@ struct gpu_mesh_data
 	gpu_material material;
 };
 
-std::expected<raii::VulkanImage, VkResult> make_image_from_surface( VkDevice device, VmaAllocator allocator, const SDL_Surface& surface )
+std::expected<raii::VulkanImage, VkResult> make_image_from_surface( VkDevice device, VmaAllocator allocator, const SDL_Surface& surface, bool sRGB )
 {
 	OPTICK_EVENT();
-	const auto format = sdl_to_vulkan_format( sdl_gpu_format( surface.format ) );
+	const auto format = sdl_to_vulkan_format( sdl_gpu_format( surface.format ), sRGB );
 	if ( format == VK_FORMAT_UNDEFINED )
 	{
 		return std::unexpected( VK_ERROR_FORMAT_NOT_SUPPORTED );
@@ -1014,11 +1010,11 @@ load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, VkFenc
 		vkCmdCopyBuffer( cmd, transfer_buffer.get(), gpu_data.indices.get(), 1, &indexCopy );
 		offset += sizeof( uint32_t ) * mesh.indices.length;
 
-		auto tex = *make_image_from_surface( device, allocator, *mesh.albedo.image );
+		auto tex = *make_image_from_surface( device, allocator, *mesh.albedo.image, true );
 		offset += upload_image_from_surface( cmd, transfer_buffer.get(), ptr, offset, tex.image.get(), *mesh.albedo.image );
 		gpu_data.material.albedo_texture_index = tex_manager.add_texture( std::move( tex ) );
 
-		tex = *make_image_from_surface( device, allocator, *mesh.normal.image );
+		tex = *make_image_from_surface( device, allocator, *mesh.normal.image, false );
 		offset += upload_image_from_surface( cmd, transfer_buffer.get(), ptr, offset, tex.image.get(), *mesh.normal.image );
 		gpu_data.material.normal_texture_index = tex_manager.add_texture( std::move( tex ) );
 
@@ -1161,7 +1157,7 @@ int main()
 							1,
 							nullptr );
 
-	constexpr auto swapchain_image_format = VK_FORMAT_B8G8R8A8_UNORM;
+	constexpr auto swapchain_image_format = VK_FORMAT_B8G8R8A8_SRGB;
 	raii::VulkanSwapchain vk_swapchain;
 	{
 		OPTICK_EVENT( "create_vk_swapchain" );
@@ -1354,6 +1350,7 @@ int main()
 
 		VkClearColorValue clearValue;
 		float flash = std::abs( std::sin( frame_count / 120.f ) );
+		flash = 0.1f;
 		clearValue = { { flash, flash, flash, 1.0f } };
 
 		const VkImageSubresourceRange clearRange { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,

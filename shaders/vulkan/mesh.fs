@@ -19,8 +19,8 @@ layout(push_constant) uniform constants
 } PushConstants;
 
 const float PI = 3.14159265359;
-const vec3 lightPos = vec3(-20.0, 0.0, -10.0);
-const vec3 camPos = vec3(0, -1, -2.5);
+const vec3 lightPos = vec3(20.0, 0.0, 10.0);
+const vec3 camPos = vec3(0, -0.9, -1.5);
 const float lightIntensity = 2.5f;
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0)
@@ -62,6 +62,23 @@ float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness)
 	return ggx1 * ggx2;
 }
 
+void main_flat()
+{
+	vec3 albedo = texture(sampler2D(textures[PushConstants.albedo_index], sampl), inUV).xyz * PushConstants.baseColor.xyz;
+	outFragColor = vec4(albedo, 1.0);
+}
+
+void main_basic_diffuse()
+{
+	vec3 albedo = texture(sampler2D(textures[PushConstants.albedo_index], sampl), inUV).xyz * PushConstants.baseColor.xyz;
+	vec3 N = normalize(inNormal);
+	vec3 L = normalize(lightPos);
+	float NdotL = max(dot(N, -L), 0.0);
+
+	albedo = albedo * (NdotL + 0.1);
+	outFragColor = vec4(albedo, 1.0);
+}
+
 void main()
 {
 	vec3 albedo = texture(sampler2D(textures[PushConstants.albedo_index], sampl), inUV).xyz * PushConstants.baseColor.xyz;
@@ -77,7 +94,7 @@ void main()
 
 	vec3 V = normalize(camPos - inFragPos);
 
-	vec3 L = normalize(lightPos);
+	vec3 L = normalize(-lightPos);
 	vec3 H = normalize(V + L);
 	float attenuation = lightIntensity;
 	vec3 radiance     = vec3(1.0, 1.0, 1.0) * attenuation;
@@ -102,8 +119,8 @@ void main()
     vec3 ambient = vec3(0.03) * albedo;// * ao;
     vec3 color = ambient + Lo;
 
-    color = color / (color + vec3(1.0));
-    color = pow(color, vec3(1.0/2.2));
+    //color = color / (color + vec3(1.0));
+    //color = pow(color, vec3(1.0/2.2));
 
     outFragColor = vec4(color, 1.0);
 }
