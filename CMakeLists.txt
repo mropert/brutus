@@ -1,25 +1,29 @@
 cmake_minimum_required(VERSION 3.18)
 project(brutus-ng CXX)
 
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 find_package(raylib CONFIG REQUIRED)
 find_package(Catch2 CONFIG REQUIRED)
 
 add_compile_options(/Zi /MP)
 add_link_options(/DEBUG)
 
+add_library(Optick INTERFACE)
+if(USE_OPTICK)
+	set(OPTICK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../optick)
+	target_compile_definitions(Optick INTERFACE USE_OPTICK)
+	target_include_directories(Optick INTERFACE ${OPTICK_DIR}/include)
+	target_link_libraries(Optick INTERFACE
+		debug ${OPTICK_DIR}/lib/x64/debug/OptickCore.lib
+		optimized ${OPTICK_DIR}/lib/x64/release/OptickCore.lib)
+endif()
+
 add_library(utils INTERFACE)
-target_compile_features(utils INTERFACE cxx_std_20)
 target_include_directories(utils INTERFACE src)
 target_include_directories(utils INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/../raylib-cpp/include)
-target_link_libraries(utils INTERFACE raylib)
-
-if(USE_OPTICK)
-	target_compile_definitions(utils INTERFACE USE_OPTICK)
-	target_include_directories(utils INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/../optick/include)
-	target_link_libraries(utils INTERFACE
-		debug ${CMAKE_CURRENT_SOURCE_DIR}/../optick/lib/x64/debug/OptickCore.lib
-		optimized ${CMAKE_CURRENT_SOURCE_DIR}/../optick/lib/x64/release/OptickCore.lib)
-endif()
+target_link_libraries(utils INTERFACE raylib Optick)
 
 add_executable(brutus-ng)
 target_sources(brutus-ng
@@ -40,7 +44,6 @@ find_package(SDL3 CONFIG REQUIRED)
 find_package(unofficial-shaderc CONFIG REQUIRED)
 
 add_executable(brutus-sdl)
-target_compile_features(brutus-sdl PRIVATE cxx_std_23)
 target_sources(brutus-sdl PRIVATE sdl_test.cpp)
 target_link_libraries(brutus-sdl PRIVATE SDL3::SDL3 unofficial::shaderc::shaderc)
 if(USE_OPTICK)
@@ -58,7 +61,6 @@ find_package(SDL3_image CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 
 add_library(VkBoostrap STATIC)
-target_compile_features(VkBoostrap PRIVATE cxx_std_23)
 target_sources(VkBoostrap PRIVATE third_party/vk-bootstrap/v1.4.305/VkBootstrap.cpp)
 target_include_directories(VkBoostrap PUBLIC third_party/vk-bootstrap/v1.4.305)
 target_link_libraries(VkBoostrap PUBLIC Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator)
@@ -69,24 +71,29 @@ target_sources( VulkanHppModule PRIVATE
   BASE_DIRS ${Vulkan_INCLUDE_DIR}
   FILES ${Vulkan_INCLUDE_DIR}/vulkan/vulkan.cppm
 )
-target_compile_features( VulkanHppModule PUBLIC cxx_std_23 )
 target_link_libraries( VulkanHppModule PUBLIC Vulkan::Vulkan )
 
+add_library(renderer)
+target_sources(renderer
+	PRIVATE
+		src/renderer/device.cpp
+		src/renderer/swapchain.cpp
+		src/renderer/texture.cpp
+		src/renderer/vma_impl.cpp
+)
+target_include_directories(renderer PUBLIC src)
+target_link_libraries(renderer PRIVATE SDL3::SDL3 Vulkan::Vulkan VkBoostrap unofficial::shaderc::shaderc fastgltf::fastgltf)
+target_link_libraries(renderer PRIVATE $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image-shared>,SDL3_image::SDL3_image-shared,SDL3_image::SDL3_image-static>)
+target_link_libraries(renderer PUBLIC VulkanHppModule)
+target_link_libraries(renderer PRIVATE Optick)
+
 add_executable(brutus-vulkan)
-target_compile_features(brutus-vulkan PRIVATE cxx_std_23)
-target_sources(brutus-vulkan PRIVATE vulkan_prototype.cpp vma_impl.cpp)
+target_sources(brutus-vulkan PRIVATE vulkan_prototype.cpp)
 target_compile_definitions(brutus-vulkan PRIVATE GLM_FORCE_INTRINSICS GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_link_libraries(brutus-vulkan PRIVATE SDL3::SDL3 Vulkan::Vulkan VkBoostrap unofficial::shaderc::shaderc fastgltf::fastgltf glm::glm-header-only)
 target_link_libraries(brutus-vulkan PRIVATE $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image-shared>,SDL3_image::SDL3_image-shared,SDL3_image::SDL3_image-static>)
-target_link_libraries(brutus-vulkan PRIVATE VulkanHppModule)
-
-if(USE_OPTICK)
-	target_compile_definitions(brutus-vulkan PRIVATE USE_OPTICK)
-	target_include_directories(brutus-vulkan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../optick/include)
-	target_link_libraries(brutus-vulkan PRIVATE
-		debug ${CMAKE_CURRENT_SOURCE_DIR}/../optick/lib/x64/debug/OptickCore.lib
-		optimized ${CMAKE_CURRENT_SOURCE_DIR}/../optick/lib/x64/release/OptickCore.lib)
-endif()
+target_link_libraries(brutus-vulkan PRIVATE renderer)
+target_link_libraries(brutus-vulkan PRIVATE Optick)
 
 enable_testing()
 

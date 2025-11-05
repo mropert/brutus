@@ -1,7 +1,6 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <SDL3_image/SDL_image.h>
-#include <VkBootstrap.h>
 #include <array>
 #include <expected>
 #include <fastgltf/core.hpp>
@@ -15,40 +14,14 @@
 #include <shaderc/shaderc.hpp>
 #include <span>
 #include <stdexcept>
-#include <vma/vk_mem_alloc.h>
 
-#if defined( __INTELLISENSE__ )
-#include <vulkan/vulkan.hpp>
-#include <vulkan/vulkan_raii.hpp>
-#else
-import vulkan_hpp;
-#endif
+//
+
+#include <renderer/device.h>
+#include <renderer/swapchain.h>
 
 namespace raii
 {
-	struct SDL_WindowDeleter
-	{
-		void operator()( ::SDL_Window* window ) const { SDL_DestroyWindow( window ); }
-	};
-	using SDL_Window = std::unique_ptr<::SDL_Window, SDL_WindowDeleter>;
-
-	struct SDL_SurfaceDeleter
-	{
-		void operator()( ::SDL_Surface* surface ) const { SDL_DestroySurface( surface ); }
-	};
-	using SDL_Surface = std::unique_ptr<::SDL_Surface, SDL_SurfaceDeleter>;
-
-	struct VkSurfaceKHRDeleter
-	{
-		VkInstance instance;
-		void operator()( ::VkSurfaceKHR surface ) const { vkDestroySurfaceKHR( instance, surface, nullptr ); }
-	};
-	using VkSurfaceKHR = std::unique_ptr<::VkSurfaceKHR_T, VkSurfaceKHRDeleter>;
-	VkSurfaceKHR make( ::VkInstance instance, ::VkSurfaceKHR surface )
-	{
-		return { surface, VkSurfaceKHRDeleter( instance ) };
-	}
-
 	struct VkObjectDeleter
 	{
 		::VkDevice device;
@@ -83,160 +56,14 @@ namespace raii
 	using VkSemaphore = VkObject<::VkSemaphore>;
 	using VkShaderModule = VkObject<::VkShaderModule>;
 
-	namespace details
-	{
-		template <class... T>
-		constexpr bool always_false = false;
-
-		template <typename T>
-		void DeleteVulkanResource( T& )
-		{
-			static_assert( always_false<T>, "No deleter defined for type" );
-		}
-
-		template <>
-		void DeleteVulkanResource( vkb::Instance& instance )
-		{
-			if ( instance.instance )
-			{
-				vkb::destroy_instance( instance );
-			}
-		}
-
-		template <>
-		void DeleteVulkanResource( vkb::Device& device )
-		{
-			if ( device.device )
-			{
-				vkb::destroy_device( device );
-			}
-		}
-	}
-
-	template <typename T>
-	struct VulkanResource : T
-	{
-		VulkanResource() = default;
-		VulkanResource( const T& res )
-			: T( res )
-		{
-		}
-		~VulkanResource() { details::DeleteVulkanResource<T>( *this ); }
-		VulkanResource( const VulkanResource& ) = delete;
-		VulkanResource( VulkanResource&& rhs ) noexcept
-			: T( rhs )
-		{
-			static_cast<T&>( rhs ) = T {};
-		}
-		VulkanResource& operator=( const VulkanResource& ) = delete;
-		VulkanResource& operator=( VulkanResource&& rhs ) noexcept
-		{
-			details::DeleteVulkanResource<T>( *this );
-			static_cast<T&>( *this ) = rhs;
-			static_cast<T&>( rhs ) = T {};
-			return *this;
-		}
-	};
-
-	using VulkanInstance = VulkanResource<vkb::Instance>;
-	using VulkanDevice = VulkanResource<vkb::Device>;
-
-	// Custom version for Swapchain to hold the image views
-	struct VulkanSwapchain : vkb::Swapchain
-	{
-		std::vector<::VkImage> images;
-		std::vector<::VkImageView> image_views;
-
-		VulkanSwapchain() = default;
-		VulkanSwapchain( const vkb::Swapchain& swapchain )
-			: vkb::Swapchain( swapchain )
-			, images( get_images().value() )
-			, image_views( get_image_views().value() )
-		{
-		}
-		~VulkanSwapchain() { free_resources(); }
-		VulkanSwapchain( const VulkanSwapchain& ) = delete;
-		VulkanSwapchain( VulkanSwapchain&& rhs ) noexcept
-			: vkb::Swapchain( rhs )
-			, images( std::move( rhs.images ) )
-			, image_views( std::move( rhs.image_views ) )
-
-		{
-			static_cast<vkb::Swapchain&>( rhs ) = vkb::Swapchain {};
-		}
-		VulkanSwapchain& operator=( const VulkanSwapchain& ) = delete;
-		VulkanSwapchain& operator=( VulkanSwapchain&& rhs ) noexcept
-		{
-			free_resources();
-			static_cast<vkb::Swapchain&>( *this ) = rhs;
-			images = std::move( rhs.images );
-			image_views = std::move( rhs.image_views );
-			static_cast<vkb::Swapchain&>( rhs ) = vkb::Swapchain {};
-			return *this;
-		}
-
-		void free_resources()
-		{
-			if ( swapchain )
-			{
-				destroy_image_views( image_views );
-				vkb::destroy_swapchain( *this );
-			}
-		}
-	};
-
-	struct VmaAllocatorDeleter
-	{
-		void operator()( ::VmaAllocator allocator ) const { vmaDestroyAllocator( allocator ); }
-	};
-	using VmaAllocator = std::unique_ptr<::VmaAllocator_T, VmaAllocatorDeleter>;
-
-	struct VmaResourceDeleter
-	{
-		::VmaAllocator allocator;
-		::VmaAllocation allocation;
-		::VmaAllocationInfo info;
-		void operator()( ::VkBuffer buffer ) const { vmaDestroyBuffer( allocator, buffer, allocation ); }
-		void operator()( ::VkImage image ) const { vmaDestroyImage( allocator, image, allocation ); }
-	};
-	template <typename T>
-	using VmaResource = std::unique_ptr<std::remove_pointer_t<T>, VmaResourceDeleter>;
-
-	template <typename T>
-	auto make( ::VmaAllocator allocator, T object, ::VmaAllocation allocation, const ::VmaAllocationInfo& info )
-	{
-		return VmaResource<T> { object, VmaResourceDeleter { allocator, allocation, info } };
-	}
-
-	using VmaBuffer = VmaResource<::VkBuffer>;
-	using VmaImage = VmaResource<::VkImage>;
-
 	struct VulkanImage
 	{
-		VmaImage image;
+		vma::raii::Image image;
 		VkImageView view;
 		::VkExtent3D extent;
 		::VkFormat format;
 	};
 }
-
-std::expected<raii::VmaAllocator, VkResult> make_allocator( VkInstance instance, VkPhysicalDevice phys_device, VkDevice device )
-{
-	VmaAllocator allocator {};
-	const VmaAllocatorCreateInfo allocatorInfo = {
-		.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
-		.physicalDevice = phys_device,
-		.device = device,
-		.instance = instance,
-	};
-	const auto ret = vmaCreateAllocator( &allocatorInfo, &allocator );
-	if ( ret )
-	{
-		return std::unexpected( ret );
-	}
-	return raii::VmaAllocator( allocator );
-}
-
 
 std::expected<raii::VkFence, VkResult> make_fence( VkDevice device, VkFenceCreateFlags flags )
 {
@@ -262,7 +89,7 @@ std::expected<raii::VkSemaphore, VkResult> make_semaphore( VkDevice device )
 	return raii::make( device, semaphore );
 }
 
-std::expected<raii::VmaBuffer, VkResult>
+std::expected<vma::raii::Buffer, VkResult>
 make_buffer( VmaAllocator allocator, size_t size, VkBufferUsageFlags buffer_usage, VmaMemoryUsage memory_usage )
 {
 	const VkBufferCreateInfo bufferInfo { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = buffer_usage };
@@ -277,7 +104,7 @@ make_buffer( VmaAllocator allocator, size_t size, VkBufferUsageFlags buffer_usag
 		return std::unexpected( ret );
 	}
 
-	return raii::make( allocator, buffer, allocation, info );
+	return vma::raii::make( allocator, buffer, allocation, info );
 }
 
 std::expected<raii::VulkanImage, VkResult> make_image( VkDevice device,
@@ -311,7 +138,7 @@ std::expected<raii::VulkanImage, VkResult> make_image( VkDevice device,
 	}
 
 	raii::VulkanImage allocated_image;
-	allocated_image.image = raii::make( allocator, image, allocation, allocation_info );
+	allocated_image.image = vma::raii::make( allocator, image, allocation, allocation_info );
 	allocated_image.extent = extent;
 	allocated_image.format = format;
 
@@ -701,7 +528,7 @@ struct mesh_texture
 	fastgltf::MimeType type = fastgltf::MimeType::None;
 	std::size_t offset = 0;
 	std::size_t size = 0;
-	raii::SDL_Surface image;
+	sdl::raii::Surface image;
 };
 
 struct pbr_data
@@ -741,14 +568,15 @@ struct gpu_material
 
 struct gpu_mesh_data
 {
-	raii::VmaBuffer vertices;
+	vma::raii::Buffer vertices;
 	VkDeviceAddress vertices_address;
-	raii::VmaBuffer indices;
+	vma::raii::Buffer indices;
 	uint32_t indices_count;
 	gpu_material material;
 };
 
-std::expected<raii::VulkanImage, VkResult> make_image_from_surface( VkDevice device, VmaAllocator allocator, const SDL_Surface& surface, bool sRGB )
+std::expected<raii::VulkanImage, VkResult>
+make_image_from_surface( VkDevice device, VmaAllocator allocator, const SDL_Surface& surface, bool sRGB )
 {
 	OPTICK_EVENT();
 	const auto format = sdl_to_vulkan_format( sdl_gpu_format( surface.format ), sRGB );
@@ -1055,134 +883,22 @@ int main()
 
 	OPTICK_PUSH( "Startup" );
 
-	{
-		OPTICK_EVENT( "SDL_init" );
-		if ( !SDL_Init( SDL_INIT_VIDEO ) )
-		{
-			std::println( stderr, "Failed to initialize SDL: {}", SDL_GetError() );
-			return 1;
-		}
-	}
+	renderer::Device device( "Brutus-NG [Vulkan]" );
 
-	const VkExtent2D window_extent { .width = 1920, .height = 1080 };
-	const raii::SDL_Window window(
-		SDL_CreateWindow( "Brutus-ng Vulkan", window_extent.width, window_extent.height, SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN ) );
-	if ( !window )
-	{
-		std::println( stderr, "Failed to create window: {}", SDL_GetError() );
-		return 1;
-	}
-
-	raii::VulkanInstance vk_instance;
-	{
-		OPTICK_EVENT( "create_vk_instance" );
-		Uint32 ext_count = 0;
-		const auto exts = SDL_Vulkan_GetInstanceExtensions( &ext_count );
-
-		const auto vk_instance_result = vkb::InstanceBuilder()
-											.set_app_name( "Brutus-ng Vulkan" )
-											.request_validation_layers( true )
-											.use_default_debug_messenger()
-											.require_api_version( 1, 3, 0 )
-											.enable_extensions( ext_count, exts )
-											.build();
-
-		if ( !vk_instance_result )
-		{
-			std::println( stderr, "Failed to init vulkan: {}", vk_instance_result.error().message() );
-			return 1;
-		}
-
-		vk_instance = vk_instance_result.value();
-	}
-
-	raii::VkSurfaceKHR vk_surface;
-	{
-		OPTICK_EVENT( "create_vk_surface" );
-		VkSurfaceKHR tmp {};
-		if ( !SDL_Vulkan_CreateSurface( window.get(), vk_instance.instance, nullptr, &tmp ) )
-		{
-			std::println( stderr, "Failed to create SDL vulkan surface: {}", SDL_GetError() );
-			return 1;
-		}
-		vk_surface = raii::make( vk_instance, tmp );
-	}
-
-	raii::VulkanDevice vk_device;
-	{
-		OPTICK_EVENT( "create_vk_device" );
-		const VkPhysicalDeviceVulkan13Features features13 { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-															.synchronization2 = true,
-															.dynamicRendering = true };
-
-		const VkPhysicalDeviceVulkan12Features features12 { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-															.descriptorIndexing = true,
-															.bufferDeviceAddress = true };
-
-		const auto physical_device_ret = vkb::PhysicalDeviceSelector( vk_instance )
-											 .set_minimum_version( 1, 3 )
-											 .set_required_features_13( features13 )
-											 .set_required_features_12( features12 )
-											 .set_surface( vk_surface.get() )
-											 .select();
-
-		if ( !physical_device_ret )
-		{
-			std::println( stderr, "Cannot find a suitable hardware device: {}", physical_device_ret.error().message() );
-			return 1;
-		}
-
-		const auto device_ret = vkb::DeviceBuilder( physical_device_ret.value() ).build();
-		if ( !device_ret )
-		{
-			std::println( stderr, "Cannot create hardware device: {}", device_ret.error().message() );
-			return 1;
-		}
-
-		vk_device = device_ret.value();
-
-		VkPhysicalDeviceProperties2 props { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
-		vkGetPhysicalDeviceProperties2( vk_device.physical_device, &props );
-
-		std::println( "Using hardware device: {}", props.properties.deviceName );
-	}
-
-	const auto vk_gfx_queue = vk_device.get_queue( vkb::QueueType::graphics ).value();
-	const auto vk_gfx_queue_family = vk_device.get_queue_index( vkb::QueueType::graphics ).value();
-
-	OPTICK_GPU_INIT_VULKAN( &vk_device.device,
-							&vk_device.physical_device.physical_device,
-							const_cast<VkQueue*>( &vk_gfx_queue ),
-							const_cast<uint32_t*>( &vk_gfx_queue_family ),
-							1,
-							nullptr );
+	VkDevice vk_device = *device._device;
+	VkPhysicalDevice physical_device = *device._physical_device;
+	VkQueue gfx_queue = *device._gfx_queue;
+	OPTICK_GPU_INIT_VULKAN( &vk_device, &physical_device, &gfx_queue, &device._gfx_queue_family_index, 1, nullptr );
 
 	constexpr auto swapchain_image_format = VK_FORMAT_B8G8R8A8_SRGB;
-	raii::VulkanSwapchain vk_swapchain;
-	{
-		OPTICK_EVENT( "create_vk_swapchain" );
-		const auto swapchain_ret = vkb::SwapchainBuilder( vk_device )
-									   .set_desired_format( VkSurfaceFormatKHR { .format = swapchain_image_format,
-																				 .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR } )
-									   .set_desired_present_mode( VK_PRESENT_MODE_FIFO_KHR )
-									   .set_desired_extent( window_extent.width, window_extent.height )
-									   .add_image_usage_flags( VK_IMAGE_USAGE_TRANSFER_DST_BIT )
-									   .build();
-		if ( !swapchain_ret )
-		{
-			std::println( stderr, "Cannot create hardware device: {}", swapchain_ret.error().message() );
-			return 1;
-		}
+	renderer::Swapchain swapchain( device, swapchain_image_format );
+	VkSwapchainKHR vk_swapchain = *swapchain._swapchain;
 
-		vk_swapchain = swapchain_ret.value();
-	}
-
-	const auto vk_allocator = make_allocator( vk_instance, vk_device.physical_device, vk_device ).value();
-
-	const VkExtent2D draw_image_extent = window_extent;
+	const VkExtent2D draw_image_extent = device.get_extent();
+	constexpr auto draw_image_format = VK_FORMAT_R16G16B16A16_SFLOAT;
 	const auto draw_image = make_image( vk_device,
-										vk_allocator.get(),
-										VK_FORMAT_R16G16B16A16_SFLOAT,
+										device._allocator.get(),
+										draw_image_format,
 										VkExtent3D { .width = draw_image_extent.width, .height = draw_image_extent.height, .depth = 1 },
 										VK_SAMPLE_COUNT_4_BIT,
 										VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
@@ -1191,7 +907,7 @@ int main()
 										VK_IMAGE_ASPECT_COLOR_BIT )
 								.value();
 	const auto depth_image = make_image( vk_device,
-										 vk_allocator.get(),
+										 device._allocator.get(),
 										 VK_FORMAT_D32_SFLOAT,
 										 VkExtent3D { .width = draw_image_extent.width, .height = draw_image_extent.height, .depth = 1 },
 										 VK_SAMPLE_COUNT_4_BIT,
@@ -1204,7 +920,7 @@ int main()
 	{
 		const VkCommandPoolCreateInfo commandPoolInfo = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
 														  .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-														  .queueFamilyIndex = vk_gfx_queue_family };
+														  .queueFamilyIndex = device._gfx_queue_family_index };
 		VkCommandPool pool;
 		const auto ret = vkCreateCommandPool( vk_device, &commandPoolInfo, nullptr, &pool );
 		if ( ret )
@@ -1281,14 +997,14 @@ int main()
 		const auto vertex_shader = make_shader( vk_device, "../shaders/vulkan/mesh.vs", VK_SHADER_STAGE_VERTEX_BIT ).value();
 		const auto fragment_shader = make_shader( vk_device, "../shaders/vulkan/mesh.fs", VK_SHADER_STAGE_FRAGMENT_BIT ).value();
 
-		vk_pipeline = make_pipeline( vk_device, vk_swapchain.image_format, layout, vertex_shader.get(), fragment_shader.get() ).value();
+		vk_pipeline = make_pipeline( vk_device, draw_image_format, layout, vertex_shader.get(), fragment_shader.get() ).value();
 	}
 
 	const auto meshes = load_model( vk_device,
-									vk_allocator.get(),
+									device._allocator.get(),
 									transfer_command_buffer,
 									transfer_fence.get(),
-									vk_gfx_queue,
+									gfx_queue,
 									tex_manager );
 	tex_manager.update_descriptors();
 
@@ -1332,7 +1048,7 @@ int main()
 		uint32_t swapchainImageIndex;
 		{
 			OPTICK_EVENT( "Acquire Swapchain" );
-			vkAcquireNextImageKHR( vk_device, vk_swapchain, 1000000000, frame_data.render_semaphore.get(), nullptr, &swapchainImageIndex );
+			vkAcquireNextImageKHR( vk_device, *swapchain._swapchain, 1000000000, frame_data.render_semaphore.get(), nullptr, &swapchainImageIndex );
 		}
 
 		OPTICK_GPU_CONTEXT( frame_data.command_buffer );
@@ -1444,17 +1160,17 @@ int main()
 						  VK_IMAGE_LAYOUT_GENERAL,
 						  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL );
 		transition_image( frame_data.command_buffer,
-						  vk_swapchain.images[ swapchainImageIndex ],
+						  swapchain._images[ swapchainImageIndex ],
 						  VK_IMAGE_LAYOUT_UNDEFINED,
 						  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL );
 
 		resolve_image( frame_data.command_buffer,
 					   draw_image.image.get(),
-					   vk_swapchain.images[ swapchainImageIndex ],
+					   swapchain._images[ swapchainImageIndex ],
 					   VkExtent2D { draw_image.extent.width, draw_image.extent.height } );
 
 		transition_image( frame_data.command_buffer,
-						  vk_swapchain.images[ swapchainImageIndex ],
+						  swapchain._images[ swapchainImageIndex ],
 						  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 						  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR );
 
@@ -1482,9 +1198,9 @@ int main()
 			.signalSemaphoreInfoCount = 1,
 			.pSignalSemaphoreInfos = &signalInfo,
 		};
-		vkQueueSubmit2( vk_gfx_queue, 1, &submitInfo, frame_data.render_fence.get() );
+		vkQueueSubmit2( gfx_queue, 1, &submitInfo, frame_data.render_fence.get() );
 
-		OPTICK_GPU_FLIP( vk_swapchain.swapchain );
+		OPTICK_GPU_FLIP( *swapchain._swapchain );
 
 		const auto semaphore = frame_data.render_semaphore.get();
 		const VkPresentInfoKHR presentInfo = {
@@ -1492,10 +1208,10 @@ int main()
 			.waitSemaphoreCount = 1,
 			.pWaitSemaphores = &semaphore,
 			.swapchainCount = 1,
-			.pSwapchains = &vk_swapchain.swapchain,
+			.pSwapchains = &vk_swapchain,
 			.pImageIndices = &swapchainImageIndex,
 		};
-		vkQueuePresentKHR( vk_gfx_queue, &presentInfo );
+		vkQueuePresentKHR( gfx_queue, &presentInfo );
 
 		++frame_count;
 	}
