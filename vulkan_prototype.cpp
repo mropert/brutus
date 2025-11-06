@@ -1048,7 +1048,12 @@ int main()
 		uint32_t swapchainImageIndex;
 		{
 			OPTICK_EVENT( "Acquire Swapchain" );
-			vkAcquireNextImageKHR( vk_device, *swapchain._swapchain, 1000000000, frame_data.render_semaphore.get(), nullptr, &swapchainImageIndex );
+			vkAcquireNextImageKHR( vk_device,
+								   *swapchain._swapchain,
+								   1000000000,
+								   frame_data.swapchain_semaphore.get(),
+								   nullptr,
+								   &swapchainImageIndex );
 		}
 
 		OPTICK_GPU_CONTEXT( frame_data.command_buffer );

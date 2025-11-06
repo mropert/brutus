@@ -76,6 +76,7 @@ target_link_libraries( VulkanHppModule PUBLIC Vulkan::Vulkan )
 add_library(renderer)
 target_sources(renderer
 	PRIVATE
+		src/renderer/command_buffer.cpp
 		src/renderer/device.cpp
 		src/renderer/swapchain.cpp
 		src/renderer/texture.cpp
