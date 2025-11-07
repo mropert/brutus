@@ -17,8 +17,10 @@
 
 //
 
+#include <renderer/command_buffer.h>
 #include <renderer/device.h>
 #include <renderer/swapchain.h>
+#include <renderer/texture.h>
 
 namespace raii
 {
@@ -916,60 +918,7 @@ int main()
 										 VK_IMAGE_ASPECT_DEPTH_BIT )
 								 .value();
 
-	raii::VkCommandPool vk_command_pool;
-	{
-		const VkCommandPoolCreateInfo commandPoolInfo = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-														  .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-														  .queueFamilyIndex = device._gfx_queue_family_index };
-		VkCommandPool pool;
-		const auto ret = vkCreateCommandPool( vk_device, &commandPoolInfo, nullptr, &pool );
-		if ( ret )
-		{
-			std::println( stderr, "Cannot create command pool: {}", static_cast<int>( ret ) );
-			return 1;
-		}
-		vk_command_pool = raii::make( vk_device, pool );
-	}
-
-	struct FrameData
-	{
-		VkCommandBuffer command_buffer;
-		raii::VkFence render_fence;
-		raii::VkSemaphore render_semaphore;
-		raii::VkSemaphore swapchain_semaphore;
-	};
-
-	std::array<FrameData, 2> vk_frame_data;
-	for ( int i = 0; i < vk_frame_data.size(); ++i )
-	{
-		const VkCommandBufferAllocateInfo cmdAllocInfo = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-														   .commandPool = vk_command_pool.get(),
-														   .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-														   .commandBufferCount = 1 };
-
-		auto ret = vkAllocateCommandBuffers( vk_device, &cmdAllocInfo, &vk_frame_data[ i ].command_buffer );
-		if ( ret )
-		{
-			std::println( stderr, "Cannot allocate command buffer: {}", static_cast<int>( ret ) );
-			return 1;
-		}
-		vk_frame_data[ i ].render_fence = make_fence( vk_device, VK_FENCE_CREATE_SIGNALED_BIT ).value();
-		vk_frame_data[ i ].render_semaphore = make_semaphore( vk_device ).value();
-		vk_frame_data[ i ].swapchain_semaphore = make_semaphore( vk_device ).value();
-	}
-
 	TextureManager tex_manager( vk_device );
-
-	VkCommandBuffer transfer_command_buffer {};
-	{
-		const VkCommandBufferAllocateInfo cmdAllocInfo = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-														   .commandPool = vk_command_pool.get(),
-														   .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-														   .commandBufferCount = 1 };
-
-		vkAllocateCommandBuffers( vk_device, &cmdAllocInfo, &transfer_command_buffer );
-	}
-	const auto transfer_fence = make_fence( vk_device, 0 ).value();
 
 	raii::VkPipelineLayout vk_pipeline_layout;
 	raii::VkPipeline vk_pipeline;
@@ -1000,12 +949,17 @@ int main()
 		vk_pipeline = make_pipeline( vk_device, draw_image_format, layout, vertex_shader.get(), fragment_shader.get() ).value();
 	}
 
+
+	auto transfer_command_buffer = device.grab_command_buffer();
+	const auto transfer_fence = make_fence( vk_device, 0 ).value();
+
 	const auto meshes = load_model( vk_device,
 									device._allocator.get(),
-									transfer_command_buffer,
+									*transfer_command_buffer->_cmd_buffer,
 									transfer_fence.get(),
 									gfx_queue,
 									tex_manager );
+	transfer_command_buffer.reset();
 	tex_manager.update_descriptors();
 
 	OPTICK_POP();
@@ -1036,38 +990,16 @@ int main()
 			}
 		}
 
-		auto& frame_data = vk_frame_data[ frame_count % 2 ];
+		auto [ image_index, swapchain_image ] = swapchain.acquire();
+		auto command_buffer = device.grab_command_buffer();
+		const VkCommandBuffer cmd = *command_buffer->_cmd_buffer;
 
-		{
-			OPTICK_EVENT( "Await RenderFence" );
-			const auto fence = frame_data.render_fence.get();
-			vkWaitForFences( vk_device, 1, &fence, true, 1000000000 );
-			vkResetFences( vk_device, 1, &fence );
-		}
+		OPTICK_GPU_CONTEXT( cmd );
+		command_buffer->reset();
+		command_buffer->begin();
 
-		uint32_t swapchainImageIndex;
-		{
-			OPTICK_EVENT( "Acquire Swapchain" );
-			vkAcquireNextImageKHR( vk_device,
-								   *swapchain._swapchain,
-								   1000000000,
-								   frame_data.swapchain_semaphore.get(),
-								   nullptr,
-								   &swapchainImageIndex );
-		}
-
-		OPTICK_GPU_CONTEXT( frame_data.command_buffer );
-		vkResetCommandBuffer( frame_data.command_buffer, 0 );
-
-		const VkCommandBufferBeginInfo cmdBeginInfo { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-													  .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
-		vkBeginCommandBuffer( frame_data.command_buffer, &cmdBeginInfo );
-
-		transition_image( frame_data.command_buffer, draw_image.image.get(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL );
-		transition_image( frame_data.command_buffer,
-						  depth_image.image.get(),
-						  VK_IMAGE_LAYOUT_UNDEFINED,
-						  VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL );
+		transition_image( cmd, draw_image.image.get(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL );
+		transition_image( cmd, depth_image.image.get(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL );
 
 		VkClearColorValue clearValue;
 		float flash = std::abs( std::sin( frame_count / 120.f ) );
@@ -1077,7 +1009,7 @@ int main()
 		const VkImageSubresourceRange clearRange { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
 												   .levelCount = VK_REMAINING_MIP_LEVELS,
 												   .layerCount = VK_REMAINING_ARRAY_LAYERS };
-		vkCmdClearColorImage( frame_data.command_buffer, draw_image.image.get(), VK_IMAGE_LAYOUT_GENERAL, &clearValue, 1, &clearRange );
+		vkCmdClearColorImage( cmd, draw_image.image.get(), VK_IMAGE_LAYOUT_GENERAL, &clearValue, 1, &clearRange );
 
 		const VkRenderingAttachmentInfo color_attachment {
 			.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -1100,9 +1032,9 @@ int main()
 										   .pColorAttachments = &color_attachment,
 										   .pDepthAttachment = &depth_attachment };
 
-		vkCmdBeginRendering( frame_data.command_buffer, &renderInfo );
+		vkCmdBeginRendering( cmd, &renderInfo );
 
-		vkCmdBindPipeline( frame_data.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline.get() );
+		vkCmdBindPipeline( cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline.get() );
 
 		const VkViewport viewport { .x = 0.f,
 									.y = 0.f,
@@ -1111,19 +1043,12 @@ int main()
 									.minDepth = 0.f,
 									.maxDepth = 1.f };
 
-		vkCmdSetViewport( frame_data.command_buffer, 0, 1, &viewport );
+		vkCmdSetViewport( cmd, 0, 1, &viewport );
 
 		const VkRect2D scissor { .extent = draw_image_extent };
-		vkCmdSetScissor( frame_data.command_buffer, 0, 1, &scissor );
+		vkCmdSetScissor( cmd, 0, 1, &scissor );
 
-		vkCmdBindDescriptorSets( frame_data.command_buffer,
-								 VK_PIPELINE_BIND_POINT_GRAPHICS,
-								 vk_pipeline_layout.get(),
-								 0,
-								 1,
-								 &tex_manager.m_desc,
-								 0,
-								 nullptr );
+		vkCmdBindDescriptorSets( cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline_layout.get(), 0, 1, &tex_manager.m_desc, 0, nullptr );
 
 		const glm::mat4 view = glm::translate( glm::identity<glm::mat4>(), glm::vec3 { 0, -0.9, -1.5 } );
 		glm::mat4 projection = glm::perspective( glm::radians( 70.f ),
@@ -1141,82 +1066,42 @@ int main()
 
 			const gpu_vertex_constants vertex_constants { .worldMatrix = projection * view, .vertexBuffer = mesh.vertices_address };
 
-			vkCmdPushConstants( frame_data.command_buffer,
+			vkCmdPushConstants( cmd,
 								vk_pipeline_layout.get(),
 								VK_SHADER_STAGE_VERTEX_BIT,
 								0,
 								sizeof( gpu_vertex_constants ),
 								&vertex_constants );
-			vkCmdPushConstants( frame_data.command_buffer,
+			vkCmdPushConstants( cmd,
 								vk_pipeline_layout.get(),
 								VK_SHADER_STAGE_FRAGMENT_BIT,
 								sizeof( gpu_vertex_constants ),
 								sizeof( gpu_material ),
 								&mesh.material );
-			vkCmdBindIndexBuffer( frame_data.command_buffer, mesh.indices.get(), 0, VK_INDEX_TYPE_UINT32 );
+			vkCmdBindIndexBuffer( cmd, mesh.indices.get(), 0, VK_INDEX_TYPE_UINT32 );
 
-			vkCmdDrawIndexed( frame_data.command_buffer, mesh.indices_count, 1, 0, 0, 0 );
+			vkCmdDrawIndexed( cmd, mesh.indices_count, 1, 0, 0, 0 );
 		}
 
-		vkCmdEndRendering( frame_data.command_buffer );
+		vkCmdEndRendering( cmd );
 
-		transition_image( frame_data.command_buffer,
-						  draw_image.image.get(),
-						  VK_IMAGE_LAYOUT_GENERAL,
-						  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL );
-		transition_image( frame_data.command_buffer,
-						  swapchain._images[ swapchainImageIndex ],
-						  VK_IMAGE_LAYOUT_UNDEFINED,
-						  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL );
+		transition_image( cmd, draw_image.image.get(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL );
+		swapchain_image.transition( *command_buffer, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal );
 
-		resolve_image( frame_data.command_buffer,
+		resolve_image( cmd,
 					   draw_image.image.get(),
-					   swapchain._images[ swapchainImageIndex ],
+					   swapchain_image._image.get(),
 					   VkExtent2D { draw_image.extent.width, draw_image.extent.height } );
 
-		transition_image( frame_data.command_buffer,
-						  swapchain._images[ swapchainImageIndex ],
-						  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-						  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR );
+		swapchain_image.transition( *command_buffer, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::ePresentSrcKHR );
 
-		vkEndCommandBuffer( frame_data.command_buffer );
+		command_buffer->end();
 
-		const VkCommandBufferSubmitInfo cmdSubmitInfo { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-														.commandBuffer = frame_data.command_buffer };
-
-		const VkSemaphoreSubmitInfo waitInfo { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-											   .semaphore = frame_data.swapchain_semaphore.get(),
-											   .value = 1,
-											   .stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR };
-
-		const VkSemaphoreSubmitInfo signalInfo { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-												 .semaphore = frame_data.render_semaphore.get(),
-												 .value = 1,
-												 .stageMask = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT };
-
-		const VkSubmitInfo2 submitInfo {
-			.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-			.waitSemaphoreInfoCount = 1,
-			.pWaitSemaphoreInfos = &waitInfo,
-			.commandBufferInfoCount = 1,
-			.pCommandBufferInfos = &cmdSubmitInfo,
-			.signalSemaphoreInfoCount = 1,
-			.pSignalSemaphoreInfos = &signalInfo,
-		};
-		vkQueueSubmit2( gfx_queue, 1, &submitInfo, frame_data.render_fence.get() );
+		swapchain.submit( *command_buffer );
 
 		OPTICK_GPU_FLIP( *swapchain._swapchain );
 
-		const auto semaphore = frame_data.render_semaphore.get();
-		const VkPresentInfoKHR presentInfo = {
-			.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-			.waitSemaphoreCount = 1,
-			.pWaitSemaphores = &semaphore,
-			.swapchainCount = 1,
-			.pSwapchains = &vk_swapchain,
-			.pImageIndices = &swapchainImageIndex,
-		};
-		vkQueuePresentKHR( gfx_queue, &presentInfo );
+		swapchain.present();
 
 		++frame_count;
 	}
