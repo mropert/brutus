@@ -798,7 +798,7 @@ load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, VkFenc
 								.value();
 
 		const VkBufferDeviceAddressInfo deviceAdressInfo { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-														   .buffer = gpu_data.vertices.get() };
+														   .buffer = VkBuffer( gpu_data.vertices.get() ) };
 		gpu_data.vertices_address = vkGetBufferDeviceAddress( device, &deviceAdressInfo );
 
 		gpu_data.indices = make_buffer( allocator,
@@ -832,12 +832,12 @@ load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, VkFenc
 			}
 		}
 		const VkBufferCopy vertexCopy { .srcOffset = offset, .dstOffset = 0, .size = sizeof( mesh_vertex ) * mesh.positions.length };
-		vkCmdCopyBuffer( cmd, transfer_buffer.get(), gpu_data.vertices.get(), 1, &vertexCopy );
+		vkCmdCopyBuffer( cmd, VkBuffer( transfer_buffer.get() ), VkBuffer( gpu_data.vertices.get() ), 1, &vertexCopy );
 		offset += sizeof( mesh_vertex ) * mesh.positions.length;
 
 		memcpy( ptr + offset, gltf_buffer.data() + mesh.indices.offset, sizeof( uint32_t ) * mesh.indices.length );
 		const VkBufferCopy indexCopy { .srcOffset = offset, .dstOffset = 0, .size = sizeof( uint32_t ) * mesh.indices.length };
-		vkCmdCopyBuffer( cmd, transfer_buffer.get(), gpu_data.indices.get(), 1, &indexCopy );
+		vkCmdCopyBuffer( cmd, VkBuffer( transfer_buffer.get() ), VkBuffer( gpu_data.indices.get() ), 1, &indexCopy );
 		offset += sizeof( uint32_t ) * mesh.indices.length;
 
 		auto tex = *make_image_from_surface( device, allocator, *mesh.albedo.image, true );
@@ -1090,7 +1090,7 @@ int main()
 
 		resolve_image( cmd,
 					   draw_image.image.get(),
-					   swapchain_image._image.get(),
+					   swapchain_image._image,
 					   VkExtent2D { draw_image.extent.width, draw_image.extent.height } );
 
 		swapchain_image.transition( *command_buffer, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::ePresentSrcKHR );
