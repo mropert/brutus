@@ -896,27 +896,20 @@ int main()
 	renderer::Swapchain swapchain( device, swapchain_image_format );
 	VkSwapchainKHR vk_swapchain = *swapchain._swapchain;
 
-	const VkExtent2D draw_image_extent = device.get_extent();
-	constexpr auto draw_image_format = VK_FORMAT_R16G16B16A16_SFLOAT;
-	const auto draw_image = make_image( vk_device,
-										device._allocator.get(),
-										draw_image_format,
-										VkExtent3D { .width = draw_image_extent.width, .height = draw_image_extent.height, .depth = 1 },
-										VK_SAMPLE_COUNT_4_BIT,
-										VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
-											| VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-										VMA_MEMORY_USAGE_GPU_ONLY,
-										VK_IMAGE_ASPECT_COLOR_BIT )
-								.value();
-	const auto depth_image = make_image( vk_device,
-										 device._allocator.get(),
-										 VK_FORMAT_D32_SFLOAT,
-										 VkExtent3D { .width = draw_image_extent.width, .height = draw_image_extent.height, .depth = 1 },
-										 VK_SAMPLE_COUNT_4_BIT,
-										 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-										 VMA_MEMORY_USAGE_GPU_ONLY,
-										 VK_IMAGE_ASPECT_DEPTH_BIT )
-								 .value();
+	const auto draw_image_extent = device.get_extent();
+	constexpr auto draw_image_format = renderer::Texture::Format::R16G16B16A16_SFLOAT;
+	using usage = renderer::Texture::Usage;
+	auto draw_image = device.create_texture( draw_image_format,
+											 usage::TRANSFER_SRC | usage::TRANSFER_DST | usage::COLOR_ATTACHMENT,
+											 draw_image_extent,
+											 4 );
+	auto draw_image_view = device.create_texture_view( draw_image, renderer::TextureView::Aspect::COLOR );
+
+	auto depth_image = device.create_texture( renderer::Texture::Format::D32_SFLOAT,
+											  usage::DEPTH_STENCIL_ATTACHMENT,
+											  draw_image_extent,
+											  4 );
+	auto depth_image_view = device.create_texture_view( depth_image, renderer::TextureView::Aspect::DEPTH );
 
 	TextureManager tex_manager( vk_device );
 
@@ -946,7 +939,12 @@ int main()
 		const auto vertex_shader = make_shader( vk_device, "../shaders/vulkan/mesh.vs", VK_SHADER_STAGE_VERTEX_BIT ).value();
 		const auto fragment_shader = make_shader( vk_device, "../shaders/vulkan/mesh.fs", VK_SHADER_STAGE_FRAGMENT_BIT ).value();
 
-		vk_pipeline = make_pipeline( vk_device, draw_image_format, layout, vertex_shader.get(), fragment_shader.get() ).value();
+		vk_pipeline = make_pipeline( vk_device,
+									 static_cast<VkFormat>( draw_image_format ),
+									 layout,
+									 vertex_shader.get(),
+									 fragment_shader.get() )
+						  .value();
 	}
 
 
@@ -998,29 +996,23 @@ int main()
 		command_buffer->reset();
 		command_buffer->begin();
 
-		transition_image( cmd, draw_image.image.get(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL );
-		transition_image( cmd, depth_image.image.get(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL );
+		draw_image.transition( *command_buffer, vk::ImageLayout::eUndefined, vk::ImageLayout::eColorAttachmentOptimal );
+		depth_image.transition( *command_buffer, vk::ImageLayout::eUndefined, vk::ImageLayout::eDepthAttachmentOptimal );
 
 		VkClearColorValue clearValue;
 		float flash = std::abs( std::sin( frame_count / 120.f ) );
 		flash = 0.1f;
 		clearValue = { { flash, flash, flash, 1.0f } };
 
-		const VkImageSubresourceRange clearRange { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-												   .levelCount = VK_REMAINING_MIP_LEVELS,
-												   .layerCount = VK_REMAINING_ARRAY_LAYERS };
-		vkCmdClearColorImage( cmd, draw_image.image.get(), VK_IMAGE_LAYOUT_GENERAL, &clearValue, 1, &clearRange );
-
-		const VkRenderingAttachmentInfo color_attachment {
-			.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-			.imageView = draw_image.view.get(),
-			.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-			.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-		};
+		const VkRenderingAttachmentInfo color_attachment { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+														   .imageView = static_cast<renderer::TextureView>( draw_image_view )._view,
+														   .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+														   .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+														   .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+														   .clearValue = clearValue };
 
 		const VkRenderingAttachmentInfo depth_attachment { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-														   .imageView = depth_image.view.get(),
+														   .imageView = static_cast<renderer::TextureView>( depth_image_view )._view,
 														   .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
 														   .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
 														   .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
@@ -1085,13 +1077,10 @@ int main()
 
 		vkCmdEndRendering( cmd );
 
-		transition_image( cmd, draw_image.image.get(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL );
+		draw_image.transition( *command_buffer, vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::eTransferSrcOptimal );
 		swapchain_image.transition( *command_buffer, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal );
 
-		resolve_image( cmd,
-					   draw_image.image.get(),
-					   swapchain_image._image,
-					   VkExtent2D { draw_image.extent.width, draw_image.extent.height } );
+		resolve_image( cmd, draw_image._image, swapchain_image._image, VkExtent2D { draw_image._extent.width, draw_image._extent.height } );
 
 		swapchain_image.transition( *command_buffer, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::ePresentSrcKHR );
 
