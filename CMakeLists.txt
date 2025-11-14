@@ -100,6 +100,10 @@ target_link_libraries(brutus-vulkan PRIVATE $<IF:$<TARGET_EXISTS:SDL3_image::SDL
 target_link_libraries(brutus-vulkan PRIVATE renderer)
 target_link_libraries(brutus-vulkan PRIVATE Optick)
 
+set_target_properties(brutus-vulkan PROPERTIES
+    VS_DEBUGGER_ENVIRONMENT "VK_ADD_LAYER_PATH=${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin"
+)
+
 enable_testing()
 
 add_executable(tests)

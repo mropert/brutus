@@ -241,7 +241,8 @@ std::expected<raii::VkPipeline, VkResult> make_pipeline( VkDevice device,
 	const VkPipelineRasterizationStateCreateInfo rasterizer { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
 															  .polygonMode = VK_POLYGON_MODE_FILL,
 															  .cullMode = VK_CULL_MODE_NONE,
-															  .frontFace = VK_FRONT_FACE_CLOCKWISE };
+															  .frontFace = VK_FRONT_FACE_CLOCKWISE,
+															  .lineWidth = 1.f };
 	const VkPipelineMultisampleStateCreateInfo multisampling { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
 															   .rasterizationSamples = VK_SAMPLE_COUNT_4_BIT,
 															   .minSampleShading = 1.0f };
@@ -892,17 +893,14 @@ int main()
 	VkQueue gfx_queue = *device._gfx_queue;
 	OPTICK_GPU_INIT_VULKAN( &vk_device, &physical_device, &gfx_queue, &device._gfx_queue_family_index, 1, nullptr );
 
-	constexpr auto swapchain_image_format = VK_FORMAT_B8G8R8A8_SRGB;
+	constexpr auto swapchain_image_format = renderer::Texture::Format::R8G8B8A8_SRGB;
 	renderer::Swapchain swapchain( device, swapchain_image_format );
 	VkSwapchainKHR vk_swapchain = *swapchain._swapchain;
 
 	const auto draw_image_extent = device.get_extent();
 	constexpr auto draw_image_format = renderer::Texture::Format::R16G16B16A16_SFLOAT;
 	using usage = renderer::Texture::Usage;
-	auto draw_image = device.create_texture( draw_image_format,
-											 usage::TRANSFER_SRC | usage::TRANSFER_DST | usage::COLOR_ATTACHMENT,
-											 draw_image_extent,
-											 4 );
+	auto draw_image = device.create_texture( draw_image_format, usage::COLOR_ATTACHMENT, draw_image_extent, 4 );
 	auto draw_image_view = device.create_texture_view( draw_image, renderer::TextureView::Aspect::COLOR );
 
 	auto depth_image = device.create_texture( renderer::Texture::Format::D32_SFLOAT,
@@ -910,6 +908,9 @@ int main()
 											  draw_image_extent,
 											  4 );
 	auto depth_image_view = device.create_texture_view( depth_image, renderer::TextureView::Aspect::DEPTH );
+
+	auto draw_resolved_image = device.create_texture( draw_image_format, usage::TRANSFER_SRC | usage::COLOR_ATTACHMENT, draw_image_extent );
+	auto draw_resolved_image_view = device.create_texture_view( draw_resolved_image, renderer::TextureView::Aspect::COLOR );
 
 	TextureManager tex_manager( vk_device );
 
@@ -988,7 +989,7 @@ int main()
 			}
 		}
 
-		auto [ image_index, swapchain_image ] = swapchain.acquire();
+		auto [ image_index, swapchain_image, swapchain_image_view ] = swapchain.acquire();
 		auto command_buffer = device.grab_command_buffer();
 		const VkCommandBuffer cmd = *command_buffer->_cmd_buffer;
 
@@ -997,6 +998,7 @@ int main()
 		command_buffer->begin();
 
 		draw_image.transition( *command_buffer, vk::ImageLayout::eUndefined, vk::ImageLayout::eColorAttachmentOptimal );
+		draw_resolved_image.transition( *command_buffer, vk::ImageLayout::eUndefined, vk::ImageLayout::eColorAttachmentOptimal );
 		depth_image.transition( *command_buffer, vk::ImageLayout::eUndefined, vk::ImageLayout::eDepthAttachmentOptimal );
 
 		VkClearColorValue clearValue;
@@ -1004,12 +1006,17 @@ int main()
 		flash = 0.1f;
 		clearValue = { { flash, flash, flash, 1.0f } };
 
-		const VkRenderingAttachmentInfo color_attachment { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-														   .imageView = static_cast<renderer::TextureView>( draw_image_view )._view,
-														   .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-														   .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-														   .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-														   .clearValue = clearValue };
+		const VkRenderingAttachmentInfo color_attachment {
+			.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+			.imageView = static_cast<renderer::TextureView>( draw_image_view )._view,
+			.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+			.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT,
+			.resolveImageView = static_cast<renderer::TextureView>( draw_resolved_image_view )._view,
+			.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+			.clearValue = clearValue
+		};
 
 		const VkRenderingAttachmentInfo depth_attachment { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
 														   .imageView = static_cast<renderer::TextureView>( depth_image_view )._view,
@@ -1077,10 +1084,24 @@ int main()
 
 		vkCmdEndRendering( cmd );
 
-		draw_image.transition( *command_buffer, vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::eTransferSrcOptimal );
+		draw_resolved_image.transition( *command_buffer, vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::eTransferSrcOptimal );
 		swapchain_image.transition( *command_buffer, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal );
 
-		resolve_image( cmd, draw_image._image, swapchain_image._image, VkExtent2D { draw_image._extent.width, draw_image._extent.height } );
+		const vk::ImageBlit2 blit_region {
+			.srcSubresource = { .aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1 },
+			.srcOffsets = { { vk::Offset3D {}, vk::Offset3D( draw_image._extent.width, draw_image_extent.height, 1 ) } },
+			.dstSubresource = { .aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1 },
+			.dstOffsets = { { vk::Offset3D {}, vk::Offset3D( swapchain_image._extent.width, swapchain_image._extent.height, 1 ) } }
+		};
+
+		const vk::BlitImageInfo2 blit_info { .srcImage = draw_resolved_image._image,
+											 .srcImageLayout = vk::ImageLayout::eTransferSrcOptimal,
+											 .dstImage = swapchain_image._image,
+											 .dstImageLayout = vk::ImageLayout::eTransferDstOptimal,
+											 .regionCount = 1,
+											 .pRegions = &blit_region };
+
+		command_buffer->_cmd_buffer.blitImage2( blit_info );
 
 		swapchain_image.transition( *command_buffer, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::ePresentSrcKHR );
 
