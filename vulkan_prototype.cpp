@@ -1052,21 +1052,7 @@ int main()
 		command_buffer->transition_texture( draw_resolved_image, renderer::Texture::Layout::TRANSFER_SRC_OPTIMAL );
 		command_buffer->transition_texture( swapchain_image, renderer::Texture::Layout::TRANSFER_DST_OPTIMAL );
 
-		const vk::ImageBlit2 blit_region {
-			.srcSubresource = { .aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1 },
-			.srcOffsets = { { vk::Offset3D {}, vk::Offset3D( draw_image._extent.width, draw_image_extent.height, 1 ) } },
-			.dstSubresource = { .aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1 },
-			.dstOffsets = { { vk::Offset3D {}, vk::Offset3D( swapchain_image._extent.width, swapchain_image._extent.height, 1 ) } }
-		};
-
-		const vk::BlitImageInfo2 blit_info { .srcImage = draw_resolved_image._image,
-											 .srcImageLayout = vk::ImageLayout::eTransferSrcOptimal,
-											 .dstImage = swapchain_image._image,
-											 .dstImageLayout = vk::ImageLayout::eTransferDstOptimal,
-											 .regionCount = 1,
-											 .pRegions = &blit_region };
-
-		command_buffer->_cmd_buffer.blitImage2( blit_info );
+		command_buffer->blit_texture( draw_resolved_image, swapchain_image );
 
 		command_buffer->transition_texture( swapchain_image, renderer::Texture::Layout::PRESENT_SRC );
 
