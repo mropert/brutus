@@ -1001,51 +1001,16 @@ int main()
 		command_buffer->transition_texture( draw_resolved_image, renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL );
 		command_buffer->transition_texture( depth_image, renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL );
 
-		VkClearColorValue clearValue;
-		float flash = std::abs( std::sin( frame_count / 120.f ) );
-		flash = 0.1f;
-		clearValue = { { flash, flash, flash, 1.0f } };
-
-		const VkRenderingAttachmentInfo color_attachment {
-			.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-			.imageView = static_cast<renderer::TextureView>( draw_image_view )._view,
-			.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-			.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT,
-			.resolveImageView = static_cast<renderer::TextureView>( draw_resolved_image_view )._view,
-			.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-			.clearValue = clearValue
-		};
-
-		const VkRenderingAttachmentInfo depth_attachment { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-														   .imageView = static_cast<renderer::TextureView>( depth_image_view )._view,
-														   .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-														   .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-														   .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
-
-		const VkRenderingInfo renderInfo { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-										   .renderArea = VkRect2D { VkOffset2D { 0, 0 }, draw_image_extent },
-										   .layerCount = 1,
-										   .colorAttachmentCount = 1,
-										   .pColorAttachments = &color_attachment,
-										   .pDepthAttachment = &depth_attachment };
-
-		vkCmdBeginRendering( cmd, &renderInfo );
+		command_buffer->begin_rendering( draw_image_extent,
+										 renderer::RenderAttachment { .target = draw_image_view,
+																	  .resolve_target = draw_resolved_image_view,
+																	  .clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } } },
+										 renderer::RenderAttachment { .target = depth_image_view } );
 
 		vkCmdBindPipeline( cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline.get() );
 
-		const VkViewport viewport { .x = 0.f,
-									.y = 0.f,
-									.width = static_cast<float>( draw_image_extent.width ),
-									.height = static_cast<float>( draw_image_extent.height ),
-									.minDepth = 0.f,
-									.maxDepth = 1.f };
-
-		vkCmdSetViewport( cmd, 0, 1, &viewport );
-
-		const VkRect2D scissor { .extent = draw_image_extent };
-		vkCmdSetScissor( cmd, 0, 1, &scissor );
+		command_buffer->set_viewport( draw_image_extent );
+		command_buffer->set_scissor( draw_image_extent );
 
 		vkCmdBindDescriptorSets( cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline_layout.get(), 0, 1, &tex_manager.m_desc, 0, nullptr );
 
@@ -1082,7 +1047,7 @@ int main()
 			vkCmdDrawIndexed( cmd, mesh.indices_count, 1, 0, 0, 0 );
 		}
 
-		vkCmdEndRendering( cmd );
+		command_buffer->end_rendering();
 
 		command_buffer->transition_texture( draw_resolved_image, renderer::Texture::Layout::TRANSFER_SRC_OPTIMAL );
 		command_buffer->transition_texture( swapchain_image, renderer::Texture::Layout::TRANSFER_DST_OPTIMAL );
