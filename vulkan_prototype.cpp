@@ -997,9 +997,9 @@ int main()
 		command_buffer->reset();
 		command_buffer->begin();
 
-		draw_image.transition( *command_buffer, vk::ImageLayout::eUndefined, vk::ImageLayout::eColorAttachmentOptimal );
-		draw_resolved_image.transition( *command_buffer, vk::ImageLayout::eUndefined, vk::ImageLayout::eColorAttachmentOptimal );
-		depth_image.transition( *command_buffer, vk::ImageLayout::eUndefined, vk::ImageLayout::eDepthAttachmentOptimal );
+		command_buffer->transition_texture( draw_image, renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL );
+		command_buffer->transition_texture( draw_resolved_image, renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL );
+		command_buffer->transition_texture( depth_image, renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL );
 
 		VkClearColorValue clearValue;
 		float flash = std::abs( std::sin( frame_count / 120.f ) );
@@ -1084,8 +1084,8 @@ int main()
 
 		vkCmdEndRendering( cmd );
 
-		draw_resolved_image.transition( *command_buffer, vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::eTransferSrcOptimal );
-		swapchain_image.transition( *command_buffer, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal );
+		command_buffer->transition_texture( draw_resolved_image, renderer::Texture::Layout::TRANSFER_SRC_OPTIMAL );
+		command_buffer->transition_texture( swapchain_image, renderer::Texture::Layout::TRANSFER_DST_OPTIMAL );
 
 		const vk::ImageBlit2 blit_region {
 			.srcSubresource = { .aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1 },
@@ -1103,7 +1103,7 @@ int main()
 
 		command_buffer->_cmd_buffer.blitImage2( blit_info );
 
-		swapchain_image.transition( *command_buffer, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::ePresentSrcKHR );
+		command_buffer->transition_texture( swapchain_image, renderer::Texture::Layout::PRESENT_SRC );
 
 		command_buffer->end();
 
