@@ -17,6 +17,7 @@
 
 //
 
+#include <renderer/bindless.h>
 #include <renderer/buffer.h>
 #include <renderer/command_buffer.h>
 #include <renderer/device.h>
@@ -207,104 +208,6 @@ std::expected<raii::VkPipeline, VkResult> make_pipeline( VkDevice device,
 	return raii::make( device, gfx_pipeline );
 }
 
-struct TextureManager
-{
-	explicit TextureManager( renderer::Device& device )
-		: m_device( &device )
-	{
-		const std::array<VkDescriptorSetLayoutBinding, 2> bindings { { { .binding = 0,
-																		 .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-																		 .descriptorCount = max_textures,
-																		 .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
-																	   { .binding = 1,
-																		 .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
-																		 .descriptorCount = 1,
-																		 .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT } } };
-
-		const VkDescriptorSetLayoutCreateInfo layout_info { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-															.bindingCount = bindings.size(),
-															.pBindings = bindings.data() };
-
-		VkDescriptorSetLayout set = nullptr;
-		auto res = vkCreateDescriptorSetLayout( *m_device->_device, &layout_info, nullptr, &set );
-		if ( res )
-		{
-			throw std::runtime_error( "Failed to create descriptor set layout: " + std::to_string( res ) );
-		}
-		m_layout = raii::make( *m_device->_device, set );
-
-		const std::array<VkDescriptorPoolSize, 2> pools { { { .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = max_textures },
-															{ .type = VK_DESCRIPTOR_TYPE_SAMPLER, .descriptorCount = 1 } } };
-		const VkDescriptorPoolCreateInfo pool_info { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-													 .maxSets = max_textures + 1,
-													 .poolSizeCount = pools.size(),
-													 .pPoolSizes = pools.data() };
-		VkDescriptorPool pool = nullptr;
-		res = vkCreateDescriptorPool( *m_device->_device, &pool_info, nullptr, &pool );
-		if ( res )
-		{
-			throw std::runtime_error( "Failed to create descriptor pool: " + std::to_string( res ) );
-		}
-		m_pool = raii::make( *m_device->_device, pool );
-
-		const VkDescriptorSetAllocateInfo alloc_info { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-													   .descriptorPool = m_pool.get(),
-													   .descriptorSetCount = 1,
-													   .pSetLayouts = &set };
-		res = vkAllocateDescriptorSets( *m_device->_device, &alloc_info, &m_desc );
-		if ( res )
-		{
-			throw std::runtime_error( "Failed to allocate descriptor set: " + std::to_string( res ) );
-		}
-
-		m_linear_sampler = device.create_sampler( renderer::Sampler::Filter::LINEAR );
-	}
-
-	uint32_t add_texture( renderer::raii::Texture&& tex, renderer::raii::TextureView&& view )
-	{
-		m_textures.push_back( std::move( tex ) );
-		m_texture_views.push_back( std::move( view ) );
-		return m_textures.size() - 1;
-	}
-
-	void update_descriptors()
-	{
-		std::vector<VkDescriptorImageInfo> images_info;
-		images_info.reserve( m_texture_views.size() );
-		for ( renderer::TextureView view : m_texture_views )
-		{
-			images_info.emplace_back( nullptr, view._view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
-		}
-
-		const VkDescriptorImageInfo sampler_info { .sampler = static_cast<renderer::Sampler>( m_linear_sampler )._sampler };
-
-		const std::array<VkWriteDescriptorSet, 2> writes { { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-															   .dstSet = m_desc,
-															   .dstBinding = 0,
-															   .descriptorCount = static_cast<uint32_t>( images_info.size() ),
-															   .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-															   .pImageInfo = images_info.data() },
-															 { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-															   .dstSet = m_desc,
-															   .dstBinding = 1,
-															   .descriptorCount = 1,
-															   .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
-															   .pImageInfo = &sampler_info } } };
-
-		vkUpdateDescriptorSets( *m_device->_device, writes.size(), writes.data(), 0, nullptr );
-	}
-
-	static inline constexpr uint32_t max_textures = 8192;
-
-	renderer::Device* m_device;
-	raii::VkDescriptorSetLayout m_layout;
-	raii::VkDescriptorPool m_pool;
-	VkDescriptorSet m_desc = nullptr;
-	std::vector<renderer::raii::Texture> m_textures;
-	std::vector<renderer::raii::TextureView> m_texture_views;
-	renderer::raii::Sampler m_linear_sampler;
-};
-
 void transition_image( VkCommandBuffer cmd, VkImage image, VkImageLayout currentLayout, VkImageLayout newLayout )
 {
 	const VkImageAspectFlags aspectMask = ( newLayout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL ) ? VK_IMAGE_ASPECT_DEPTH_BIT
@@ -328,46 +231,6 @@ void transition_image( VkCommandBuffer cmd, VkImage image, VkImageLayout current
 									 .pImageMemoryBarriers = &imageBarrier };
 
 	vkCmdPipelineBarrier2( cmd, &depInfo );
-}
-
-void blit_image( VkCommandBuffer cmd, VkImage source, VkImage destination, VkExtent2D src_size, VkExtent2D dst_size )
-{
-	const VkImageBlit2 blitRegion {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
-		.srcSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
-		.srcOffsets = { {}, { static_cast<int32_t>( src_size.width ), static_cast<int32_t>( src_size.height ), 1 } },
-		.dstSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
-		.dstOffsets = { {}, { static_cast<int32_t>( dst_size.width ), static_cast<int32_t>( dst_size.height ), 1 } },
-	};
-
-	const VkBlitImageInfo2 blitInfo { .sType = VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2,
-									  .srcImage = source,
-									  .srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-									  .dstImage = destination,
-									  .dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-									  .regionCount = 1,
-									  .pRegions = &blitRegion,
-									  .filter = VK_FILTER_LINEAR };
-
-	vkCmdBlitImage2( cmd, &blitInfo );
-}
-
-void resolve_image( VkCommandBuffer cmd, VkImage source, VkImage destination, VkExtent2D size )
-{
-	OPTICK_GPU_EVENT( "Resolve Image" );
-	const VkImageResolve resolveRegion {
-		.srcSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
-		.dstSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
-		.extent = { .width = size.width, .height = size.height, .depth = 1 }
-	};
-
-	vkCmdResolveImage( cmd,
-					   source,
-					   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-					   destination,
-					   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					   1,
-					   &resolveRegion );
 }
 
 SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
@@ -474,8 +337,8 @@ struct mesh_vertex
 struct gpu_material
 {
 	pbr_data pbr_data;
-	uint32_t albedo_texture_index;
-	uint32_t normal_texture_index;
+	renderer::TextureHandle albedo_texture_index;
+	renderer::TextureHandle normal_texture_index;
 };
 
 struct gpu_mesh_data
@@ -518,7 +381,7 @@ std::size_t upload_image_from_surface( renderer::CommandBuffer& cmd,
 }
 
 std::vector<gpu_mesh_data>
-load_model( renderer::Device& device, renderer::CommandBuffer& cmd, VkFence fence, VkQueue queue, TextureManager& tex_manager )
+load_model( renderer::Device& device, renderer::CommandBuffer& cmd, VkFence fence, VkQueue queue, renderer::BindlessManager& tex_manager )
 {
 	OPTICK_EVENT();
 	const std::filesystem::path path = "../assets/player.glb";
@@ -729,14 +592,12 @@ load_model( renderer::Device& device, renderer::CommandBuffer& cmd, VkFence fenc
 		offset += sizeof( uint32_t ) * mesh.indices.length;
 
 		auto tex = make_image_from_surface( device, *mesh.albedo.image, true );
-		auto view = device.create_texture_view( tex, renderer::TextureView::Aspect::COLOR );
 		offset += upload_image_from_surface( cmd, transfer_buffer, ptr, offset, tex, *mesh.albedo.image );
-		gpu_data.material.albedo_texture_index = tex_manager.add_texture( std::move( tex ), std::move( view ) );
+		gpu_data.material.albedo_texture_index = tex_manager.add_texture( std::move( tex ) );
 
 		tex = make_image_from_surface( device, *mesh.normal.image, false );
-		view = device.create_texture_view( tex, renderer::TextureView::Aspect::COLOR );
 		offset += upload_image_from_surface( cmd, transfer_buffer, ptr, offset, tex, *mesh.normal.image );
-		gpu_data.material.normal_texture_index = tex_manager.add_texture( std::move( tex ), std::move( view ) );
+		gpu_data.material.normal_texture_index = tex_manager.add_texture( std::move( tex ) );
 
 		gpu_data.material.pbr_data = mesh.pbr_data;
 	}
@@ -802,7 +663,8 @@ int main()
 	auto draw_resolved_image = device.create_texture( draw_image_format, usage::TRANSFER_SRC | usage::COLOR_ATTACHMENT, draw_image_extent );
 	auto draw_resolved_image_view = device.create_texture_view( draw_resolved_image, renderer::TextureView::Aspect::COLOR );
 
-	TextureManager tex_manager( device );
+	renderer::BindlessManager tex_manager( device );
+	const VkDescriptorSet texture_set = tex_manager.get_set();
 
 	raii::VkPipelineLayout vk_pipeline_layout;
 	raii::VkPipeline vk_pipeline;
@@ -813,7 +675,7 @@ int main()
 			  { .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT, .offset = sizeof( gpu_vertex_constants ), .size = sizeof( gpu_material ) } }
 		};
 		VkPipelineLayout layout {};
-		const auto desc_layout = tex_manager.m_layout.get();
+		const VkDescriptorSetLayout desc_layout = tex_manager.get_layout();
 		VkPipelineLayoutCreateInfo pipeline_layout_info { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 														  .setLayoutCount = 1,
 														  .pSetLayouts = &desc_layout,
@@ -844,7 +706,6 @@ int main()
 
 	const auto meshes = load_model( device, *transfer_command_buffer, transfer_fence.get(), gfx_queue, tex_manager );
 	transfer_command_buffer.reset();
-	tex_manager.update_descriptors();
 
 	OPTICK_POP();
 
@@ -897,7 +758,7 @@ int main()
 		command_buffer->set_viewport( draw_image_extent );
 		command_buffer->set_scissor( draw_image_extent );
 
-		vkCmdBindDescriptorSets( cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline_layout.get(), 0, 1, &tex_manager.m_desc, 0, nullptr );
+		vkCmdBindDescriptorSets( cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline_layout.get(), 0, 1, &texture_set, 0, nullptr );
 
 		const glm::mat4 view = glm::translate( glm::identity<glm::mat4>(), glm::vec3 { 0, -0.9, -1.5 } );
 		glm::mat4 projection = glm::perspective( glm::radians( 70.f ),
