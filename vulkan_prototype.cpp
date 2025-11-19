@@ -17,6 +17,7 @@
 
 //
 
+#include <renderer/buffer.h>
 #include <renderer/command_buffer.h>
 #include <renderer/device.h>
 #include <renderer/swapchain.h>
@@ -77,89 +78,6 @@ std::expected<raii::VkFence, VkResult> make_fence( VkDevice device, VkFenceCreat
 		return std::unexpected( ret );
 	}
 	return raii::make( device, fence );
-}
-
-std::expected<raii::VkSemaphore, VkResult> make_semaphore( VkDevice device )
-{
-	const VkSemaphoreCreateInfo semaphoreCreateInfo = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-	VkSemaphore semaphore;
-	const auto ret = vkCreateSemaphore( device, &semaphoreCreateInfo, nullptr, &semaphore );
-	if ( ret )
-	{
-		return std::unexpected( ret );
-	}
-	return raii::make( device, semaphore );
-}
-
-std::expected<vma::raii::Buffer, VkResult>
-make_buffer( VmaAllocator allocator, size_t size, VkBufferUsageFlags buffer_usage, VmaMemoryUsage memory_usage )
-{
-	const VkBufferCreateInfo bufferInfo { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = buffer_usage };
-	const VmaAllocationCreateInfo vmaallocInfo = { .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT, .usage = memory_usage };
-
-	VkBuffer buffer {};
-	VmaAllocation allocation {};
-	VmaAllocationInfo info {};
-	const auto ret = vmaCreateBuffer( allocator, &bufferInfo, &vmaallocInfo, &buffer, &allocation, &info );
-	if ( ret )
-	{
-		return std::unexpected( ret );
-	}
-
-	return vma::raii::make( allocator, buffer, allocation, info );
-}
-
-std::expected<raii::VulkanImage, VkResult> make_image( VkDevice device,
-													   VmaAllocator allocator,
-													   VkFormat format,
-													   VkExtent3D extent,
-													   VkSampleCountFlagBits samples,
-													   VkImageUsageFlags image_usage,
-													   VmaMemoryUsage memory_usage,
-													   VkImageAspectFlags aspect_flags )
-{
-	const VkImageCreateInfo info { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-								   .imageType = VK_IMAGE_TYPE_2D,
-								   .format = format,
-								   .extent = extent,
-								   .mipLevels = 1,
-								   .arrayLayers = 1,
-								   .samples = samples,
-								   .tiling = VK_IMAGE_TILING_OPTIMAL,
-								   .usage = image_usage };
-
-	const VmaAllocationCreateInfo create_info { .usage = memory_usage, .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT };
-
-	VkImage image {};
-	VmaAllocation allocation {};
-	VmaAllocationInfo allocation_info {};
-	auto ret = vmaCreateImage( allocator, &info, &create_info, &image, &allocation, &allocation_info );
-	if ( ret )
-	{
-		return std::unexpected( ret );
-	}
-
-	raii::VulkanImage allocated_image;
-	allocated_image.image = vma::raii::make( allocator, image, allocation, allocation_info );
-	allocated_image.extent = extent;
-	allocated_image.format = format;
-
-	const VkImageViewCreateInfo image_view_info {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-		.image = image,
-		.viewType = VK_IMAGE_VIEW_TYPE_2D,
-		.format = format,
-		.subresourceRange = { .aspectMask = aspect_flags, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 }
-	};
-
-	VkImageView view;
-	ret = vkCreateImageView( device, &image_view_info, nullptr, &view );
-	if ( ret )
-	{
-		return std::unexpected( ret );
-	}
-	allocated_image.view = raii::make( device, view );
-	return allocated_image;
 }
 
 std::expected<raii::VkSampler, VkResult> make_sampler( VkDevice device, VkFilter filter )
@@ -353,19 +271,20 @@ struct TextureManager
 		m_linear_sampler = *make_sampler( m_device, VK_FILTER_LINEAR );
 	}
 
-	uint32_t add_texture( raii::VulkanImage&& tex )
+	uint32_t add_texture( renderer::raii::Texture&& tex, renderer::raii::TextureView&& view )
 	{
 		m_textures.push_back( std::move( tex ) );
+		m_texture_views.push_back( std::move( view ) );
 		return m_textures.size() - 1;
 	}
 
 	void update_descriptors()
 	{
 		std::vector<VkDescriptorImageInfo> images_info;
-		images_info.reserve( m_textures.size() );
-		for ( const auto& tex : m_textures )
+		images_info.reserve( m_texture_views.size() );
+		for ( renderer::TextureView view : m_texture_views )
 		{
-			images_info.emplace_back( nullptr, tex.view.get(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+			images_info.emplace_back( nullptr, view._view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 		}
 
 		const VkDescriptorImageInfo sampler_info { .sampler = m_linear_sampler.get() };
@@ -392,7 +311,8 @@ struct TextureManager
 	raii::VkDescriptorSetLayout m_layout;
 	raii::VkDescriptorPool m_pool;
 	VkDescriptorSet m_desc = nullptr;
-	std::vector<raii::VulkanImage> m_textures;
+	std::vector<renderer::raii::Texture> m_textures;
+	std::vector<renderer::raii::TextureView> m_texture_views;
 	raii::VkSampler m_linear_sampler;
 };
 
@@ -571,55 +491,45 @@ struct gpu_material
 
 struct gpu_mesh_data
 {
-	vma::raii::Buffer vertices;
-	VkDeviceAddress vertices_address;
-	vma::raii::Buffer indices;
+	renderer::raii::Buffer vertices;
+	renderer::raii::Buffer indices;
 	uint32_t indices_count;
 	gpu_material material;
 };
 
-std::expected<raii::VulkanImage, VkResult>
-make_image_from_surface( VkDevice device, VmaAllocator allocator, const SDL_Surface& surface, bool sRGB )
+renderer::raii::Texture make_image_from_surface( renderer::Device& device, const SDL_Surface& surface, bool sRGB )
 {
 	OPTICK_EVENT();
 	const auto format = sdl_to_vulkan_format( sdl_gpu_format( surface.format ), sRGB );
 	if ( format == VK_FORMAT_UNDEFINED )
 	{
-		return std::unexpected( VK_ERROR_FORMAT_NOT_SUPPORTED );
+		throw renderer::renderer_error( "Unsupported format" );
 	}
-	return make_image( device,
-					   allocator,
-					   format,
-					   VkExtent3D( surface.w, surface.h, 1 ),
-					   VK_SAMPLE_COUNT_1_BIT,
-					   VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-					   VMA_MEMORY_USAGE_GPU_ONLY,
-					   VK_IMAGE_ASPECT_COLOR_BIT );
+	using TexUsage = renderer::Texture::Usage;
+	return device.create_texture( static_cast<renderer::Texture::Format>( format ),
+								  TexUsage::TRANSFER_DST | TexUsage::SAMPLED,
+								  renderer::Extent2D( surface.w, surface.h ) );
 }
 
-std::size_t upload_image_from_surface( VkCommandBuffer cmd,
-									   VkBuffer transfer_buffer,
+std::size_t upload_image_from_surface( renderer::CommandBuffer& cmd,
+									   const renderer::Buffer& transfer_buffer,
 									   std::byte* buffer,
 									   std::size_t offset,
-									   VkImage image,
+									   renderer::Texture& image,
 									   const SDL_Surface& surface )
 {
 	OPTICK_EVENT();
 	const auto gpu_format = sdl_gpu_format( surface.format );
 	const auto pitch = surface.w * get_format_size( sdl_to_vulkan_format( gpu_format ) );
 	SDL_ConvertPixels( surface.w, surface.h, surface.format, surface.pixels, surface.pitch, gpu_format, buffer + offset, pitch );
-	transition_image( cmd, image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL );
-	const VkBufferImageCopy copy { .bufferOffset = offset,
-								   .imageSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1 },
-								   .imageExtent = VkExtent3D( surface.w, surface.h, 1 ) };
-	vkCmdCopyBufferToImage( cmd, transfer_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy );
-	transition_image( cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
-
+	cmd.transition_texture( image, renderer::Texture::Layout::TRANSFER_DST_OPTIMAL );
+	cmd.copy_buffer_to_texture( transfer_buffer, offset, image );
+	cmd.transition_texture( image, renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
 	return pitch * surface.h;
 }
 
 std::vector<gpu_mesh_data>
-load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, VkFence fence, VkQueue queue, TextureManager& tex_manager )
+load_model( renderer::Device& device, renderer::CommandBuffer& cmd, VkFence fence, VkQueue queue, TextureManager& tex_manager )
 {
 	OPTICK_EVENT();
 	const std::filesystem::path path = "../assets/player.glb";
@@ -778,35 +688,25 @@ load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, VkFenc
 		}
 	}
 
-	vkResetFences( device, 1, &fence );
-	vkResetCommandBuffer( cmd, 0 );
-	const VkCommandBufferBeginInfo cmdBeginInfo { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-												  .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
-	vkBeginCommandBuffer( cmd, &cmdBeginInfo );
+	vkResetFences( *device._device, 1, &fence );
+	cmd.reset();
+	cmd.begin();
 
+	using BufferUsage = renderer::Buffer::Usage;
 	std::vector<gpu_mesh_data> gpu_meshes;
-	const auto transfer_buffer = make_buffer( allocator, alloc_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY ).value();
-	const auto ptr = static_cast<std::byte*>( transfer_buffer.get_deleter().info.pMappedData );
+	const auto transfer_buffer = device.create_buffer( BufferUsage::TRANSFER_SRC, alloc_size, true );
+	const auto ptr = static_cast<std::byte*>( transfer_buffer.get_mapped_address() );
+
 	std::size_t offset = 0;
 	for ( const auto& mesh : meshes )
 	{
 		auto& gpu_data = gpu_meshes.emplace_back();
-		gpu_data.vertices = make_buffer( allocator,
-										 sizeof( mesh_vertex ) * mesh.positions.length,
-										 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
-											 | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-										 VMA_MEMORY_USAGE_GPU_ONLY )
-								.value();
+		gpu_data.vertices = device.create_buffer( BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST
+													  | BufferUsage::SHADER_DEVICE_ADDRESS,
+												  sizeof( mesh_vertex ) * mesh.positions.length );
 
-		const VkBufferDeviceAddressInfo deviceAdressInfo { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-														   .buffer = VkBuffer( gpu_data.vertices.get() ) };
-		gpu_data.vertices_address = vkGetBufferDeviceAddress( device, &deviceAdressInfo );
-
-		gpu_data.indices = make_buffer( allocator,
-										sizeof( uint32_t ) * mesh.indices.length,
-										VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-										VMA_MEMORY_USAGE_GPU_ONLY )
-							   .value();
+		gpu_data.indices = device.create_buffer( BufferUsage::INDEX_BUFFER | BufferUsage::TRANSFER_DST,
+												 sizeof( uint32_t ) * mesh.indices.length );
 		gpu_data.indices_count = mesh.indices.length;
 
 		{
@@ -832,28 +732,29 @@ load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, VkFenc
 				verts[ i ].tangent[ 3 ] = tangents[ i * 4 + 3 ];
 			}
 		}
-		const VkBufferCopy vertexCopy { .srcOffset = offset, .dstOffset = 0, .size = sizeof( mesh_vertex ) * mesh.positions.length };
-		vkCmdCopyBuffer( cmd, VkBuffer( transfer_buffer.get() ), VkBuffer( gpu_data.vertices.get() ), 1, &vertexCopy );
+		cmd.copy_buffer( transfer_buffer, offset, sizeof( mesh_vertex ) * mesh.positions.length, gpu_data.vertices );
 		offset += sizeof( mesh_vertex ) * mesh.positions.length;
 
 		memcpy( ptr + offset, gltf_buffer.data() + mesh.indices.offset, sizeof( uint32_t ) * mesh.indices.length );
-		const VkBufferCopy indexCopy { .srcOffset = offset, .dstOffset = 0, .size = sizeof( uint32_t ) * mesh.indices.length };
-		vkCmdCopyBuffer( cmd, VkBuffer( transfer_buffer.get() ), VkBuffer( gpu_data.indices.get() ), 1, &indexCopy );
+		cmd.copy_buffer( transfer_buffer, offset, sizeof( uint32_t ) * mesh.indices.length, gpu_data.indices );
 		offset += sizeof( uint32_t ) * mesh.indices.length;
 
-		auto tex = *make_image_from_surface( device, allocator, *mesh.albedo.image, true );
-		offset += upload_image_from_surface( cmd, transfer_buffer.get(), ptr, offset, tex.image.get(), *mesh.albedo.image );
-		gpu_data.material.albedo_texture_index = tex_manager.add_texture( std::move( tex ) );
+		auto tex = make_image_from_surface( device, *mesh.albedo.image, true );
+		auto view = device.create_texture_view( tex, renderer::TextureView::Aspect::COLOR );
+		offset += upload_image_from_surface( cmd, transfer_buffer, ptr, offset, tex, *mesh.albedo.image );
+		gpu_data.material.albedo_texture_index = tex_manager.add_texture( std::move( tex ), std::move( view ) );
 
-		tex = *make_image_from_surface( device, allocator, *mesh.normal.image, false );
-		offset += upload_image_from_surface( cmd, transfer_buffer.get(), ptr, offset, tex.image.get(), *mesh.normal.image );
-		gpu_data.material.normal_texture_index = tex_manager.add_texture( std::move( tex ) );
+		tex = make_image_from_surface( device, *mesh.normal.image, false );
+		view = device.create_texture_view( tex, renderer::TextureView::Aspect::COLOR );
+		offset += upload_image_from_surface( cmd, transfer_buffer, ptr, offset, tex, *mesh.normal.image );
+		gpu_data.material.normal_texture_index = tex_manager.add_texture( std::move( tex ), std::move( view ) );
 
 		gpu_data.material.pbr_data = mesh.pbr_data;
 	}
 
-	vkEndCommandBuffer( cmd );
-	const VkCommandBufferSubmitInfo cmdSubmitInfo { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = cmd };
+	cmd.end();
+	const VkCommandBufferSubmitInfo cmdSubmitInfo { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+													.commandBuffer = *cmd._cmd_buffer };
 	const VkSubmitInfo2 submitInfo {
 		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
 		.commandBufferInfoCount = 1,
@@ -861,7 +762,7 @@ load_model( VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, VkFenc
 	};
 
 	vkQueueSubmit2( queue, 1, &submitInfo, fence );
-	vkWaitForFences( device, 1, &fence, true, 9999999999 );
+	vkWaitForFences( *device._device, 1, &fence, true, 9999999999 );
 
 	return gpu_meshes;
 }
@@ -952,12 +853,7 @@ int main()
 	auto transfer_command_buffer = device.grab_command_buffer();
 	const auto transfer_fence = make_fence( vk_device, 0 ).value();
 
-	const auto meshes = load_model( vk_device,
-									device._allocator.get(),
-									*transfer_command_buffer->_cmd_buffer,
-									transfer_fence.get(),
-									gfx_queue,
-									tex_manager );
+	const auto meshes = load_model( device, *transfer_command_buffer, transfer_fence.get(), gfx_queue, tex_manager );
 	transfer_command_buffer.reset();
 	tex_manager.update_descriptors();
 
@@ -1028,7 +924,7 @@ int main()
 		{
 			OPTICK_GPU_EVENT( "Draw Mesh" );
 
-			const gpu_vertex_constants vertex_constants { .worldMatrix = projection * view, .vertexBuffer = mesh.vertices_address };
+			const gpu_vertex_constants vertex_constants { .worldMatrix = projection * view, .vertexBuffer = mesh.vertices._address };
 
 			vkCmdPushConstants( cmd,
 								vk_pipeline_layout.get(),
@@ -1042,7 +938,7 @@ int main()
 								sizeof( gpu_vertex_constants ),
 								sizeof( gpu_material ),
 								&mesh.material );
-			vkCmdBindIndexBuffer( cmd, mesh.indices.get(), 0, VK_INDEX_TYPE_UINT32 );
+			vkCmdBindIndexBuffer( cmd, mesh.indices._buffer, 0, VK_INDEX_TYPE_UINT32 );
 
 			vkCmdDrawIndexed( cmd, mesh.indices_count, 1, 0, 0, 0 );
 		}
