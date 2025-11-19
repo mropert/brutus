@@ -85,6 +85,7 @@ target_sources(renderer
 		src/renderer/command_buffer.cpp
 		src/renderer/device.cpp
 		src/renderer/sampler.cpp
+		src/renderer/shader.cpp
 		src/renderer/swapchain.cpp
 		src/renderer/texture.cpp
 		src/renderer/vma_impl.cpp
@@ -98,7 +99,7 @@ target_link_libraries(renderer PRIVATE Optick)
 add_executable(brutus-vulkan)
 target_sources(brutus-vulkan PRIVATE vulkan_prototype.cpp)
 target_compile_definitions(brutus-vulkan PRIVATE GLM_FORCE_INTRINSICS GLM_FORCE_DEPTH_ZERO_TO_ONE)
-target_link_libraries(brutus-vulkan PRIVATE SDL3::SDL3 Vulkan::Vulkan VkBoostrap unofficial::shaderc::shaderc fastgltf::fastgltf glm::glm-header-only)
+target_link_libraries(brutus-vulkan PRIVATE SDL3::SDL3 fastgltf::fastgltf glm::glm-header-only)
 target_link_libraries(brutus-vulkan PRIVATE $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image-shared>,SDL3_image::SDL3_image-shared,SDL3_image::SDL3_image-static>)
 target_link_libraries(brutus-vulkan PRIVATE renderer)
 target_link_libraries(brutus-vulkan PRIVATE Optick)

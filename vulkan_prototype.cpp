@@ -11,7 +11,6 @@
 #include <memory>
 #include <optick.h>
 #include <print>
-#include <shaderc/shaderc.hpp>
 #include <span>
 #include <stdexcept>
 
@@ -22,6 +21,7 @@
 #include <renderer/command_buffer.h>
 #include <renderer/device.h>
 #include <renderer/sampler.h>
+#include <renderer/shader.h>
 #include <renderer/swapchain.h>
 #include <renderer/texture.h>
 
@@ -82,31 +82,23 @@ std::expected<raii::VkFence, VkResult> make_fence( VkDevice device, VkFenceCreat
 	return raii::make( device, fence );
 }
 
-std::expected<raii::VkShaderModule, VkResult>
-make_shader( VkDevice device, const std::string_view source, VkShaderStageFlagBits type, const char* filename )
+std::expected<raii::VkShaderModule, VkResult> make_shader( VkDevice device,
+														   const renderer::ShaderCompiler& compiler,
+														   const std::string_view source,
+														   renderer::ShaderStage stage,
+														   std::string filename )
 {
 	OPTICK_EVENT();
-	shaderc::Compiler compiler;
-	shaderc::CompileOptions options;
-
-	options.SetOptimizationLevel( shaderc_optimization_level_performance );
-
-	const auto result = compiler.CompileGlslToSpv( source.data(),
-												   source.size(),
-												   type == VK_SHADER_STAGE_VERTEX_BIT ? shaderc_glsl_vertex_shader
-																					  : shaderc_glsl_fragment_shader,
-												   filename,
-												   options );
-
-	if ( result.GetCompilationStatus() != shaderc_compilation_status_success )
+	auto compilation_result = compiler.compile( stage, source, std::move( filename ) );
+	if ( !compilation_result )
 	{
-		std::println( stderr, "Shader compilation failed: {}", result.GetErrorMessage() );
-		return {};
+		std::println( stderr, "Shader compilation failed: {}", compilation_result.error() );
+		return std::unexpected( VK_ERROR_INVALID_SHADER_NV );
 	}
 
 	VkShaderModuleCreateInfo shader_info = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-											 .codeSize = std::distance( result.begin(), result.end() ) * sizeof( uint32_t ),
-											 .pCode = result.begin() };
+											 .codeSize = compilation_result->get_size() * sizeof( uint32_t ),
+											 .pCode = compilation_result->get_data() };
 
 	VkShaderModule shader {};
 	const auto ret = vkCreateShaderModule( device, &shader_info, nullptr, &shader );
@@ -117,7 +109,8 @@ make_shader( VkDevice device, const std::string_view source, VkShaderStageFlagBi
 	return raii::make( device, shader );
 }
 
-std::expected<raii::VkShaderModule, VkResult> make_shader( VkDevice device, const std::filesystem::path& path, VkShaderStageFlagBits type )
+std::expected<raii::VkShaderModule, VkResult>
+make_shader( VkDevice device, const renderer::ShaderCompiler& compiler, const std::filesystem::path& path, renderer::ShaderStage stage )
 {
 	OPTICK_EVENT();
 	std::string source;
@@ -130,7 +123,7 @@ std::expected<raii::VkShaderModule, VkResult> make_shader( VkDevice device, cons
 		}
 		source.assign( ( std::istreambuf_iterator<char>( istream ) ), std::istreambuf_iterator<char>() );
 	}
-	return make_shader( device, std::string_view( source ), type, path.filename().string().c_str() );
+	return make_shader( device, compiler, std::string_view( source ), stage, path.filename().string() );
 }
 
 std::expected<raii::VkPipeline, VkResult> make_pipeline( VkDevice device,
@@ -670,6 +663,8 @@ int main()
 	raii::VkPipeline vk_pipeline;
 	{
 		OPTICK_EVENT( "create_vk_pipeline" );
+		renderer::ShaderCompiler compiler;
+
 		const std::array<VkPushConstantRange, 2> constants {
 			{ { .stageFlags = VK_SHADER_STAGE_VERTEX_BIT, .size = sizeof( gpu_vertex_constants ) },
 			  { .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT, .offset = sizeof( gpu_vertex_constants ), .size = sizeof( gpu_material ) } }
@@ -689,8 +684,9 @@ int main()
 		}
 		vk_pipeline_layout = raii::make( vk_device, layout );
 
-		const auto vertex_shader = make_shader( vk_device, "../shaders/vulkan/mesh.vs", VK_SHADER_STAGE_VERTEX_BIT ).value();
-		const auto fragment_shader = make_shader( vk_device, "../shaders/vulkan/mesh.fs", VK_SHADER_STAGE_FRAGMENT_BIT ).value();
+		const auto vertex_shader = make_shader( vk_device, compiler, "../shaders/vulkan/mesh.vs", renderer::ShaderStage::VERTEX ).value();
+		const auto fragment_shader = make_shader( vk_device, compiler, "../shaders/vulkan/mesh.fs", renderer::ShaderStage::FRAGMENT )
+										 .value();
 
 		vk_pipeline = make_pipeline( vk_device,
 									 static_cast<VkFormat>( draw_image_format ),
