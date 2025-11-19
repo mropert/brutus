@@ -16,6 +16,11 @@
 
 //
 
+#include <exec/static_thread_pool.hpp>
+#include <stdexec/execution.hpp>
+
+//
+
 #include <renderer/bindless.h>
 #include <renderer/buffer.h>
 #include <renderer/command_buffer.h>
@@ -373,241 +378,332 @@ std::size_t upload_image_from_surface( renderer::CommandBuffer& cmd,
 	return pitch * surface.h;
 }
 
-std::vector<gpu_mesh_data>
-load_model( renderer::Device& device, renderer::CommandBuffer& cmd, VkFence fence, VkQueue queue, renderer::BindlessManager& tex_manager )
+class mesh_load_job
 {
-	OPTICK_EVENT();
-	const std::filesystem::path path = "../assets/player.glb";
-
-	fastgltf::Parser parser;
-	fastgltf::GltfDataBuffer data;
+public:
+	mesh_load_job( renderer::Device& device, renderer::BindlessManager& tex_manager, std::filesystem::path path )
+		: _device( device )
+		, _tex_manager( tex_manager )
+		, _path( std::move( path ) )
+		, _vertex_cmd_buffer( device.grab_command_buffer() )
+		, _texture_cmd_buffer( device.grab_command_buffer() )
+		, _vertex_upload_fence( device._device.createFence( {} ) )
+		, _tex_upload_fence( device._device.createFence( {} ) )
 	{
-		OPTICK_EVENT( "gltf_read_io" );
-		auto res = fastgltf::GltfDataBuffer::FromPath( path );
-		if ( res.error() != fastgltf::Error::None )
-		{
-			return {};
-		}
-		data = std::move( res.get() );
 	}
 
-	fastgltf::Asset asset;
+	void parse()
 	{
-		OPTICK_EVENT( "gltf_parse" );
-		auto res = parser.loadGltf( data, path.parent_path(), fastgltf::Options::None );
-		if ( auto error = res.error(); error != fastgltf::Error::None )
-		{
-			return {};
-		}
-		asset = std::move( res.get() );
-	}
+		OPTICK_EVENT();
 
-	auto make_texture = []( const fastgltf::Asset& asset, std::size_t texture_index )
-	{
-		const auto& texture = asset.textures[ texture_index ];
-		const auto& image = asset.images[ *texture.imageIndex ];
-		const auto& data = std::get<fastgltf::sources::BufferView>( image.data );
-		const auto& view = asset.bufferViews[ data.bufferViewIndex ];
-		return mesh_texture { data.mimeType, view.byteOffset, view.byteLength };
-	};
-
-	auto make_attribute = []( const fastgltf::Asset& asset, std::size_t accessor_index )
-	{
-		const auto& accessor = asset.accessors[ accessor_index ];
-		const auto& view = asset.bufferViews[ *accessor.bufferViewIndex ];
-		VkFormat format = VK_FORMAT_UNDEFINED;
-		switch ( accessor.componentType )
+		fastgltf::Parser parser;
+		fastgltf::GltfDataBuffer data;
 		{
-			case fastgltf::ComponentType::Float:
+			OPTICK_EVENT( "gltf_read_io" );
+			auto res = fastgltf::GltfDataBuffer::FromPath( _path );
+			if ( res.error() != fastgltf::Error::None )
 			{
-				switch ( accessor.type )
+				return;
+			}
+			data = std::move( res.get() );
+		}
+
+		{
+			OPTICK_EVENT( "gltf_parse" );
+			auto res = parser.loadGltf( data, _path.parent_path(), fastgltf::Options::None );
+			if ( auto error = res.error(); error != fastgltf::Error::None )
+			{
+				return;
+			}
+			_asset = std::move( res.get() );
+		}
+
+		auto make_texture = []( const fastgltf::Asset& asset, std::size_t texture_index )
+		{
+			const auto& texture = asset.textures[ texture_index ];
+			const auto& image = asset.images[ *texture.imageIndex ];
+			const auto& data = std::get<fastgltf::sources::BufferView>( image.data );
+			const auto& view = asset.bufferViews[ data.bufferViewIndex ];
+			return mesh_texture { data.mimeType, view.byteOffset, view.byteLength };
+		};
+
+		auto make_attribute = []( const fastgltf::Asset& asset, std::size_t accessor_index )
+		{
+			const auto& accessor = asset.accessors[ accessor_index ];
+			const auto& view = asset.bufferViews[ *accessor.bufferViewIndex ];
+			VkFormat format = VK_FORMAT_UNDEFINED;
+			switch ( accessor.componentType )
+			{
+				case fastgltf::ComponentType::Float:
 				{
-					case fastgltf::AccessorType::Scalar:
-						format = VK_FORMAT_R32_SFLOAT;
-						break;
-					case fastgltf::AccessorType::Vec2:
-						format = VK_FORMAT_R32G32_SFLOAT;
-						break;
-					case fastgltf::AccessorType::Vec3:
-						format = VK_FORMAT_R32G32B32_SFLOAT;
-						break;
-					case fastgltf::AccessorType::Vec4:
-						format = VK_FORMAT_R32G32B32A32_SFLOAT;
-						break;
+					switch ( accessor.type )
+					{
+						case fastgltf::AccessorType::Scalar:
+							format = VK_FORMAT_R32_SFLOAT;
+							break;
+						case fastgltf::AccessorType::Vec2:
+							format = VK_FORMAT_R32G32_SFLOAT;
+							break;
+						case fastgltf::AccessorType::Vec3:
+							format = VK_FORMAT_R32G32B32_SFLOAT;
+							break;
+						case fastgltf::AccessorType::Vec4:
+							format = VK_FORMAT_R32G32B32A32_SFLOAT;
+							break;
+					}
+					break;
 				}
-				break;
-			}
-			case fastgltf::ComponentType::UnsignedInt:
-			{
-				switch ( accessor.type )
+				case fastgltf::ComponentType::UnsignedInt:
 				{
-					case fastgltf::AccessorType::Scalar:
-						format = VK_FORMAT_R32_UINT;
-						break;
-					case fastgltf::AccessorType::Vec2:
-						format = VK_FORMAT_R32G32_UINT;
-						break;
-					case fastgltf::AccessorType::Vec3:
-						format = VK_FORMAT_R32G32B32_UINT;
-						break;
-					case fastgltf::AccessorType::Vec4:
-						format = VK_FORMAT_R32G32B32A32_UINT;
-						break;
+					switch ( accessor.type )
+					{
+						case fastgltf::AccessorType::Scalar:
+							format = VK_FORMAT_R32_UINT;
+							break;
+						case fastgltf::AccessorType::Vec2:
+							format = VK_FORMAT_R32G32_UINT;
+							break;
+						case fastgltf::AccessorType::Vec3:
+							format = VK_FORMAT_R32G32B32_UINT;
+							break;
+						case fastgltf::AccessorType::Vec4:
+							format = VK_FORMAT_R32G32B32A32_UINT;
+							break;
+					}
+					break;
 				}
-				break;
 			}
-		}
-		return mesh_attribute { .offset = accessor.byteOffset + view.byteOffset,
-								.stride = view.byteStride.value_or( 0 ),
-								.length = accessor.count,
-								.format = format };
-	};
+			return mesh_attribute { .offset = accessor.byteOffset + view.byteOffset,
+									.stride = view.byteStride.value_or( 0 ),
+									.length = accessor.count,
+									.format = format };
+		};
 
-	std::vector<mesh> meshes;
-	for ( const auto& mesh : asset.meshes )
-	{
-		auto& m = meshes.emplace_back();
-		if ( mesh.primitives[ 0 ].materialIndex )
+		for ( const auto& mesh : _asset.meshes )
 		{
-			const auto& material = asset.materials[ *mesh.primitives[ 0 ].materialIndex ];
-			if ( material.pbrData.baseColorTexture )
+			auto& m = _meshes.emplace_back();
+			if ( mesh.primitives[ 0 ].materialIndex )
 			{
-				m.albedo = make_texture( asset, material.pbrData.baseColorTexture->textureIndex );
+				const auto& material = _asset.materials[ *mesh.primitives[ 0 ].materialIndex ];
+				if ( material.pbrData.baseColorTexture )
+				{
+					m.albedo = make_texture( _asset, material.pbrData.baseColorTexture->textureIndex );
+				}
+				if ( material.normalTexture )
+				{
+					m.normal = make_texture( _asset, material.normalTexture->textureIndex );
+				}
+				m.pbr_data.base_color.x = material.pbrData.baseColorFactor.x();
+				m.pbr_data.base_color.y = material.pbrData.baseColorFactor.y();
+				m.pbr_data.base_color.z = material.pbrData.baseColorFactor.z();
+				m.pbr_data.base_color.w = material.pbrData.baseColorFactor.w();
+				m.pbr_data.metalness = material.pbrData.metallicFactor;
+				m.pbr_data.roughness = material.pbrData.roughnessFactor;
 			}
-			if ( material.normalTexture )
+
+			for ( const auto& attribute : mesh.primitives[ 0 ].attributes )
 			{
-				m.normal = make_texture( asset, material.normalTexture->textureIndex );
+				if ( attribute.name == "POSITION" )
+				{
+					m.positions = make_attribute( _asset, attribute.accessorIndex );
+				}
+				else if ( attribute.name == "NORMAL" )
+				{
+					m.normals = make_attribute( _asset, attribute.accessorIndex );
+				}
+				else if ( attribute.name == "TANGENT" )
+				{
+					m.tangents = make_attribute( _asset, attribute.accessorIndex );
+				}
+				else if ( attribute.name == "TEXCOORD_0" )
+				{
+					m.uvs = make_attribute( _asset, attribute.accessorIndex );
+				}
 			}
-			m.pbr_data.base_color.x = material.pbrData.baseColorFactor.x();
-			m.pbr_data.base_color.y = material.pbrData.baseColorFactor.y();
-			m.pbr_data.base_color.z = material.pbrData.baseColorFactor.z();
-			m.pbr_data.base_color.w = material.pbrData.baseColorFactor.w();
-			m.pbr_data.metalness = material.pbrData.metallicFactor;
-			m.pbr_data.roughness = material.pbrData.roughnessFactor;
+			if ( mesh.primitives[ 0 ].indicesAccessor )
+			{
+				m.indices = make_attribute( _asset, *mesh.primitives[ 0 ].indicesAccessor );
+			}
 		}
 
-		for ( const auto& attribute : mesh.primitives[ 0 ].attributes )
-		{
-			if ( attribute.name == "POSITION" )
-			{
-				m.positions = make_attribute( asset, attribute.accessorIndex );
-			}
-			else if ( attribute.name == "NORMAL" )
-			{
-				m.normals = make_attribute( asset, attribute.accessorIndex );
-			}
-			else if ( attribute.name == "TANGENT" )
-			{
-				m.tangents = make_attribute( asset, attribute.accessorIndex );
-			}
-			else if ( attribute.name == "TEXCOORD_0" )
-			{
-				m.uvs = make_attribute( asset, attribute.accessorIndex );
-			}
-		}
-		if ( mesh.primitives[ 0 ].indicesAccessor )
-		{
-			m.indices = make_attribute( asset, *mesh.primitives[ 0 ].indicesAccessor );
-		}
+		_gpu_meshes.resize( _meshes.size() );
 	}
 
-	const auto& gltf_buffer = std::get<fastgltf::sources::Array>( asset.buffers[ 0 ].data ).bytes;
-
-	std::size_t alloc_size = 0;
+	void upload_vertices()
 	{
-		OPTICK_EVENT( "load_images" );
-		for ( auto& mesh : meshes )
+		OPTICK_EVENT();
+
+		std::size_t alloc_size = 0;
+		for ( auto& mesh : _meshes )
+		{
+			alloc_size += sizeof( mesh_vertex ) * mesh.positions.length;
+			alloc_size += sizeof( uint32_t ) * mesh.indices.length;
+		}
+
+		_vertex_cmd_buffer->reset();
+		_vertex_cmd_buffer->begin();
+
+		using BufferUsage = renderer::Buffer::Usage;
+		_vertex_upload_buffer = _device.create_buffer( BufferUsage::TRANSFER_SRC, alloc_size, true );
+		const auto ptr = static_cast<std::byte*>( _vertex_upload_buffer.get_mapped_address() );
+		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
+
+		std::size_t offset = 0;
+		for ( int i = 0; i < _meshes.size(); ++i )
+		{
+			const auto& mesh = _meshes[ i ];
+			auto& gpu_data = _gpu_meshes[ i ];
+			gpu_data.vertices = _device.create_buffer( BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST
+														   | BufferUsage::SHADER_DEVICE_ADDRESS,
+													   sizeof( mesh_vertex ) * mesh.positions.length );
+
+			gpu_data.indices = _device.create_buffer( BufferUsage::INDEX_BUFFER | BufferUsage::TRANSFER_DST,
+													  sizeof( uint32_t ) * mesh.indices.length );
+			gpu_data.indices_count = mesh.indices.length;
+
+			{
+				OPTICK_EVENT( "repack_vertices" );
+				const auto verts = reinterpret_cast<mesh_vertex*>( ptr + offset );
+				const auto positions = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.positions.offset );
+				const auto normals = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.normals.offset );
+				const auto tangents = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.tangents.offset );
+				const auto uvs = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.uvs.offset );
+				for ( int i = 0; i < mesh.positions.length; ++i )
+				{
+					verts[ i ].position[ 0 ] = positions[ i * 3 ];
+					verts[ i ].position[ 1 ] = positions[ i * 3 + 1 ];
+					verts[ i ].position[ 2 ] = positions[ i * 3 + 2 ];
+					verts[ i ].normal[ 0 ] = normals[ i * 3 ];
+					verts[ i ].normal[ 1 ] = normals[ i * 3 + 1 ];
+					verts[ i ].normal[ 2 ] = normals[ i * 3 + 2 ];
+					verts[ i ].u = uvs[ i * 2 ];
+					verts[ i ].v = uvs[ i * 2 + 1 ];
+					verts[ i ].tangent[ 0 ] = tangents[ i * 4 ];
+					verts[ i ].tangent[ 1 ] = tangents[ i * 4 + 1 ];
+					verts[ i ].tangent[ 2 ] = tangents[ i * 4 + 2 ];
+					verts[ i ].tangent[ 3 ] = tangents[ i * 4 + 3 ];
+				}
+			}
+			_vertex_cmd_buffer->copy_buffer( _vertex_upload_buffer,
+											 offset,
+											 sizeof( mesh_vertex ) * mesh.positions.length,
+											 gpu_data.vertices );
+			offset += sizeof( mesh_vertex ) * mesh.positions.length;
+
+			memcpy( ptr + offset, gltf_buffer.data() + mesh.indices.offset, sizeof( uint32_t ) * mesh.indices.length );
+			_vertex_cmd_buffer->copy_buffer( _vertex_upload_buffer, offset, sizeof( uint32_t ) * mesh.indices.length, gpu_data.indices );
+			offset += sizeof( uint32_t ) * mesh.indices.length;
+		}
+
+		_vertex_cmd_buffer->end();
+		const VkCommandBufferSubmitInfo cmdSubmitInfo { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+														.commandBuffer = *_vertex_cmd_buffer->_cmd_buffer };
+		const VkSubmitInfo2 submitInfo {
+			.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+			.commandBufferInfoCount = 1,
+			.pCommandBufferInfos = &cmdSubmitInfo,
+		};
+
+		vkQueueSubmit2( *_device._gfx_queue, 1, &submitInfo, *_vertex_upload_fence );
+	}
+
+	void decompress_textures()
+	{
+		OPTICK_EVENT();
+
+		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
+
+		for ( auto& mesh : _meshes )
 		{
 			if ( const auto tex = IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + mesh.albedo.offset, mesh.albedo.size ), true ) )
 			{
 				mesh.albedo.image.reset( tex );
-				alloc_size += tex->w * tex->h * get_format_size( sdl_to_vulkan_format( sdl_gpu_format( tex->format ) ) );
 			}
 			if ( const auto tex = IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + mesh.normal.offset, mesh.normal.size ), true ) )
 			{
 				mesh.normal.image.reset( tex );
-				alloc_size += tex->w * tex->h * get_format_size( sdl_to_vulkan_format( sdl_gpu_format( tex->format ) ) );
 			}
-			alloc_size += sizeof( mesh_vertex ) * mesh.positions.length;
-			alloc_size += sizeof( uint32_t ) * mesh.indices.length;
 		}
 	}
-
-	vkResetFences( *device._device, 1, &fence );
-	cmd.reset();
-	cmd.begin();
-
-	using BufferUsage = renderer::Buffer::Usage;
-	std::vector<gpu_mesh_data> gpu_meshes;
-	const auto transfer_buffer = device.create_buffer( BufferUsage::TRANSFER_SRC, alloc_size, true );
-	const auto ptr = static_cast<std::byte*>( transfer_buffer.get_mapped_address() );
-
-	std::size_t offset = 0;
-	for ( const auto& mesh : meshes )
+	void upload_textures()
 	{
-		auto& gpu_data = gpu_meshes.emplace_back();
-		gpu_data.vertices = device.create_buffer( BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST
-													  | BufferUsage::SHADER_DEVICE_ADDRESS,
-												  sizeof( mesh_vertex ) * mesh.positions.length );
+		OPTICK_EVENT();
 
-		gpu_data.indices = device.create_buffer( BufferUsage::INDEX_BUFFER | BufferUsage::TRANSFER_DST,
-												 sizeof( uint32_t ) * mesh.indices.length );
-		gpu_data.indices_count = mesh.indices.length;
-
+		std::size_t alloc_size = 0;
+		for ( auto& mesh : _meshes )
 		{
-			OPTICK_EVENT( "repack_vertices" );
-			const auto verts = reinterpret_cast<mesh_vertex*>( ptr + offset );
-			const auto positions = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.positions.offset );
-			const auto normals = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.normals.offset );
-			const auto tangents = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.tangents.offset );
-			const auto uvs = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.uvs.offset );
-			for ( int i = 0; i < mesh.positions.length; ++i )
-			{
-				verts[ i ].position[ 0 ] = positions[ i * 3 ];
-				verts[ i ].position[ 1 ] = positions[ i * 3 + 1 ];
-				verts[ i ].position[ 2 ] = positions[ i * 3 + 2 ];
-				verts[ i ].normal[ 0 ] = normals[ i * 3 ];
-				verts[ i ].normal[ 1 ] = normals[ i * 3 + 1 ];
-				verts[ i ].normal[ 2 ] = normals[ i * 3 + 2 ];
-				verts[ i ].u = uvs[ i * 2 ];
-				verts[ i ].v = uvs[ i * 2 + 1 ];
-				verts[ i ].tangent[ 0 ] = tangents[ i * 4 ];
-				verts[ i ].tangent[ 1 ] = tangents[ i * 4 + 1 ];
-				verts[ i ].tangent[ 2 ] = tangents[ i * 4 + 2 ];
-				verts[ i ].tangent[ 3 ] = tangents[ i * 4 + 3 ];
-			}
+			alloc_size += mesh.albedo.image->w * mesh.albedo.image->h
+				* get_format_size( sdl_to_vulkan_format( sdl_gpu_format( mesh.albedo.image->format ) ) );
+			alloc_size += mesh.normal.image->w * mesh.normal.image->h
+				* get_format_size( sdl_to_vulkan_format( sdl_gpu_format( mesh.normal.image->format ) ) );
 		}
-		cmd.copy_buffer( transfer_buffer, offset, sizeof( mesh_vertex ) * mesh.positions.length, gpu_data.vertices );
-		offset += sizeof( mesh_vertex ) * mesh.positions.length;
 
-		memcpy( ptr + offset, gltf_buffer.data() + mesh.indices.offset, sizeof( uint32_t ) * mesh.indices.length );
-		cmd.copy_buffer( transfer_buffer, offset, sizeof( uint32_t ) * mesh.indices.length, gpu_data.indices );
-		offset += sizeof( uint32_t ) * mesh.indices.length;
+		_texture_cmd_buffer->reset();
+		_texture_cmd_buffer->begin();
 
-		auto tex = make_image_from_surface( device, *mesh.albedo.image, true );
-		offset += upload_image_from_surface( cmd, transfer_buffer, ptr, offset, tex, *mesh.albedo.image );
-		gpu_data.material.albedo_texture_index = tex_manager.add_texture( std::move( tex ) );
+		using BufferUsage = renderer::Buffer::Usage;
+		_texture_upload_buffer = _device.create_buffer( BufferUsage::TRANSFER_SRC, alloc_size, true );
+		const auto ptr = static_cast<std::byte*>( _texture_upload_buffer.get_mapped_address() );
 
-		tex = make_image_from_surface( device, *mesh.normal.image, false );
-		offset += upload_image_from_surface( cmd, transfer_buffer, ptr, offset, tex, *mesh.normal.image );
-		gpu_data.material.normal_texture_index = tex_manager.add_texture( std::move( tex ) );
+		std::size_t offset = 0;
+		for ( int i = 0; i < _meshes.size(); ++i )
+		{
+			const auto& mesh = _meshes[ i ];
+			auto& gpu_data = _gpu_meshes[ i ];
 
-		gpu_data.material.pbr_data = mesh.pbr_data;
+			auto tex = make_image_from_surface( _device, *mesh.albedo.image, true );
+			offset += upload_image_from_surface( *_texture_cmd_buffer, _texture_upload_buffer, ptr, offset, tex, *mesh.albedo.image );
+			gpu_data.material.albedo_texture_index = _tex_manager.add_texture( std::move( tex ) );
+			tex = make_image_from_surface( _device, *mesh.normal.image, false );
+			offset += upload_image_from_surface( *_texture_cmd_buffer, _texture_upload_buffer, ptr, offset, tex, *mesh.normal.image );
+			gpu_data.material.normal_texture_index = _tex_manager.add_texture( std::move( tex ) );
+			gpu_data.material.pbr_data = mesh.pbr_data;
+		}
+
+		_texture_cmd_buffer->end();
+		const VkCommandBufferSubmitInfo cmdSubmitInfo { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+														.commandBuffer = *_texture_cmd_buffer->_cmd_buffer };
+		const VkSubmitInfo2 submitInfo {
+			.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+			.commandBufferInfoCount = 1,
+			.pCommandBufferInfos = &cmdSubmitInfo,
+		};
+
+		vkQueueSubmit2( *_device._gfx_queue, 1, &submitInfo, *_tex_upload_fence );
 	}
 
-	cmd.end();
-	const VkCommandBufferSubmitInfo cmdSubmitInfo { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-													.commandBuffer = *cmd._cmd_buffer };
-	const VkSubmitInfo2 submitInfo {
-		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-		.commandBufferInfoCount = 1,
-		.pCommandBufferInfos = &cmdSubmitInfo,
-	};
+	std::vector<gpu_mesh_data> finalize()
+	{
+		OPTICK_EVENT();
+		(void) _device._device.waitForFences( { _vertex_upload_fence, _tex_upload_fence }, true, 9999999999 );
+		return std::move( _gpu_meshes );
+	}
 
-	vkQueueSubmit2( queue, 1, &submitInfo, fence );
-	vkWaitForFences( *device._device, 1, &fence, true, 9999999999 );
+private:
+	renderer::Device& _device;
+	renderer::BindlessManager& _tex_manager;
+	std::filesystem::path _path;
+	renderer::raii::CommandBuffer _vertex_cmd_buffer;
+	renderer::raii::CommandBuffer _texture_cmd_buffer;
+	renderer::raii::Buffer _vertex_upload_buffer;
+	renderer::raii::Buffer _texture_upload_buffer;
+	vk::raii::Fence _vertex_upload_fence;
+	vk::raii::Fence _tex_upload_fence;
+	fastgltf::Asset _asset;
+	std::vector<mesh> _meshes;
+	std::vector<gpu_mesh_data> _gpu_meshes;
+};
 
-	return gpu_meshes;
+std::vector<gpu_mesh_data>
+load_model( renderer::Device& device, renderer::BindlessManager& tex_manager )
+{
+	OPTICK_EVENT();
+	mesh_load_job job( device, tex_manager, "../assets/player.glb" );
+	job.parse();
+	job.upload_vertices();
+	job.decompress_textures();
+	job.upload_textures();
+	return job.finalize();
 }
 
 struct gpu_vertex_constants
@@ -621,7 +717,7 @@ static_assert( sizeof( gpu_vertex_constants ) % 16 == 0, "GPU vertex constants s
 
 int main()
 {
-	constexpr bool profile_startup = false;
+	constexpr bool profile_startup = true;
 
 	if ( profile_startup )
 	{
@@ -696,12 +792,7 @@ int main()
 						  .value();
 	}
 
-
-	auto transfer_command_buffer = device.grab_command_buffer();
-	const auto transfer_fence = make_fence( vk_device, 0 ).value();
-
-	const auto meshes = load_model( device, *transfer_command_buffer, transfer_fence.get(), gfx_queue, tex_manager );
-	transfer_command_buffer.reset();
+	const auto meshes = load_model( device, tex_manager );
 
 	OPTICK_POP();
 

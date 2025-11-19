@@ -96,6 +96,8 @@ target_link_libraries(renderer PRIVATE $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_ima
 target_link_libraries(renderer PUBLIC VulkanHppModule)
 target_link_libraries(renderer PRIVATE Optick)
 
+find_package(stdexec CONFIG REQUIRED)
+
 add_executable(brutus-vulkan)
 target_sources(brutus-vulkan PRIVATE vulkan_prototype.cpp)
 target_compile_definitions(brutus-vulkan PRIVATE GLM_FORCE_INTRINSICS GLM_FORCE_DEPTH_ZERO_TO_ONE)
@@ -103,6 +105,7 @@ target_link_libraries(brutus-vulkan PRIVATE SDL3::SDL3 fastgltf::fastgltf glm::g
 target_link_libraries(brutus-vulkan PRIVATE $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image-shared>,SDL3_image::SDL3_image-shared,SDL3_image::SDL3_image-static>)
 target_link_libraries(brutus-vulkan PRIVATE renderer)
 target_link_libraries(brutus-vulkan PRIVATE Optick)
+target_link_libraries(brutus-vulkan PRIVATE STDEXEC::stdexec)
 
 set_target_properties(brutus-vulkan PROPERTIES
     VS_DEBUGGER_ENVIRONMENT "VK_ADD_LAYER_PATH=${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin"
