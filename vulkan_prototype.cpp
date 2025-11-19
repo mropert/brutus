@@ -20,6 +20,7 @@
 #include <renderer/buffer.h>
 #include <renderer/command_buffer.h>
 #include <renderer/device.h>
+#include <renderer/sampler.h>
 #include <renderer/swapchain.h>
 #include <renderer/texture.h>
 
@@ -78,18 +79,6 @@ std::expected<raii::VkFence, VkResult> make_fence( VkDevice device, VkFenceCreat
 		return std::unexpected( ret );
 	}
 	return raii::make( device, fence );
-}
-
-std::expected<raii::VkSampler, VkResult> make_sampler( VkDevice device, VkFilter filter )
-{
-	const VkSamplerCreateInfo info { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = filter, .minFilter = filter };
-	VkSampler sampler = nullptr;
-	const auto res = vkCreateSampler( device, &info, nullptr, &sampler );
-	if ( res )
-	{
-		return std::unexpected( res );
-	}
-	return raii::make( device, sampler );
 }
 
 std::expected<raii::VkShaderModule, VkResult>
@@ -220,8 +209,8 @@ std::expected<raii::VkPipeline, VkResult> make_pipeline( VkDevice device,
 
 struct TextureManager
 {
-	explicit TextureManager( VkDevice device )
-		: m_device( device )
+	explicit TextureManager( renderer::Device& device )
+		: m_device( &device )
 	{
 		const std::array<VkDescriptorSetLayoutBinding, 2> bindings { { { .binding = 0,
 																		 .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
@@ -237,12 +226,12 @@ struct TextureManager
 															.pBindings = bindings.data() };
 
 		VkDescriptorSetLayout set = nullptr;
-		auto res = vkCreateDescriptorSetLayout( m_device, &layout_info, nullptr, &set );
+		auto res = vkCreateDescriptorSetLayout( *m_device->_device, &layout_info, nullptr, &set );
 		if ( res )
 		{
 			throw std::runtime_error( "Failed to create descriptor set layout: " + std::to_string( res ) );
 		}
-		m_layout = raii::make( device, set );
+		m_layout = raii::make( *m_device->_device, set );
 
 		const std::array<VkDescriptorPoolSize, 2> pools { { { .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = max_textures },
 															{ .type = VK_DESCRIPTOR_TYPE_SAMPLER, .descriptorCount = 1 } } };
@@ -251,24 +240,24 @@ struct TextureManager
 													 .poolSizeCount = pools.size(),
 													 .pPoolSizes = pools.data() };
 		VkDescriptorPool pool = nullptr;
-		res = vkCreateDescriptorPool( m_device, &pool_info, nullptr, &pool );
+		res = vkCreateDescriptorPool( *m_device->_device, &pool_info, nullptr, &pool );
 		if ( res )
 		{
 			throw std::runtime_error( "Failed to create descriptor pool: " + std::to_string( res ) );
 		}
-		m_pool = raii::make( device, pool );
+		m_pool = raii::make( *m_device->_device, pool );
 
 		const VkDescriptorSetAllocateInfo alloc_info { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
 													   .descriptorPool = m_pool.get(),
 													   .descriptorSetCount = 1,
 													   .pSetLayouts = &set };
-		res = vkAllocateDescriptorSets( m_device, &alloc_info, &m_desc );
+		res = vkAllocateDescriptorSets( *m_device->_device, &alloc_info, &m_desc );
 		if ( res )
 		{
 			throw std::runtime_error( "Failed to allocate descriptor set: " + std::to_string( res ) );
 		}
 
-		m_linear_sampler = *make_sampler( m_device, VK_FILTER_LINEAR );
+		m_linear_sampler = device.create_sampler( renderer::Sampler::Filter::LINEAR );
 	}
 
 	uint32_t add_texture( renderer::raii::Texture&& tex, renderer::raii::TextureView&& view )
@@ -287,7 +276,7 @@ struct TextureManager
 			images_info.emplace_back( nullptr, view._view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 		}
 
-		const VkDescriptorImageInfo sampler_info { .sampler = m_linear_sampler.get() };
+		const VkDescriptorImageInfo sampler_info { .sampler = static_cast<renderer::Sampler>( m_linear_sampler )._sampler };
 
 		const std::array<VkWriteDescriptorSet, 2> writes { { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 															   .dstSet = m_desc,
@@ -302,18 +291,18 @@ struct TextureManager
 															   .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
 															   .pImageInfo = &sampler_info } } };
 
-		vkUpdateDescriptorSets( m_device, writes.size(), writes.data(), 0, nullptr );
+		vkUpdateDescriptorSets( *m_device->_device, writes.size(), writes.data(), 0, nullptr );
 	}
 
 	static inline constexpr uint32_t max_textures = 8192;
 
-	VkDevice m_device;
+	renderer::Device* m_device;
 	raii::VkDescriptorSetLayout m_layout;
 	raii::VkDescriptorPool m_pool;
 	VkDescriptorSet m_desc = nullptr;
 	std::vector<renderer::raii::Texture> m_textures;
 	std::vector<renderer::raii::TextureView> m_texture_views;
-	raii::VkSampler m_linear_sampler;
+	renderer::raii::Sampler m_linear_sampler;
 };
 
 void transition_image( VkCommandBuffer cmd, VkImage image, VkImageLayout currentLayout, VkImageLayout newLayout )
@@ -813,7 +802,7 @@ int main()
 	auto draw_resolved_image = device.create_texture( draw_image_format, usage::TRANSFER_SRC | usage::COLOR_ATTACHMENT, draw_image_extent );
 	auto draw_resolved_image_view = device.create_texture_view( draw_resolved_image, renderer::TextureView::Aspect::COLOR );
 
-	TextureManager tex_manager( vk_device );
+	TextureManager tex_manager( device );
 
 	raii::VkPipelineLayout vk_pipeline_layout;
 	raii::VkPipeline vk_pipeline;

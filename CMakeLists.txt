@@ -84,6 +84,7 @@ target_sources(renderer
 		src/renderer/buffer.cpp
 		src/renderer/command_buffer.cpp
 		src/renderer/device.cpp
+		src/renderer/sampler.cpp
 		src/renderer/swapchain.cpp
 		src/renderer/texture.cpp
 		src/renderer/vma_impl.cpp
