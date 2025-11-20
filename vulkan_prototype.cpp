@@ -16,8 +16,7 @@
 
 //
 
-#include <exec/static_thread_pool.hpp>
-#include <stdexec/execution.hpp>
+#include <tbb/tbb.h>
 
 //
 
@@ -93,7 +92,7 @@ std::expected<raii::VkShaderModule, VkResult> make_shader( VkDevice device,
 														   renderer::ShaderStage stage,
 														   std::string filename )
 {
-	OPTICK_EVENT();
+	OPTICK_EVENT( "compile_shader" );
 	auto compilation_result = compiler.compile( stage, source, std::move( filename ) );
 	if ( !compilation_result )
 	{
@@ -206,30 +205,71 @@ std::expected<raii::VkPipeline, VkResult> make_pipeline( VkDevice device,
 	return raii::make( device, gfx_pipeline );
 }
 
-void transition_image( VkCommandBuffer cmd, VkImage image, VkImageLayout currentLayout, VkImageLayout newLayout )
+struct gpu_vertex_constants
 {
-	const VkImageAspectFlags aspectMask = ( newLayout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL ) ? VK_IMAGE_ASPECT_DEPTH_BIT
-																									: VK_IMAGE_ASPECT_COLOR_BIT;
-	const VkImageMemoryBarrier2 imageBarrier { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-											   .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-											   .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-											   .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-											   .dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT,
-											   .oldLayout = currentLayout,
-											   .newLayout = newLayout,
-											   .image = image,
-											   .subresourceRange = {
-												   .aspectMask = aspectMask,
-												   .levelCount = VK_REMAINING_MIP_LEVELS,
-												   .layerCount = VK_REMAINING_ARRAY_LAYERS,
-											   } };
+	glm::mat4 worldMatrix;
+	VkDeviceAddress vertexBuffer;
+	std::byte padding[ 8 ];
+};
 
-	const VkDependencyInfo depInfo { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-									 .imageMemoryBarrierCount = 1,
-									 .pImageMemoryBarriers = &imageBarrier };
+static_assert( sizeof( gpu_vertex_constants ) % 16 == 0, "GPU vertex constants should be a multiple of 16 bytes" );
 
-	vkCmdPipelineBarrier2( cmd, &depInfo );
+struct pbr_data
+{
+	glm::vec4 base_color;
+	float metalness;
+	float roughness;
+};
+
+struct gpu_material
+{
+	pbr_data pbr_data;
+	renderer::TextureHandle albedo_texture_index;
+	renderer::TextureHandle normal_texture_index;
+};
+
+std::tuple<raii::VkPipeline, raii::VkPipelineLayout>
+create_pipeline( renderer::Device& device, renderer::BindlessManager& tex_manager, renderer::Texture::Format draw_image_format )
+{
+	OPTICK_EVENT( "create_pipeline" );
+	renderer::ShaderCompiler compiler;
+
+	const std::array<VkPushConstantRange, 2> constants {
+		{ { .stageFlags = VK_SHADER_STAGE_VERTEX_BIT, .size = sizeof( gpu_vertex_constants ) },
+		  { .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT, .offset = sizeof( gpu_vertex_constants ), .size = sizeof( gpu_material ) } }
+	};
+	VkPipelineLayout layout {};
+	const VkDescriptorSetLayout desc_layout = tex_manager.get_layout();
+	VkPipelineLayoutCreateInfo pipeline_layout_info { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+													  .setLayoutCount = 1,
+													  .pSetLayouts = &desc_layout,
+													  .pushConstantRangeCount = constants.size(),
+													  .pPushConstantRanges = constants.data() };
+	const auto ret = vkCreatePipelineLayout( *device._device, &pipeline_layout_info, nullptr, &layout );
+	if ( ret )
+	{
+		return {};
+	}
+	auto vk_pipeline_layout = raii::make( *device._device, layout );
+
+	raii::VkShaderModule vertex_shader;
+	raii::VkShaderModule fragment_shader;
+	tbb::parallel_invoke(
+		[ & ]
+		{ vertex_shader = make_shader( *device._device, compiler, "../shaders/vulkan/mesh.vs", renderer::ShaderStage::VERTEX ).value(); },
+		[ & ]
+		{
+			fragment_shader = make_shader( *device._device, compiler, "../shaders/vulkan/mesh.fs", renderer::ShaderStage::FRAGMENT )
+								  .value();
+		} );
+
+	return {
+		make_pipeline( *device._device, static_cast<VkFormat>( draw_image_format ), layout, vertex_shader.get(), fragment_shader.get() )
+			.value(),
+		std::move( vk_pipeline_layout )
+	};
 }
+
 
 SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
 {
@@ -304,13 +344,6 @@ struct mesh_texture
 	sdl::raii::Surface image;
 };
 
-struct pbr_data
-{
-	glm::vec4 base_color;
-	float metalness;
-	float roughness;
-};
-
 struct mesh
 {
 	mesh_attribute positions;
@@ -318,8 +351,8 @@ struct mesh
 	mesh_attribute tangents;
 	mesh_attribute uvs;
 	mesh_attribute indices;
-	mesh_texture albedo;
-	mesh_texture normal;
+	int albedo_idx = -1;
+	int normal_idx = -1;
 	pbr_data pbr_data;
 };
 
@@ -330,13 +363,6 @@ struct mesh_vertex
 	glm::vec3 normal;
 	float v;
 	glm::vec4 tangent;
-};
-
-struct gpu_material
-{
-	pbr_data pbr_data;
-	renderer::TextureHandle albedo_texture_index;
-	renderer::TextureHandle normal_texture_index;
 };
 
 struct gpu_mesh_data
@@ -487,11 +513,13 @@ public:
 				const auto& material = _asset.materials[ *mesh.primitives[ 0 ].materialIndex ];
 				if ( material.pbrData.baseColorTexture )
 				{
-					m.albedo = make_texture( _asset, material.pbrData.baseColorTexture->textureIndex );
+					_textures.push_back( make_texture( _asset, material.pbrData.baseColorTexture->textureIndex ) );
+					m.albedo_idx = _textures.size() - 1;
 				}
 				if ( material.normalTexture )
 				{
-					m.normal = make_texture( _asset, material.normalTexture->textureIndex );
+					_textures.push_back( make_texture( _asset, material.normalTexture->textureIndex ) );
+					m.normal_idx = _textures.size() - 1;
 				}
 				m.pbr_data.base_color.x = material.pbrData.baseColorFactor.x();
 				m.pbr_data.base_color.y = material.pbrData.baseColorFactor.y();
@@ -612,30 +640,25 @@ public:
 		OPTICK_EVENT();
 
 		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
-
-		for ( auto& mesh : _meshes )
-		{
-			if ( const auto tex = IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + mesh.albedo.offset, mesh.albedo.size ), true ) )
+		tbb::parallel_for(
+			size_t( 0 ),
+			_textures.size(),
+			[ & ]( size_t index )
 			{
-				mesh.albedo.image.reset( tex );
-			}
-			if ( const auto tex = IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + mesh.normal.offset, mesh.normal.size ), true ) )
-			{
-				mesh.normal.image.reset( tex );
-			}
-		}
+				OPTICK_EVENT( "decompress_tex" );
+				_textures[ index ].image.reset(
+					IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + _textures[ index ].offset, _textures[ index ].size ), true ) );
+			} );
 	}
+
 	void upload_textures()
 	{
 		OPTICK_EVENT();
 
 		std::size_t alloc_size = 0;
-		for ( auto& mesh : _meshes )
+		for ( auto& tex : _textures )
 		{
-			alloc_size += mesh.albedo.image->w * mesh.albedo.image->h
-				* get_format_size( sdl_to_vulkan_format( sdl_gpu_format( mesh.albedo.image->format ) ) );
-			alloc_size += mesh.normal.image->w * mesh.normal.image->h
-				* get_format_size( sdl_to_vulkan_format( sdl_gpu_format( mesh.normal.image->format ) ) );
+			alloc_size += tex.image->w * tex.image->h * get_format_size( sdl_to_vulkan_format( sdl_gpu_format( tex.image->format ) ) );
 		}
 
 		_texture_cmd_buffer->reset();
@@ -651,11 +674,21 @@ public:
 			const auto& mesh = _meshes[ i ];
 			auto& gpu_data = _gpu_meshes[ i ];
 
-			auto tex = make_image_from_surface( _device, *mesh.albedo.image, true );
-			offset += upload_image_from_surface( *_texture_cmd_buffer, _texture_upload_buffer, ptr, offset, tex, *mesh.albedo.image );
+			auto tex = make_image_from_surface( _device, *_textures[ mesh.albedo_idx ].image, true );
+			offset += upload_image_from_surface( *_texture_cmd_buffer,
+												 _texture_upload_buffer,
+												 ptr,
+												 offset,
+												 tex,
+												 *_textures[ mesh.albedo_idx ].image );
 			gpu_data.material.albedo_texture_index = _tex_manager.add_texture( std::move( tex ) );
-			tex = make_image_from_surface( _device, *mesh.normal.image, false );
-			offset += upload_image_from_surface( *_texture_cmd_buffer, _texture_upload_buffer, ptr, offset, tex, *mesh.normal.image );
+			tex = make_image_from_surface( _device, *_textures[ mesh.normal_idx ].image, false );
+			offset += upload_image_from_surface( *_texture_cmd_buffer,
+												 _texture_upload_buffer,
+												 ptr,
+												 offset,
+												 tex,
+												 *_textures[ mesh.normal_idx ].image );
 			gpu_data.material.normal_texture_index = _tex_manager.add_texture( std::move( tex ) );
 			gpu_data.material.pbr_data = mesh.pbr_data;
 		}
@@ -675,9 +708,11 @@ public:
 	std::vector<gpu_mesh_data> finalize()
 	{
 		OPTICK_EVENT();
-		(void) _device._device.waitForFences( { _vertex_upload_fence, _tex_upload_fence }, true, 9999999999 );
+		(void)_device._device.waitForFences( { _vertex_upload_fence, _tex_upload_fence }, true, 9999999999 );
 		return std::move( _gpu_meshes );
 	}
+
+	std::size_t get_texture_count() const { return _textures.size(); }
 
 private:
 	renderer::Device& _device;
@@ -690,30 +725,42 @@ private:
 	vk::raii::Fence _vertex_upload_fence;
 	vk::raii::Fence _tex_upload_fence;
 	fastgltf::Asset _asset;
+	std::vector<mesh_texture> _textures;
 	std::vector<mesh> _meshes;
 	std::vector<gpu_mesh_data> _gpu_meshes;
 };
 
-std::vector<gpu_mesh_data>
-load_model( renderer::Device& device, renderer::BindlessManager& tex_manager )
+std::vector<gpu_mesh_data> load_model( renderer::Device& device, renderer::BindlessManager& tex_manager )
 {
 	OPTICK_EVENT();
 	mesh_load_job job( device, tex_manager, "../assets/player.glb" );
 	job.parse();
-	job.upload_vertices();
-	job.decompress_textures();
-	job.upload_textures();
+	tbb::parallel_invoke( [ & ]() { job.upload_vertices(); },
+						  [ & ]
+						  {
+							  job.decompress_textures();
+							  job.upload_textures();
+						  } );
 	return job.finalize();
 }
 
-struct gpu_vertex_constants
+struct tbb_observer final : public tbb::task_scheduler_observer
 {
-	glm::mat4 worldMatrix;
-	VkDeviceAddress vertexBuffer;
-	std::byte padding[ 8 ];
+	void on_scheduler_entry( bool is_worker ) override
+	{
+		if ( is_worker )
+		{
+			OPTICK_START_THREAD( "TBB Worker" );
+		}
+	}
+	void on_scheduler_exit( bool is_worker ) override
+	{
+		if ( is_worker )
+		{
+			OPTICK_STOP_THREAD();
+		}
+	}
 };
-
-static_assert( sizeof( gpu_vertex_constants ) % 16 == 0, "GPU vertex constants should be a multiple of 16 bytes" );
 
 int main()
 {
@@ -726,16 +773,23 @@ int main()
 
 	OPTICK_PUSH( "Startup" );
 
+	tbb_observer observer {};
+	observer.observe();
+
+	OPTICK_PUSH( "create_device" );
 	renderer::Device device( "Brutus-NG [Vulkan]" );
+	OPTICK_POP();
 
 	VkDevice vk_device = *device._device;
 	VkPhysicalDevice physical_device = *device._physical_device;
 	VkQueue gfx_queue = *device._gfx_queue;
 	OPTICK_GPU_INIT_VULKAN( &vk_device, &physical_device, &gfx_queue, &device._gfx_queue_family_index, 1, nullptr );
 
+	OPTICK_PUSH( "create_swapchain" );
 	constexpr auto swapchain_image_format = renderer::Texture::Format::R8G8B8A8_SRGB;
 	renderer::Swapchain swapchain( device, swapchain_image_format );
 	VkSwapchainKHR vk_swapchain = *swapchain._swapchain;
+	OPTICK_POP();
 
 	const auto draw_image_extent = device.get_extent();
 	constexpr auto draw_image_format = renderer::Texture::Format::R16G16B16A16_SFLOAT;
@@ -757,42 +811,15 @@ int main()
 
 	raii::VkPipelineLayout vk_pipeline_layout;
 	raii::VkPipeline vk_pipeline;
-	{
-		OPTICK_EVENT( "create_vk_pipeline" );
-		renderer::ShaderCompiler compiler;
-
-		const std::array<VkPushConstantRange, 2> constants {
-			{ { .stageFlags = VK_SHADER_STAGE_VERTEX_BIT, .size = sizeof( gpu_vertex_constants ) },
-			  { .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT, .offset = sizeof( gpu_vertex_constants ), .size = sizeof( gpu_material ) } }
-		};
-		VkPipelineLayout layout {};
-		const VkDescriptorSetLayout desc_layout = tex_manager.get_layout();
-		VkPipelineLayoutCreateInfo pipeline_layout_info { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-														  .setLayoutCount = 1,
-														  .pSetLayouts = &desc_layout,
-														  .pushConstantRangeCount = constants.size(),
-														  .pPushConstantRanges = constants.data() };
-		const auto ret = vkCreatePipelineLayout( vk_device, &pipeline_layout_info, nullptr, &layout );
-		if ( ret )
+	std::vector<gpu_mesh_data> meshes;
+	tbb::parallel_invoke(
+		[ & ]
 		{
-			std::println( stderr, "Cannot create pipeline layout: {}", static_cast<int>( ret ) );
-			return 1;
-		}
-		vk_pipeline_layout = raii::make( vk_device, layout );
-
-		const auto vertex_shader = make_shader( vk_device, compiler, "../shaders/vulkan/mesh.vs", renderer::ShaderStage::VERTEX ).value();
-		const auto fragment_shader = make_shader( vk_device, compiler, "../shaders/vulkan/mesh.fs", renderer::ShaderStage::FRAGMENT )
-										 .value();
-
-		vk_pipeline = make_pipeline( vk_device,
-									 static_cast<VkFormat>( draw_image_format ),
-									 layout,
-									 vertex_shader.get(),
-									 fragment_shader.get() )
-						  .value();
-	}
-
-	const auto meshes = load_model( device, tex_manager );
+			auto [ pipeline, pipeline_layout ] = create_pipeline( device, tex_manager, draw_image_format );
+			vk_pipeline_layout = std::move( pipeline_layout );
+			vk_pipeline = std::move( pipeline );
+		},
+		[ & ] { meshes = load_model( device, tex_manager ); } );
 
 	OPTICK_POP();
 
