@@ -4,7 +4,8 @@
 layout (location = 0) out vec2 outUV;
 layout (location = 1) out vec3 outWorldPos;
 layout (location = 2) out vec3 outNormal;
-layout (location = 3) out vec4 outTangent;
+layout (location = 3) out vec3 outTangent;
+layout (location = 4) out vec3 outBitangent;
 
 struct Vertex {
 
@@ -34,5 +35,6 @@ void main()
 	outUV.y = v.uv_y;
     outNormal = v.normal;
     outWorldPos = v.position;
-    outTangent = v.tangent;
+    outTangent = v.tangent.xyz;
+    outBitangent = cross(outNormal, outTangent) * v.tangent.w;
 }

@@ -3,7 +3,8 @@
 layout (location = 0) in vec2 inUV;
 layout (location = 1) in vec3 inFragPos;
 layout (location = 2) in vec3 inNormal;
-layout (location = 3) in vec4 inTangent;
+layout (location = 3) in vec3 inTangent;
+layout (location = 4) in vec3 inBitangent;
 layout (location = 0) out vec4 outFragColor;
 
 layout(set = 0, binding = 0) uniform texture2D textures[1024];
@@ -85,11 +86,8 @@ void main()
 	vec3 F0 = vec3(0.04);
     F0 = mix(F0, albedo, PushConstants.metalness);
 
-	vec3 normal = normalize(inNormal);
-	vec3 tangent = normalize(inTangent.xyz);
-	vec3 normalDisplacement = normalize((texture(sampler2D(textures[PushConstants.normal_index], sampl), inUV).xyz * 2.0) - 1.0);
-	normalDisplacement.y *= inTangent.w;
-	mat3 TBN = mat3(tangent, cross(normal, tangent), normal	);
+	vec3 normalDisplacement = (texture(sampler2D(textures[PushConstants.normal_index], sampl), inUV).xyz * 2.0) - 1.0;
+	mat3 TBN = mat3(normalize(inTangent), normalize(inBitangent), normalize(inNormal));
 	vec3 N = normalize(TBN * normalDisplacement);
 
 	vec3 V = normalize(camPos - inFragPos);
