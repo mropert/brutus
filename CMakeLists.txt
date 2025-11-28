@@ -84,6 +84,7 @@ target_sources(renderer
 		src/renderer/buffer.cpp
 		src/renderer/command_buffer.cpp
 		src/renderer/device.cpp
+		src/renderer/pipeline.cpp
 		src/renderer/sampler.cpp
 		src/renderer/shader.cpp
 		src/renderer/swapchain.cpp

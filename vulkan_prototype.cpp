@@ -74,135 +74,29 @@ namespace raii
 	};
 }
 
-std::expected<raii::VkFence, VkResult> make_fence( VkDevice device, VkFenceCreateFlags flags )
-{
-	const VkFenceCreateInfo fenceCreateInfo = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
-	VkFence fence;
-	const auto ret = vkCreateFence( device, &fenceCreateInfo, nullptr, &fence );
-	if ( ret )
-	{
-		return std::unexpected( ret );
-	}
-	return raii::make( device, fence );
-}
-
-std::expected<raii::VkShaderModule, VkResult> make_shader( VkDevice device,
-														   const renderer::ShaderCompiler& compiler,
-														   const std::string_view source,
-														   renderer::ShaderStage stage,
-														   std::string filename )
-{
-	OPTICK_EVENT( "compile_shader" );
-	auto compilation_result = compiler.compile( stage, source, std::move( filename ) );
-	if ( !compilation_result )
-	{
-		std::println( stderr, "Shader compilation failed: {}", compilation_result.error() );
-		return std::unexpected( VK_ERROR_INVALID_SHADER_NV );
-	}
-
-	VkShaderModuleCreateInfo shader_info = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-											 .codeSize = compilation_result->get_size() * sizeof( uint32_t ),
-											 .pCode = compilation_result->get_data() };
-
-	VkShaderModule shader {};
-	const auto ret = vkCreateShaderModule( device, &shader_info, nullptr, &shader );
-	if ( ret )
-	{
-		return std::unexpected( ret );
-	}
-	return raii::make( device, shader );
-}
-
-std::expected<raii::VkShaderModule, VkResult>
-make_shader( VkDevice device, const renderer::ShaderCompiler& compiler, const std::filesystem::path& path, renderer::ShaderStage stage )
+renderer::raii::ShaderCode
+compile_shader( const renderer::ShaderCompiler& compiler, const std::filesystem::path& path, renderer::ShaderStage stage )
 {
 	OPTICK_EVENT();
 	std::string source;
 	{
+		OPTICK_EVENT( "read_shader" );
 		std::ifstream istream( path );
 		if ( !istream )
 		{
-			// TODO: return proper file error
-			return std::unexpected( VK_ERROR_UNKNOWN );
+			throw renderer::Error( "Couldn't open shader file: " + path.string() );
 		}
 		source.assign( ( std::istreambuf_iterator<char>( istream ) ), std::istreambuf_iterator<char>() );
 	}
-	return make_shader( device, compiler, std::string_view( source ), stage, path.filename().string() );
-}
-
-std::expected<raii::VkPipeline, VkResult> make_pipeline( VkDevice device,
-														 VkFormat color_format,
-														 VkPipelineLayout layout,
-														 VkShaderModule vertex_shader,
-														 VkShaderModule fragment_shader )
-{
-	OPTICK_EVENT();
-	const VkPipelineVertexInputStateCreateInfo vertex_input { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-	const VkPipelineInputAssemblyStateCreateInfo ia { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-													  .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
-	const VkPipelineViewportStateCreateInfo viewport { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-													   .viewportCount = 1,
-													   .scissorCount = 1 };
-	const VkPipelineRasterizationStateCreateInfo rasterizer { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-															  .polygonMode = VK_POLYGON_MODE_FILL,
-															  .cullMode = VK_CULL_MODE_NONE,
-															  .frontFace = VK_FRONT_FACE_CLOCKWISE,
-															  .lineWidth = 1.f };
-	const VkPipelineMultisampleStateCreateInfo multisampling { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-															   .rasterizationSamples = VK_SAMPLE_COUNT_4_BIT,
-															   .minSampleShading = 1.0f };
-	const VkPipelineDepthStencilStateCreateInfo depth_stencil = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-																  .depthTestEnable = VK_TRUE,
-																  .depthWriteEnable = VK_TRUE,
-																  .depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL,
-																  .maxDepthBounds = 1.f };
-
-	const VkPipelineColorBlendAttachmentState blend_attachment { .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
-																	 | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT };
-	const VkPipelineColorBlendStateCreateInfo blend_state = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-															  .logicOp = VK_LOGIC_OP_COPY,
-															  .attachmentCount = 1,
-															  .pAttachments = &blend_attachment };
-	const VkPipelineRenderingCreateInfo render_info { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-													  .colorAttachmentCount = 1,
-													  .pColorAttachmentFormats = &color_format,
-													  .depthAttachmentFormat = VK_FORMAT_D32_SFLOAT };
-
-	const std::array<VkDynamicState, 2> state { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-	const VkPipelineDynamicStateCreateInfo dynamic_state { .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-														   .dynamicStateCount = state.size(),
-														   .pDynamicStates = state.data() };
-
-	const std::array<VkPipelineShaderStageCreateInfo, 2> shaders { { { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-																	   .stage = VK_SHADER_STAGE_VERTEX_BIT,
-																	   .module = vertex_shader,
-																	   .pName = "main" },
-																	 { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-																	   .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-																	   .module = fragment_shader,
-																	   .pName = "main" } } };
-
-	const VkGraphicsPipelineCreateInfo pipelineInfo = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-														.pNext = &render_info,
-														.stageCount = shaders.size(),
-														.pStages = shaders.data(),
-														.pVertexInputState = &vertex_input,
-														.pInputAssemblyState = &ia,
-														.pViewportState = &viewport,
-														.pRasterizationState = &rasterizer,
-														.pMultisampleState = &multisampling,
-														.pDepthStencilState = &depth_stencil,
-														.pColorBlendState = &blend_state,
-														.pDynamicState = &dynamic_state,
-														.layout = layout };
-
-	VkPipeline gfx_pipeline {};
-	const auto ret = vkCreateGraphicsPipelines( device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &gfx_pipeline );
-	if ( ret )
 	{
-		return std::unexpected( ret );
+		OPTICK_EVENT( "compile_shader" );
+		auto compilation_result = compiler.compile( stage, source, path.string() );
+		if ( !compilation_result )
+		{
+			throw renderer::Error( "Shader compilation failed: " + compilation_result.error() );
+		}
+		return std::move( compilation_result.value() );
 	}
-	return raii::make( device, gfx_pipeline );
 }
 
 struct gpu_vertex_constants
@@ -228,46 +122,33 @@ struct gpu_material
 	renderer::TextureHandle normal_texture_index;
 };
 
-std::tuple<raii::VkPipeline, raii::VkPipelineLayout>
+struct push_constants
+{
+	gpu_vertex_constants vertex_constants;
+	gpu_material material;
+};
+
+renderer::raii::Pipeline
 create_pipeline( renderer::Device& device, renderer::BindlessManager& tex_manager, renderer::Texture::Format draw_image_format )
 {
 	OPTICK_EVENT( "create_pipeline" );
 	renderer::ShaderCompiler compiler;
 
-	const std::array<VkPushConstantRange, 2> constants {
-		{ { .stageFlags = VK_SHADER_STAGE_VERTEX_BIT, .size = sizeof( gpu_vertex_constants ) },
-		  { .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT, .offset = sizeof( gpu_vertex_constants ), .size = sizeof( gpu_material ) } }
-	};
-	VkPipelineLayout layout {};
-	const VkDescriptorSetLayout desc_layout = tex_manager.get_layout();
-	VkPipelineLayoutCreateInfo pipeline_layout_info { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-													  .setLayoutCount = 1,
-													  .pSetLayouts = &desc_layout,
-													  .pushConstantRangeCount = constants.size(),
-													  .pPushConstantRanges = constants.data() };
-	const auto ret = vkCreatePipelineLayout( *device._device, &pipeline_layout_info, nullptr, &layout );
-	if ( ret )
-	{
-		return {};
-	}
-	auto vk_pipeline_layout = raii::make( *device._device, layout );
+	renderer::raii::ShaderCode vertex_shader;
+	renderer::raii::ShaderCode fragment_shader;
+	tbb::parallel_invoke( [ & ] { vertex_shader = compile_shader( compiler, "../shaders/vulkan/mesh.vs", renderer::ShaderStage::VERTEX ); },
+						  [ & ]
+						  {
+							  fragment_shader = compile_shader( compiler, "../shaders/vulkan/mesh.fs", renderer::ShaderStage::FRAGMENT );
+							  ;
+						  } );
 
-	raii::VkShaderModule vertex_shader;
-	raii::VkShaderModule fragment_shader;
-	tbb::parallel_invoke(
-		[ & ]
-		{ vertex_shader = make_shader( *device._device, compiler, "../shaders/vulkan/mesh.vs", renderer::ShaderStage::VERTEX ).value(); },
-		[ & ]
-		{
-			fragment_shader = make_shader( *device._device, compiler, "../shaders/vulkan/mesh.fs", renderer::ShaderStage::FRAGMENT )
-								  .value();
-		} );
-
-	return {
-		make_pipeline( *device._device, static_cast<VkFormat>( draw_image_format ), layout, vertex_shader.get(), fragment_shader.get() )
-			.value(),
-		std::move( vk_pipeline_layout )
-	};
+	return device.create_pipeline( renderer::Pipeline::Desc { .color_format = draw_image_format,
+															  .depth_format = renderer::Texture::Format::D32_SFLOAT,
+															  .push_constants_size = sizeof( push_constants ) },
+								   vertex_shader,
+								   fragment_shader,
+								   tex_manager );
 }
 
 
@@ -369,7 +250,6 @@ struct gpu_mesh_data
 {
 	renderer::raii::Buffer vertices;
 	renderer::raii::Buffer indices;
-	uint32_t indices_count;
 	gpu_material material;
 };
 
@@ -379,7 +259,7 @@ renderer::raii::Texture make_image_from_surface( renderer::Device& device, const
 	const auto format = sdl_to_vulkan_format( sdl_gpu_format( surface.format ), sRGB );
 	if ( format == VK_FORMAT_UNDEFINED )
 	{
-		throw renderer::renderer_error( "Unsupported format" );
+		throw renderer::Error( "Unsupported format" );
 	}
 	using TexUsage = renderer::Texture::Usage;
 	return device.create_texture( static_cast<renderer::Texture::Format>( format ),
@@ -587,7 +467,6 @@ public:
 
 			gpu_data.indices = _device.create_buffer( BufferUsage::INDEX_BUFFER | BufferUsage::TRANSFER_DST,
 													  sizeof( uint32_t ) * mesh.indices.length );
-			gpu_data.indices_count = mesh.indices.length;
 
 			{
 				OPTICK_EVENT( "repack_vertices" );
@@ -624,15 +503,7 @@ public:
 		}
 
 		_vertex_cmd_buffer->end();
-		const VkCommandBufferSubmitInfo cmdSubmitInfo { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-														.commandBuffer = *_vertex_cmd_buffer->_cmd_buffer };
-		const VkSubmitInfo2 submitInfo {
-			.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-			.commandBufferInfoCount = 1,
-			.pCommandBufferInfos = &cmdSubmitInfo,
-		};
-
-		vkQueueSubmit2( *_device._gfx_queue, 1, &submitInfo, *_vertex_upload_fence );
+		_device.submit( *_vertex_cmd_buffer, _vertex_upload_fence );
 	}
 
 	void decompress_textures()
@@ -694,15 +565,7 @@ public:
 		}
 
 		_texture_cmd_buffer->end();
-		const VkCommandBufferSubmitInfo cmdSubmitInfo { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-														.commandBuffer = *_texture_cmd_buffer->_cmd_buffer };
-		const VkSubmitInfo2 submitInfo {
-			.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-			.commandBufferInfoCount = 1,
-			.pCommandBufferInfos = &cmdSubmitInfo,
-		};
-
-		vkQueueSubmit2( *_device._gfx_queue, 1, &submitInfo, *_tex_upload_fence );
+		_device.submit( *_texture_cmd_buffer, _tex_upload_fence );
 	}
 
 	std::vector<gpu_mesh_data> finalize()
@@ -807,19 +670,11 @@ int main()
 	auto draw_resolved_image_view = device.create_texture_view( draw_resolved_image, renderer::TextureView::Aspect::COLOR );
 
 	renderer::BindlessManager tex_manager( device );
-	const VkDescriptorSet texture_set = tex_manager.get_set();
 
-	raii::VkPipelineLayout vk_pipeline_layout;
-	raii::VkPipeline vk_pipeline;
+	renderer::raii::Pipeline pipeline;
 	std::vector<gpu_mesh_data> meshes;
-	tbb::parallel_invoke(
-		[ & ]
-		{
-			auto [ pipeline, pipeline_layout ] = create_pipeline( device, tex_manager, draw_image_format );
-			vk_pipeline_layout = std::move( pipeline_layout );
-			vk_pipeline = std::move( pipeline );
-		},
-		[ & ] { meshes = load_model( device, tex_manager ); } );
+	tbb::parallel_invoke( [ & ] { pipeline = create_pipeline( device, tex_manager, draw_image_format ); },
+						  [ & ] { meshes = load_model( device, tex_manager ); } );
 
 	OPTICK_POP();
 
@@ -851,9 +706,8 @@ int main()
 
 		auto [ image_index, swapchain_image, swapchain_image_view ] = swapchain.acquire();
 		auto command_buffer = device.grab_command_buffer();
-		const VkCommandBuffer cmd = *command_buffer->_cmd_buffer;
 
-		OPTICK_GPU_CONTEXT( cmd );
+		OPTICK_GPU_CONTEXT( command_buffer->get_optick_context() );
 		command_buffer->reset();
 		command_buffer->begin();
 
@@ -867,12 +721,9 @@ int main()
 																	  .clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } } },
 										 renderer::RenderAttachment { .target = depth_image_view } );
 
-		vkCmdBindPipeline( cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline.get() );
-
+		command_buffer->bind_pipeline( pipeline, tex_manager );
 		command_buffer->set_viewport( draw_image_extent );
 		command_buffer->set_scissor( draw_image_extent );
-
-		vkCmdBindDescriptorSets( cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline_layout.get(), 0, 1, &texture_set, 0, nullptr );
 
 		const glm::mat4 view = glm::translate( glm::identity<glm::mat4>(), glm::vec3 { 0, -0.9, -1.5 } );
 		glm::mat4 projection = glm::perspective( glm::radians( 70.f ),
@@ -888,23 +739,11 @@ int main()
 		{
 			OPTICK_GPU_EVENT( "Draw Mesh" );
 
-			const gpu_vertex_constants vertex_constants { .worldMatrix = projection * view, .vertexBuffer = mesh.vertices._address };
+			const push_constants constants { .vertex_constants { .worldMatrix = projection * view, .vertexBuffer = mesh.vertices._address },
+											 .material = mesh.material };
 
-			vkCmdPushConstants( cmd,
-								vk_pipeline_layout.get(),
-								VK_SHADER_STAGE_VERTEX_BIT,
-								0,
-								sizeof( gpu_vertex_constants ),
-								&vertex_constants );
-			vkCmdPushConstants( cmd,
-								vk_pipeline_layout.get(),
-								VK_SHADER_STAGE_FRAGMENT_BIT,
-								sizeof( gpu_vertex_constants ),
-								sizeof( gpu_material ),
-								&mesh.material );
-			vkCmdBindIndexBuffer( cmd, mesh.indices._buffer, 0, VK_INDEX_TYPE_UINT32 );
-
-			vkCmdDrawIndexed( cmd, mesh.indices_count, 1, 0, 0, 0 );
+			command_buffer->push_constants( pipeline, constants );
+			command_buffer->draw_indexed( mesh.indices );
 		}
 
 		command_buffer->end_rendering();
