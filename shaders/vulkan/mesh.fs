@@ -13,7 +13,8 @@ layout(set = 0, binding = 1) uniform sampler sampl;
 layout(push_constant) uniform constants
 {
 	layout(offset = 80) vec3 cameraPosition;
-	layout(offset = 96) vec4 baseColor;
+	layout(offset = 96) vec4 mainLight;
+	vec4 baseColor;
 	float metalness;
 	float roughness;
 	uint albedo_index;
@@ -21,8 +22,6 @@ layout(push_constant) uniform constants
 } PushConstants;
 
 const float PI = 3.14159265359;
-const vec3 lightPos = vec3(20.0, 0.0, 10.0);
-const float lightIntensity = 2.5f;
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0)
 {
@@ -73,7 +72,7 @@ void main_basic_diffuse()
 {
 	vec3 albedo = texture(sampler2D(textures[PushConstants.albedo_index], sampl), inUV).xyz * PushConstants.baseColor.xyz;
 	vec3 N = normalize(inNormal);
-	vec3 L = normalize(lightPos);
+	vec3 L = normalize(PushConstants.mainLight.xyz);
 	float NdotL = max(dot(N, -L), 0.0);
 
 	albedo = albedo * (NdotL + 0.1);
@@ -92,9 +91,9 @@ void main()
 
 	vec3 V = normalize(PushConstants.cameraPosition - inFragPos);
 
-	vec3 L = normalize(-lightPos);
+	vec3 L = normalize(-PushConstants.mainLight.xyz);
 	vec3 H = normalize(V + L);
-	float attenuation = lightIntensity;
+	float attenuation = PushConstants.mainLight.w;
 	vec3 radiance     = vec3(1.0, 1.0, 1.0) * attenuation;
 
 	// cook-torrance brdf

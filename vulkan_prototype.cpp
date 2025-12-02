@@ -11,6 +11,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <memory>
+#include <numbers>
 #include <optick.h>
 #include <print>
 #include <span>
@@ -84,6 +85,7 @@ struct push_constants
 	gpu_vertex_constants vertex_constants;
 	glm::vec3 camera_position;
 	float padding;
+	glm::vec4 main_light;
 	gpu_material material;
 };
 
@@ -706,6 +708,8 @@ int main()
 	int frame_count = 0;
 
 	auto time = std::chrono::steady_clock::now();
+	constexpr float day_period = 10.f;
+	float time_of_day = 0.f;
 
 	while ( !quit )
 	{
@@ -728,6 +732,11 @@ int main()
 		using namespace std::chrono_literals;
 		const auto delta_time = duration_cast<std::chrono::microseconds>( time - old_time ).count()
 			/ static_cast<float>( duration_cast<std::chrono::microseconds>( 1s ).count() );
+		time_of_day += delta_time;
+		if ( time_of_day > day_period )
+		{
+			time_of_day -= day_period;
+		}
 		camera.update( delta_time );
 
 		auto [ image_index, swapchain_image, swapchain_image_view ] = swapchain.acquire();
@@ -760,6 +769,12 @@ int main()
 		// to opengl and gltf axis
 		projection[ 1 ][ 1 ] *= -1;
 
+		const float light_time = time_of_day / day_period;
+		const glm::vec4 main_light( 20.f * std::cosf( light_time * std::numbers::pi * 2.f ),
+									2.f,
+									10.f * std::sinf( light_time * std::numbers::pi * 2.f ),
+									2.5f );
+
 		for ( const auto& mesh : meshes )
 		{
 			OPTICK_GPU_EVENT( "Draw Mesh" );
@@ -767,6 +782,7 @@ int main()
 			const push_constants constants { .vertex_constants { .worldMatrix = projection * view,
 																 .vertexBuffer = mesh.vertices.get_device_address() },
 											 .camera_position = camera.position,
+											 .main_light = main_light,
 											 .material = mesh.material };
 
 			command_buffer->push_constants( pipeline, constants );
