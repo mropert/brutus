@@ -12,6 +12,7 @@ add_link_options(/DEBUG)
 
 add_library(Optick INTERFACE)
 if(USE_OPTICK)
+	set(OPTICK_FOUND TRUE)
 	set(OPTICK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../optick)
 	target_compile_definitions(Optick INTERFACE USE_OPTICK)
 	target_include_directories(Optick INTERFACE ${OPTICK_DIR}/include)

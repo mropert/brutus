@@ -293,8 +293,8 @@ public:
 		, _path( std::move( path ) )
 		, _vertex_cmd_buffer( device.grab_command_buffer() )
 		, _texture_cmd_buffer( device.grab_command_buffer() )
-		, _vertex_upload_fence( device._device.createFence( {} ) )
-		, _tex_upload_fence( device._device.createFence( {} ) )
+		, _vertex_upload_fence( device.create_fence() )
+		, _tex_upload_fence( device.create_fence() )
 	{
 	}
 
@@ -571,7 +571,7 @@ public:
 	std::vector<gpu_mesh_data> finalize()
 	{
 		OPTICK_EVENT();
-		(void)_device._device.waitForFences( { _vertex_upload_fence, _tex_upload_fence }, true, 9999999999 );
+		_device.wait_for_fences( { _vertex_upload_fence, _tex_upload_fence }, 9999999999 );
 		return std::move( _gpu_meshes );
 	}
 
@@ -585,8 +585,8 @@ private:
 	renderer::raii::CommandBuffer _texture_cmd_buffer;
 	renderer::raii::Buffer _vertex_upload_buffer;
 	renderer::raii::Buffer _texture_upload_buffer;
-	vk::raii::Fence _vertex_upload_fence;
-	vk::raii::Fence _tex_upload_fence;
+	renderer::raii::Fence _vertex_upload_fence;
+	renderer::raii::Fence _tex_upload_fence;
 	fastgltf::Asset _asset;
 	std::vector<mesh_texture> _textures;
 	std::vector<mesh> _meshes;
@@ -643,15 +643,9 @@ int main()
 	renderer::Device device( "Brutus-NG [Vulkan]" );
 	OPTICK_POP();
 
-	VkDevice vk_device = *device._device;
-	VkPhysicalDevice physical_device = *device._physical_device;
-	VkQueue gfx_queue = *device._gfx_queue;
-	OPTICK_GPU_INIT_VULKAN( &vk_device, &physical_device, &gfx_queue, &device._gfx_queue_family_index, 1, nullptr );
-
 	OPTICK_PUSH( "create_swapchain" );
 	constexpr auto swapchain_image_format = renderer::Texture::Format::R8G8B8A8_SRGB;
 	renderer::Swapchain swapchain( device, swapchain_image_format );
-	VkSwapchainKHR vk_swapchain = *swapchain._swapchain;
 	OPTICK_POP();
 
 	const auto draw_image_extent = device.get_extent();
@@ -707,7 +701,6 @@ int main()
 		auto [ image_index, swapchain_image, swapchain_image_view ] = swapchain.acquire();
 		auto command_buffer = device.grab_command_buffer();
 
-		OPTICK_GPU_CONTEXT( command_buffer->get_optick_context() );
 		command_buffer->reset();
 		command_buffer->begin();
 
@@ -739,7 +732,8 @@ int main()
 		{
 			OPTICK_GPU_EVENT( "Draw Mesh" );
 
-			const push_constants constants { .vertex_constants { .worldMatrix = projection * view, .vertexBuffer = mesh.vertices._address },
+			const push_constants constants { .vertex_constants { .worldMatrix = projection * view,
+																 .vertexBuffer = mesh.vertices.get_device_address() },
 											 .material = mesh.material };
 
 			command_buffer->push_constants( pipeline, constants );
@@ -758,8 +752,6 @@ int main()
 		command_buffer->end();
 
 		swapchain.submit( *command_buffer );
-
-		OPTICK_GPU_FLIP( *swapchain._swapchain );
 
 		swapchain.present();
 
