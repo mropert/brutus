@@ -1,5 +1,4 @@
 ---
-# Loosely inspired by Clausewitz style
 BasedOnStyle: WebKit
 Language: Cpp
 TabWidth: 4

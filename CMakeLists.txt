@@ -54,49 +54,11 @@ if(USE_OPTICK)
 		optimized ${CMAKE_CURRENT_SOURCE_DIR}/../optick/lib/x64/release/OptickCore.lib)
 endif()
 
-find_package(Vulkan REQUIRED)
-find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+add_subdirectory(submodules/vk-renderer)
+
 find_package(fastgltf CONFIG REQUIRED)
 find_package(SDL3_image CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
-
-add_library(VkBoostrap STATIC)
-target_sources(VkBoostrap PRIVATE third_party/vk-bootstrap/v1.4.305/VkBootstrap.cpp)
-target_include_directories(VkBoostrap PUBLIC third_party/vk-bootstrap/v1.4.305)
-target_link_libraries(VkBoostrap PUBLIC Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator)
-
-add_library( VulkanHppModule )
-target_sources( VulkanHppModule PRIVATE
-  FILE_SET CXX_MODULES
-  BASE_DIRS ${Vulkan_INCLUDE_DIR}
-  FILES ${Vulkan_INCLUDE_DIR}/vulkan/vulkan.cppm
-)
-target_compile_definitions( VulkanHppModule PUBLIC
-  VULKAN_HPP_NO_SETTERS
-  VULKAN_HPP_NO_CONSTRUCTORS
-)
-target_link_libraries( VulkanHppModule PUBLIC Vulkan::Vulkan )
-
-add_library(renderer)
-target_sources(renderer
-	PRIVATE
-		src/renderer/bindless.cpp
-		src/renderer/buffer.cpp
-		src/renderer/command_buffer.cpp
-		src/renderer/device.cpp
-		src/renderer/pipeline.cpp
-		src/renderer/sampler.cpp
-		src/renderer/shader.cpp
-		src/renderer/swapchain.cpp
-		src/renderer/texture.cpp
-		src/renderer/vma_impl.cpp
-)
-target_include_directories(renderer PUBLIC src)
-target_link_libraries(renderer PRIVATE SDL3::SDL3 Vulkan::Vulkan VkBoostrap unofficial::shaderc::shaderc fastgltf::fastgltf)
-target_link_libraries(renderer PRIVATE $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image-shared>,SDL3_image::SDL3_image-shared,SDL3_image::SDL3_image-static>)
-target_link_libraries(renderer PUBLIC VulkanHppModule)
-target_link_libraries(renderer PRIVATE Optick)
-
 find_package(TBB CONFIG REQUIRED)
 
 add_executable(brutus-vulkan)

@@ -1,0 +1,3 @@
+[submodule "submodules/vk-renderer"]
+	path = submodules/vk-renderer
+	url = git@github.com:mropert/vk-renderer.git

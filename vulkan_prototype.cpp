@@ -767,7 +767,7 @@ int main()
 	}
 
 	// Wait for the GPU to finish before we roll all the destructors
-	vkDeviceWaitIdle( vk_device );
+	device.wait_idle();
 
 	OPTICK_SHUTDOWN();
 
