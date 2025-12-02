@@ -2,12 +2,14 @@
 #include <SDL3/SDL_vulkan.h>
 #include <SDL3_image/SDL_image.h>
 #include <array>
+#include <chrono>
 #include <expected>
 #include <fastgltf/core.hpp>
 #include <filesystem>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <memory>
 #include <optick.h>
 #include <print>
@@ -28,51 +30,6 @@
 #include <renderer/shader.h>
 #include <renderer/swapchain.h>
 #include <renderer/texture.h>
-
-namespace raii
-{
-	struct VkObjectDeleter
-	{
-		::VkDevice device;
-		void operator()( ::VkCommandPool command_pool ) const { vkDestroyCommandPool( device, command_pool, nullptr ); }
-		void operator()( ::VkDescriptorPool pool ) const { vkDestroyDescriptorPool( device, pool, nullptr ); }
-		void operator()( ::VkDescriptorSetLayout layout ) const { vkDestroyDescriptorSetLayout( device, layout, nullptr ); }
-		void operator()( ::VkFence fence ) const { vkDestroyFence( device, fence, nullptr ); }
-		void operator()( ::VkImageView image_view ) const { vkDestroyImageView( device, image_view, nullptr ); }
-		void operator()( ::VkPipeline pipeline ) const { vkDestroyPipeline( device, pipeline, nullptr ); }
-		void operator()( ::VkPipelineLayout layout ) const { vkDestroyPipelineLayout( device, layout, nullptr ); }
-		void operator()( ::VkSampler sampler ) const { vkDestroySampler( device, sampler, nullptr ); }
-		void operator()( ::VkSemaphore semaphore ) const { vkDestroySemaphore( device, semaphore, nullptr ); }
-		void operator()( ::VkShaderModule shader ) const { vkDestroyShaderModule( device, shader, nullptr ); }
-	};
-	template <typename T>
-	using VkObject = std::unique_ptr<std::remove_pointer_t<T>, VkObjectDeleter>;
-
-	template <typename T>
-	auto make( ::VkDevice device, T object )
-	{
-		return VkObject<T> { object, VkObjectDeleter( device ) };
-	}
-
-	using VkCommandPool = VkObject<::VkCommandPool>;
-	using VkDescriptorPool = VkObject<::VkDescriptorPool>;
-	using VkDescriptorSetLayout = VkObject<::VkDescriptorSetLayout>;
-	using VkFence = VkObject<::VkFence>;
-	using VkImageView = VkObject<::VkImageView>;
-	using VkPipeline = VkObject<::VkPipeline>;
-	using VkPipelineLayout = VkObject<::VkPipelineLayout>;
-	using VkSampler = VkObject<::VkSampler>;
-	using VkSemaphore = VkObject<::VkSemaphore>;
-	using VkShaderModule = VkObject<::VkShaderModule>;
-
-	struct VulkanImage
-	{
-		vma::raii::Image image;
-		VkImageView view;
-		::VkExtent3D extent;
-		::VkFormat format;
-	};
-}
 
 renderer::raii::ShaderCode
 compile_shader( const renderer::ShaderCompiler& compiler, const std::filesystem::path& path, renderer::ShaderStage stage )
@@ -125,6 +82,8 @@ struct gpu_material
 struct push_constants
 {
 	gpu_vertex_constants vertex_constants;
+	glm::vec3 camera_position;
+	float padding;
 	gpu_material material;
 };
 
@@ -607,6 +566,65 @@ std::vector<gpu_mesh_data> load_model( renderer::Device& device, renderer::Bindl
 	return job.finalize();
 }
 
+class Camera
+{
+public:
+	glm::vec3 velocity;
+	glm::vec3 position;
+	float pitch = 0.f;
+	float yaw = 0.f;
+
+	glm::mat4 getViewMatrix()
+	{
+		glm::mat4 cameraTranslation = glm::translate( glm::mat4( 1.f ), position );
+		glm::mat4 cameraRotation = getRotationMatrix();
+		return glm::inverse( cameraTranslation * cameraRotation );
+	}
+	glm::mat4 getRotationMatrix()
+	{
+		glm::quat pitchRotation = glm::angleAxis( pitch, glm::vec3 { 1.f, 0.f, 0.f } );
+		glm::quat yawRotation = glm::angleAxis( yaw, glm::vec3 { 0.f, -1.f, 0.f } );
+
+		return glm::mat4_cast( yawRotation ) * glm::mat4_cast( pitchRotation );
+	}
+
+	void processSDLEvent( SDL_Event& e )
+	{
+		if ( e.type == SDL_EVENT_KEY_DOWN || SDL_EVENT_KEY_UP )
+		{
+			const float factor = e.type == SDL_EVENT_KEY_DOWN ? 5.f : 0.f;
+			if ( e.key.key == SDLK_W )
+			{
+				velocity.z = -1 * factor;
+			}
+			if ( e.key.key == SDLK_S )
+			{
+				velocity.z = 1 * factor;
+			}
+			if ( e.key.key == SDLK_A )
+			{
+				velocity.x = -1 * factor;
+			}
+			if ( e.key.key == SDLK_D )
+			{
+				velocity.x = 1 * factor;
+			}
+		}
+
+		if ( e.type == SDL_EVENT_MOUSE_MOTION )
+		{
+			yaw += (float)e.motion.xrel / 500.f;
+			pitch -= (float)e.motion.yrel / 500.f;
+		}
+	}
+
+	void update( float delta_time )
+	{
+		glm::mat4 cameraRotation = getRotationMatrix();
+		position += glm::vec3( cameraRotation * glm::vec4( velocity, 0.f ) ) * delta_time;
+	}
+};
+
 struct tbb_observer final : public tbb::task_scheduler_observer
 {
 	void on_scheduler_entry( bool is_worker ) override
@@ -672,6 +690,8 @@ int main()
 
 	OPTICK_POP();
 
+	Camera camera { .position = glm::vec3( 0, 1.f, 2.f ) };
+
 	if ( profile_startup )
 	{
 		OPTICK_STOP_CAPTURE();
@@ -685,6 +705,8 @@ int main()
 	bool quit = false;
 	int frame_count = 0;
 
+	auto time = std::chrono::steady_clock::now();
+
 	while ( !quit )
 	{
 		OPTICK_FRAME( "MainThread" );
@@ -696,7 +718,17 @@ int main()
 			{
 				quit = true;
 			}
+			else
+			{
+				camera.processSDLEvent( event );
+			}
 		}
+		const auto old_time = time;
+		time = std::chrono::steady_clock::now();
+		using namespace std::chrono_literals;
+		const auto delta_time = duration_cast<std::chrono::microseconds>( time - old_time ).count()
+			/ static_cast<float>( duration_cast<std::chrono::microseconds>( 1s ).count() );
+		camera.update( delta_time );
 
 		auto [ image_index, swapchain_image, swapchain_image_view ] = swapchain.acquire();
 		auto command_buffer = device.grab_command_buffer();
@@ -718,7 +750,7 @@ int main()
 		command_buffer->set_viewport( draw_image_extent );
 		command_buffer->set_scissor( draw_image_extent );
 
-		const glm::mat4 view = glm::translate( glm::identity<glm::mat4>(), glm::vec3 { 0, -0.9, -1.5 } );
+		const glm::mat4 view = camera.getViewMatrix();
 		glm::mat4 projection = glm::perspective( glm::radians( 70.f ),
 												 static_cast<float>( draw_image_extent.width ) / draw_image_extent.height,
 												 10000.f,
@@ -734,6 +766,7 @@ int main()
 
 			const push_constants constants { .vertex_constants { .worldMatrix = projection * view,
 																 .vertexBuffer = mesh.vertices.get_device_address() },
+											 .camera_position = camera.position,
 											 .material = mesh.material };
 
 			command_buffer->push_constants( pipeline, constants );

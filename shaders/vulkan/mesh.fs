@@ -12,7 +12,8 @@ layout(set = 0, binding = 1) uniform sampler sampl;
 
 layout(push_constant) uniform constants
 {
-	layout(offset = 80) vec4 baseColor;
+	layout(offset = 80) vec3 cameraPosition;
+	layout(offset = 96) vec4 baseColor;
 	float metalness;
 	float roughness;
 	uint albedo_index;
@@ -21,7 +22,6 @@ layout(push_constant) uniform constants
 
 const float PI = 3.14159265359;
 const vec3 lightPos = vec3(20.0, 0.0, 10.0);
-const vec3 camPos = vec3(0, -0.9, -1.5);
 const float lightIntensity = 2.5f;
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0)
@@ -90,7 +90,7 @@ void main()
 	mat3 TBN = mat3(normalize(inTangent), normalize(inBitangent), normalize(inNormal));
 	vec3 N = normalize(TBN * normalDisplacement);
 
-	vec3 V = normalize(camPos - inFragPos);
+	vec3 V = normalize(PushConstants.cameraPosition - inFragPos);
 
 	vec3 L = normalize(-lightPos);
 	vec3 H = normalize(V + L);
