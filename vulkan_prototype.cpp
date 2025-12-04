@@ -57,15 +57,6 @@ compile_shader( const renderer::ShaderCompiler& compiler, const std::filesystem:
 	}
 }
 
-struct gpu_vertex_constants
-{
-	glm::mat4 worldMatrix;
-	VkDeviceAddress vertexBuffer;
-	std::byte padding[ 8 ];
-};
-
-static_assert( sizeof( gpu_vertex_constants ) % 16 == 0, "GPU vertex constants should be a multiple of 16 bytes" );
-
 struct pbr_data
 {
 	glm::vec4 base_color;
@@ -82,11 +73,9 @@ struct gpu_material
 
 struct push_constants
 {
-	gpu_vertex_constants vertex_constants;
-	glm::vec3 camera_position;
-	float padding;
-	glm::vec4 main_light;
 	gpu_material material;
+	VkDeviceAddress scene_constants;
+	VkDeviceAddress vertex_buffer;
 };
 
 renderer::raii::Pipeline
@@ -576,13 +565,13 @@ public:
 	float pitch = 0.f;
 	float yaw = 0.f;
 
-	glm::mat4 getViewMatrix()
+	glm::mat4 getViewMatrix() const
 	{
 		glm::mat4 cameraTranslation = glm::translate( glm::mat4( 1.f ), position );
 		glm::mat4 cameraRotation = getRotationMatrix();
 		return glm::inverse( cameraTranslation * cameraRotation );
 	}
-	glm::mat4 getRotationMatrix()
+	glm::mat4 getRotationMatrix() const
 	{
 		glm::quat pitchRotation = glm::angleAxis( pitch, glm::vec3 { 1.f, 0.f, 0.f } );
 		glm::quat yawRotation = glm::angleAxis( yaw, glm::vec3 { 0.f, -1.f, 0.f } );
@@ -645,6 +634,30 @@ struct tbb_observer final : public tbb::task_scheduler_observer
 	}
 };
 
+struct scene_constants
+{
+	glm::mat4 view_projection_matrix;
+	glm::vec3 camera_position;
+	float padding;
+	glm::vec4 main_light;
+};
+
+scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D extent, float light_time )
+{
+	const glm::mat4 view = camera.getViewMatrix();
+	glm::mat4 projection = glm::perspective( glm::radians( 70.f ), static_cast<float>( extent.width ) / extent.height, 10000.f, 0.1f );
+
+	// invert the Y direction on projection matrix so that we are more similar
+	// to opengl and gltf axis
+	projection[ 1 ][ 1 ] *= -1;
+
+	const glm::vec4 main_light( 20.f * std::cosf( light_time * std::numbers::pi * 2.f ),
+								2.f,
+								10.f * std::sinf( light_time * std::numbers::pi * 2.f ),
+								2.5f );
+	return scene_constants { .view_projection_matrix = projection * view, .camera_position = camera.position, .main_light = main_light };
+}
+
 int main()
 {
 	constexpr bool profile_startup = true;
@@ -689,6 +702,11 @@ int main()
 	std::vector<gpu_mesh_data> meshes;
 	tbb::parallel_invoke( [ & ] { pipeline = create_pipeline( device, tex_manager, draw_image_format ); },
 						  [ & ] { meshes = load_model( device, tex_manager ); } );
+
+	auto constant_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+												  sizeof( std::array<scene_constants, renderer::MAX_FRAMES_IN_FLIGHT> ),
+												  true );
+	const auto constant_buffers_ptr = static_cast<scene_constants*>( constant_buffers.get_mapped_address() );
 
 	OPTICK_POP();
 
@@ -739,9 +757,14 @@ int main()
 		}
 		camera.update( delta_time );
 
-		auto [ image_index, swapchain_image, swapchain_image_view ] = swapchain.acquire();
-		auto command_buffer = device.grab_command_buffer();
+		const auto constants = build_scene_constants( camera, draw_image_extent, time_of_day / day_period );
 
+		auto [ image_index, swapchain_image, swapchain_image_view ] = swapchain.acquire();
+
+		memcpy( constant_buffers_ptr + image_index, &constants, sizeof( constants ) );
+		const auto constants_address = constant_buffers.get_device_address() + ( image_index * sizeof( constants ) );
+
+		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
 		command_buffer->begin();
 
@@ -759,31 +782,13 @@ int main()
 		command_buffer->set_viewport( draw_image_extent );
 		command_buffer->set_scissor( draw_image_extent );
 
-		const glm::mat4 view = camera.getViewMatrix();
-		glm::mat4 projection = glm::perspective( glm::radians( 70.f ),
-												 static_cast<float>( draw_image_extent.width ) / draw_image_extent.height,
-												 10000.f,
-												 0.1f );
-
-		// invert the Y direction on projection matrix so that we are more similar
-		// to opengl and gltf axis
-		projection[ 1 ][ 1 ] *= -1;
-
-		const float light_time = time_of_day / day_period;
-		const glm::vec4 main_light( 20.f * std::cosf( light_time * std::numbers::pi * 2.f ),
-									2.f,
-									10.f * std::sinf( light_time * std::numbers::pi * 2.f ),
-									2.5f );
-
 		for ( const auto& mesh : meshes )
 		{
 			OPTICK_GPU_EVENT( "Draw Mesh" );
 
-			const push_constants constants { .vertex_constants { .worldMatrix = projection * view,
-																 .vertexBuffer = mesh.vertices.get_device_address() },
-											 .camera_position = camera.position,
-											 .main_light = main_light,
-											 .material = mesh.material };
+			const push_constants constants { .material = mesh.material,
+											 .scene_constants = constants_address,
+											 .vertex_buffer = mesh.vertices.get_device_address() };
 
 			command_buffer->push_constants( pipeline, constants );
 			command_buffer->draw_indexed( mesh.indices );

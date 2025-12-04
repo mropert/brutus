@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_buffer_reference : require
 
 layout (location = 0) in vec2 inUV;
 layout (location = 1) in vec3 inFragPos;
@@ -10,15 +11,20 @@ layout (location = 0) out vec4 outFragColor;
 layout(set = 0, binding = 0) uniform texture2D textures[1024];
 layout(set = 0, binding = 1) uniform sampler sampl;
 
+layout(buffer_reference, std430) readonly buffer SceneConstants {
+	mat4 view_projection_matrix;
+	vec3 camera_position;
+	vec4 main_light;
+};
+
 layout(push_constant) uniform constants
 {
-	layout(offset = 80) vec3 cameraPosition;
-	layout(offset = 96) vec4 mainLight;
 	vec4 baseColor;
 	float metalness;
 	float roughness;
 	uint albedo_index;
 	uint normal_index;
+	SceneConstants scene_constants;
 } PushConstants;
 
 const float PI = 3.14159265359;
@@ -72,7 +78,7 @@ void main_basic_diffuse()
 {
 	vec3 albedo = texture(sampler2D(textures[PushConstants.albedo_index], sampl), inUV).xyz * PushConstants.baseColor.xyz;
 	vec3 N = normalize(inNormal);
-	vec3 L = normalize(PushConstants.mainLight.xyz);
+	vec3 L = normalize(PushConstants.scene_constants.main_light.xyz);
 	float NdotL = max(dot(N, -L), 0.0);
 
 	albedo = albedo * (NdotL + 0.1);
@@ -89,11 +95,11 @@ void main()
 	mat3 TBN = mat3(normalize(inTangent), normalize(inBitangent), normalize(inNormal));
 	vec3 N = normalize(TBN * normalDisplacement);
 
-	vec3 V = normalize(PushConstants.cameraPosition - inFragPos);
+	vec3 V = normalize(PushConstants.scene_constants.camera_position - inFragPos);
 
-	vec3 L = normalize(-PushConstants.mainLight.xyz);
+	vec3 L = normalize(-PushConstants.scene_constants.main_light.xyz);
 	vec3 H = normalize(V + L);
-	float attenuation = PushConstants.mainLight.w;
+	float attenuation = PushConstants.scene_constants.main_light.w;
 	vec3 radiance     = vec3(1.0, 1.0, 1.0) * attenuation;
 
 	// cook-torrance brdf
