@@ -78,27 +78,28 @@ struct push_constants
 	VkDeviceAddress vertex_buffer;
 };
 
-renderer::raii::Pipeline
-create_pipeline( renderer::Device& device, renderer::BindlessManager& tex_manager, renderer::Texture::Format draw_image_format )
+static const std::filesystem::path base_shader_path = "../shaders/vulkan";
+
+renderer::raii::Pipeline create_pipeline( renderer::Device& device,
+										  const renderer::ShaderCompiler& compiler,
+										  renderer::BindlessManager& tex_manager,
+										  const renderer::Pipeline::Desc& desc,
+										  const std::filesystem::path& vs_source,
+										  const std::filesystem::path& fs_source )
 {
 	OPTICK_EVENT( "create_pipeline" );
-	renderer::ShaderCompiler compiler;
 
 	renderer::raii::ShaderCode vertex_shader;
 	renderer::raii::ShaderCode fragment_shader;
-	tbb::parallel_invoke( [ & ] { vertex_shader = compile_shader( compiler, "../shaders/vulkan/mesh.vs", renderer::ShaderStage::VERTEX ); },
+	tbb::parallel_invoke( [ & ]
+						  { vertex_shader = compile_shader( compiler, base_shader_path / vs_source, renderer::ShaderStage::VERTEX ); },
 						  [ & ]
 						  {
-							  fragment_shader = compile_shader( compiler, "../shaders/vulkan/mesh.fs", renderer::ShaderStage::FRAGMENT );
+							  fragment_shader = compile_shader( compiler, base_shader_path / fs_source, renderer::ShaderStage::FRAGMENT );
 							  ;
 						  } );
 
-	return device.create_pipeline( renderer::Pipeline::Desc { .color_format = draw_image_format,
-															  .depth_format = renderer::Texture::Format::D32_SFLOAT,
-															  .push_constants_size = sizeof( push_constants ) },
-								   vertex_shader,
-								   fragment_shader,
-								   tex_manager );
+	return device.create_pipeline( desc, vertex_shader, fragment_shader, tex_manager );
 }
 
 
@@ -698,10 +699,24 @@ int main()
 
 	renderer::BindlessManager tex_manager( device );
 
-	renderer::raii::Pipeline pipeline;
+	renderer::raii::Pipeline mesh_pipeline;
 	std::vector<gpu_mesh_data> meshes;
-	tbb::parallel_invoke( [ & ] { pipeline = create_pipeline( device, tex_manager, draw_image_format ); },
-						  [ & ] { meshes = load_model( device, tex_manager ); } );
+	{
+		renderer::ShaderCompiler compiler;
+		tbb::parallel_invoke(
+			[ & ]
+			{
+				mesh_pipeline = create_pipeline( device,
+												 compiler,
+												 tex_manager,
+												 renderer::Pipeline::Desc { .color_format = draw_image_format,
+																			.depth_format = depth_image.get_format(),
+																			.push_constants_size = sizeof( push_constants ) },
+												 "mesh.vs",
+												 "mesh.fs" );
+			},
+			[ & ] { meshes = load_model( device, tex_manager ); } );
+	}
 
 	auto constant_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 												  sizeof( std::array<scene_constants, renderer::MAX_FRAMES_IN_FLIGHT> ),
@@ -778,7 +793,7 @@ int main()
 																	  .clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } } },
 										 renderer::RenderAttachment { .target = depth_image_view } );
 
-		command_buffer->bind_pipeline( pipeline, tex_manager );
+		command_buffer->bind_pipeline( mesh_pipeline, tex_manager );
 		command_buffer->set_viewport( draw_image_extent );
 		command_buffer->set_scissor( draw_image_extent );
 
@@ -790,7 +805,7 @@ int main()
 											 .scene_constants = constants_address,
 											 .vertex_buffer = mesh.vertices.get_device_address() };
 
-			command_buffer->push_constants( pipeline, constants );
+			command_buffer->push_constants( mesh_pipeline, constants );
 			command_buffer->draw_indexed( mesh.indices );
 		}
 
