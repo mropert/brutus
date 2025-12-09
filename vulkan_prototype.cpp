@@ -700,6 +700,7 @@ int main()
 	renderer::BindlessManager tex_manager( device );
 
 	renderer::raii::Pipeline mesh_pipeline;
+	renderer::raii::Pipeline grid_pipeline;
 	std::vector<gpu_mesh_data> meshes;
 	{
 		renderer::ShaderCompiler compiler;
@@ -714,6 +715,19 @@ int main()
 																			.push_constants_size = sizeof( push_constants ) },
 												 "mesh.vs",
 												 "mesh.fs" );
+			},
+			[ & ]
+			{
+				grid_pipeline = create_pipeline(
+					device,
+					compiler,
+					tex_manager,
+					renderer::Pipeline::Desc { .color_format = draw_image_format,
+											   .depth_format = depth_image.get_format(),
+											   .topology = renderer::Pipeline::PrimitiveTopology::TRIANGLE_STRIP,
+											   .push_constants_size = sizeof( renderer::BufferHandle ) },
+					"grid.vs",
+					"grid.fs" );
 			},
 			[ & ] { meshes = load_model( device, tex_manager ); } );
 	}
@@ -793,9 +807,9 @@ int main()
 																	  .clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } } },
 										 renderer::RenderAttachment { .target = depth_image_view } );
 
-		command_buffer->bind_pipeline( mesh_pipeline, tex_manager );
 		command_buffer->set_viewport( draw_image_extent );
 		command_buffer->set_scissor( draw_image_extent );
+		command_buffer->bind_pipeline( mesh_pipeline, tex_manager );
 
 		for ( const auto& mesh : meshes )
 		{
@@ -808,6 +822,10 @@ int main()
 			command_buffer->push_constants( mesh_pipeline, constants );
 			command_buffer->draw_indexed( mesh.indices );
 		}
+
+		command_buffer->bind_pipeline( grid_pipeline, tex_manager );
+		command_buffer->push_constants( grid_pipeline, constants_address );
+		command_buffer->draw( 4 );
 
 		command_buffer->end_rendering();
 
