@@ -11,11 +11,7 @@ layout (location = 0) out vec4 outFragColor;
 layout(set = 0, binding = 0) uniform texture2D textures[1024];
 layout(set = 0, binding = 1) uniform sampler sampl;
 
-layout(buffer_reference, std430) readonly buffer SceneConstants {
-	mat4 view_projection_matrix;
-	vec3 camera_position;
-	vec4 main_light;
-};
+#include "constants.glsl"
 
 layout(push_constant) uniform constants
 {

@@ -4,11 +4,7 @@
 layout (location = 0) out vec2 outGridPos;
 layout (location = 1) out vec3 outViewPos;
 
-layout(buffer_reference, std430) readonly buffer SceneConstants {
-	mat4 view_projection_matrix;
-	vec3 camera_position;
-	vec4 main_light;
-};
+#include "constants.glsl"
 
 layout( push_constant ) uniform constants
 {	
@@ -16,10 +12,14 @@ layout( push_constant ) uniform constants
 } PushConstants;
 
 const vec2 vertices[4] = { { -1, -1 }, { -1, 1 }, { 1, -1 }, { 1, 1 } };
+const float far_distance = 20;
 
 void main() 
 {	
-    vec3 worldPos = vec3( vertices[gl_VertexIndex].x, 0, vertices[gl_VertexIndex].y );
+    vec2 flat_pos = ( vertices[gl_VertexIndex] * far_distance ) + vec2( PushConstants.scene_constants.inverse_view_matrix[3][0], PushConstants.scene_constants.inverse_view_matrix[3][2] );
+    vec3 world_pos = vec3( flat_pos.x, 0, flat_pos.y );
 
-	gl_Position = PushConstants.scene_constants.view_projection_matrix * vec4(worldPos, 1.0);
+	gl_Position = PushConstants.scene_constants.view_projection_matrix * vec4(world_pos, 1);
+    outGridPos = flat_pos + 0.5;
+    outViewPos = ( PushConstants.scene_constants.view_matrix * vec4(world_pos, 1) ).xyz;
 }

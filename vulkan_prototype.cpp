@@ -32,29 +32,15 @@
 #include <renderer/swapchain.h>
 #include <renderer/texture.h>
 
-renderer::raii::ShaderCode
-compile_shader( const renderer::ShaderCompiler& compiler, const std::filesystem::path& path, renderer::ShaderStage stage )
+renderer::raii::ShaderCode compile_shader( const renderer::ShaderCompiler& compiler, std::string_view path, renderer::ShaderStage stage )
 {
 	OPTICK_EVENT();
-	std::string source;
+	auto compilation_result = compiler.compile( stage, path );
+	if ( !compilation_result )
 	{
-		OPTICK_EVENT( "read_shader" );
-		std::ifstream istream( path );
-		if ( !istream )
-		{
-			throw renderer::Error( "Couldn't open shader file: " + path.string() );
-		}
-		source.assign( ( std::istreambuf_iterator<char>( istream ) ), std::istreambuf_iterator<char>() );
+		throw renderer::Error( "Shader compilation failed: " + compilation_result.error() );
 	}
-	{
-		OPTICK_EVENT( "compile_shader" );
-		auto compilation_result = compiler.compile( stage, source, path.string() );
-		if ( !compilation_result )
-		{
-			throw renderer::Error( "Shader compilation failed: " + compilation_result.error() );
-		}
-		return std::move( compilation_result.value() );
-	}
+	return std::move( compilation_result.value() );
 }
 
 struct pbr_data
@@ -78,24 +64,21 @@ struct push_constants
 	VkDeviceAddress vertex_buffer;
 };
 
-static const std::filesystem::path base_shader_path = "../shaders/vulkan";
-
 renderer::raii::Pipeline create_pipeline( renderer::Device& device,
 										  const renderer::ShaderCompiler& compiler,
 										  renderer::BindlessManager& tex_manager,
 										  const renderer::Pipeline::Desc& desc,
-										  const std::filesystem::path& vs_source,
-										  const std::filesystem::path& fs_source )
+										  std::string_view vs_source,
+										  std::string_view fs_source )
 {
 	OPTICK_EVENT( "create_pipeline" );
 
 	renderer::raii::ShaderCode vertex_shader;
 	renderer::raii::ShaderCode fragment_shader;
-	tbb::parallel_invoke( [ & ]
-						  { vertex_shader = compile_shader( compiler, base_shader_path / vs_source, renderer::ShaderStage::VERTEX ); },
+	tbb::parallel_invoke( [ & ] { vertex_shader = compile_shader( compiler, vs_source, renderer::ShaderStage::VERTEX ); },
 						  [ & ]
 						  {
-							  fragment_shader = compile_shader( compiler, base_shader_path / fs_source, renderer::ShaderStage::FRAGMENT );
+							  fragment_shader = compile_shader( compiler, fs_source, renderer::ShaderStage::FRAGMENT );
 							  ;
 						  } );
 
@@ -638,6 +621,8 @@ struct tbb_observer final : public tbb::task_scheduler_observer
 struct scene_constants
 {
 	glm::mat4 view_projection_matrix;
+	glm::mat4 view_matrix;
+	glm::mat4 inverse_view_matrix;
 	glm::vec3 camera_position;
 	float padding;
 	glm::vec4 main_light;
@@ -656,7 +641,11 @@ scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D 
 								2.f,
 								10.f * std::sinf( light_time * std::numbers::pi * 2.f ),
 								2.5f );
-	return scene_constants { .view_projection_matrix = projection * view, .camera_position = camera.position, .main_light = main_light };
+	return scene_constants { .view_projection_matrix = projection * view,
+							 .view_matrix = view,
+							 .inverse_view_matrix = glm::inverse( view ),
+							 .camera_position = camera.position,
+							 .main_light = main_light };
 }
 
 int main()
@@ -703,7 +692,7 @@ int main()
 	renderer::raii::Pipeline grid_pipeline;
 	std::vector<gpu_mesh_data> meshes;
 	{
-		renderer::ShaderCompiler compiler;
+		renderer::ShaderCompiler compiler( "../shaders/vulkan" );
 		tbb::parallel_invoke(
 			[ & ]
 			{

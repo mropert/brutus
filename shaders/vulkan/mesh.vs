@@ -15,11 +15,7 @@ struct Vertex {
 	vec4 tangent;
 }; 
 
-layout(buffer_reference, std430) readonly buffer SceneConstants {
-	mat4 view_projection_matrix;
-	vec3 camera_position;
-	vec4 main_light;
-};
+#include "constants.glsl"
 
 layout(buffer_reference, std430) readonly buffer VertexBuffer { 
 	Vertex vertices[];
