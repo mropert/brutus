@@ -10,6 +10,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/type_aligned.hpp>
 #include <memory>
 #include <numbers>
 #include <optick.h>
@@ -27,21 +28,11 @@
 #include <renderer/buffer.h>
 #include <renderer/command_buffer.h>
 #include <renderer/device.h>
+#include <renderer/pipeline_manager.h>
 #include <renderer/sampler.h>
 #include <renderer/shader.h>
 #include <renderer/swapchain.h>
 #include <renderer/texture.h>
-
-renderer::raii::ShaderCode compile_shader( const renderer::ShaderCompiler& compiler, std::string_view path, renderer::ShaderStage stage )
-{
-	OPTICK_EVENT();
-	auto compilation_result = compiler.compile( stage, path );
-	if ( !compilation_result )
-	{
-		throw renderer::Error( "Shader compilation failed: " + compilation_result.error() );
-	}
-	return std::move( compilation_result.value() );
-}
 
 struct pbr_data
 {
@@ -60,31 +51,9 @@ struct gpu_material
 struct push_constants
 {
 	gpu_material material;
-	VkDeviceAddress scene_constants;
-	VkDeviceAddress vertex_buffer;
+	renderer::BufferHandle scene_constants;
+	renderer::BufferHandle vertex_buffer;
 };
-
-renderer::raii::Pipeline create_pipeline( renderer::Device& device,
-										  const renderer::ShaderCompiler& compiler,
-										  renderer::BindlessManager& tex_manager,
-										  const renderer::Pipeline::Desc& desc,
-										  std::string_view vs_source,
-										  std::string_view fs_source )
-{
-	OPTICK_EVENT( "create_pipeline" );
-
-	renderer::raii::ShaderCode vertex_shader;
-	renderer::raii::ShaderCode fragment_shader;
-	tbb::parallel_invoke( [ & ] { vertex_shader = compile_shader( compiler, vs_source, renderer::ShaderStage::VERTEX ); },
-						  [ & ]
-						  {
-							  fragment_shader = compile_shader( compiler, fs_source, renderer::ShaderStage::FRAGMENT );
-							  ;
-						  } );
-
-	return device.create_pipeline( desc, vertex_shader, fragment_shader, tex_manager );
-}
-
 
 SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
 {
@@ -606,14 +575,7 @@ struct tbb_observer final : public tbb::task_scheduler_observer
 	{
 		if ( is_worker )
 		{
-			OPTICK_START_THREAD( "TBB Worker" );
-		}
-	}
-	void on_scheduler_exit( bool is_worker ) override
-	{
-		if ( is_worker )
-		{
-			OPTICK_STOP_THREAD();
+			static thread_local OPTICK_THREAD( "TBB Worker" );
 		}
 	}
 };
@@ -623,8 +585,7 @@ struct scene_constants
 	glm::mat4 view_projection_matrix;
 	glm::mat4 view_matrix;
 	glm::mat4 inverse_view_matrix;
-	glm::vec3 camera_position;
-	float padding;
+	glm::aligned_vec3 camera_position;
 	glm::vec4 main_light;
 };
 
@@ -647,6 +608,14 @@ scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D 
 							 .camera_position = camera.position,
 							 .main_light = main_light };
 }
+
+struct grid_constants
+{
+	glm::aligned_vec3 grid_color = { 0.1f, 0.1f, 0.1f };
+	renderer::BufferHandle scene_constants;
+	float near_distance = 50.f;
+	float far_distance = 60.f;
+};
 
 int main()
 {
@@ -687,36 +656,30 @@ int main()
 	auto draw_resolved_image_view = device.create_texture_view( draw_resolved_image, renderer::TextureView::Aspect::COLOR );
 
 	renderer::BindlessManager tex_manager( device );
+	renderer::PipelineManager pipelines( device, "../shaders/vulkan", tex_manager );
 
-	renderer::raii::Pipeline mesh_pipeline;
-	renderer::raii::Pipeline grid_pipeline;
+	renderer::PipelineHandle mesh_pipeline;
+	renderer::PipelineHandle grid_pipeline;
 	std::vector<gpu_mesh_data> meshes;
 	{
 		renderer::ShaderCompiler compiler( "../shaders/vulkan" );
 		tbb::parallel_invoke(
 			[ & ]
 			{
-				mesh_pipeline = create_pipeline( device,
-												 compiler,
-												 tex_manager,
-												 renderer::Pipeline::Desc { .color_format = draw_image_format,
-																			.depth_format = depth_image.get_format(),
-																			.push_constants_size = sizeof( push_constants ) },
-												 "mesh.vs",
-												 "mesh.fs" );
+				mesh_pipeline = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
+																		  .depth_format = depth_image.get_format(),
+																		  .push_constants_size = sizeof( push_constants ) },
+											   "mesh.vs",
+											   "mesh.fs" );
 			},
 			[ & ]
 			{
-				grid_pipeline = create_pipeline(
-					device,
-					compiler,
-					tex_manager,
-					renderer::Pipeline::Desc { .color_format = draw_image_format,
-											   .depth_format = depth_image.get_format(),
-											   .topology = renderer::Pipeline::PrimitiveTopology::TRIANGLE_STRIP,
-											   .push_constants_size = sizeof( renderer::BufferHandle ) },
-					"grid.vs",
-					"grid.fs" );
+				grid_pipeline = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
+																		  .depth_format = depth_image.get_format(),
+																		  .topology = renderer::Pipeline::PrimitiveTopology::TRIANGLE_STRIP,
+																		  .push_constants_size = sizeof( grid_constants ) },
+											   "grid.vs",
+											   "grid.fs" );
 			},
 			[ & ] { meshes = load_model( device, tex_manager ); } );
 	}
@@ -782,6 +745,8 @@ int main()
 		memcpy( constant_buffers_ptr + image_index, &constants, sizeof( constants ) );
 		const auto constants_address = constant_buffers.get_device_address() + ( image_index * sizeof( constants ) );
 
+		pipelines.update();
+
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
 		command_buffer->begin();
@@ -798,7 +763,7 @@ int main()
 
 		command_buffer->set_viewport( draw_image_extent );
 		command_buffer->set_scissor( draw_image_extent );
-		command_buffer->bind_pipeline( mesh_pipeline, tex_manager );
+		command_buffer->bind_pipeline( pipelines.get( mesh_pipeline ), tex_manager );
 
 		for ( const auto& mesh : meshes )
 		{
@@ -808,13 +773,16 @@ int main()
 											 .scene_constants = constants_address,
 											 .vertex_buffer = mesh.vertices.get_device_address() };
 
-			command_buffer->push_constants( mesh_pipeline, constants );
+			command_buffer->push_constants( pipelines.get( mesh_pipeline ), constants );
 			command_buffer->draw_indexed( mesh.indices );
 		}
 
-		command_buffer->bind_pipeline( grid_pipeline, tex_manager );
-		command_buffer->push_constants( grid_pipeline, constants_address );
-		command_buffer->draw( 4 );
+		{
+			OPTICK_GPU_EVENT( "Draw Grid" );
+			command_buffer->bind_pipeline( pipelines.get( grid_pipeline ), tex_manager );
+			command_buffer->push_constants( pipelines.get( grid_pipeline ), grid_constants { .scene_constants = constants_address } );
+			command_buffer->draw( 4 );
+		}
 
 		command_buffer->end_rendering();
 

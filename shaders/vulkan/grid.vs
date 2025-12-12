@@ -8,15 +8,17 @@ layout (location = 1) out vec3 outViewPos;
 
 layout( push_constant ) uniform constants
 {	
+	vec3 grid_color;
 	SceneConstants scene_constants;
+	float near_distance;
+	float far_distance;
 } PushConstants;
 
 const vec2 vertices[4] = { { -1, -1 }, { -1, 1 }, { 1, -1 }, { 1, 1 } };
-const float far_distance = 20;
 
 void main() 
 {	
-    vec2 flat_pos = ( vertices[gl_VertexIndex] * far_distance ) + vec2( PushConstants.scene_constants.inverse_view_matrix[3][0], PushConstants.scene_constants.inverse_view_matrix[3][2] );
+    vec2 flat_pos = ( vertices[gl_VertexIndex] * PushConstants.far_distance ) + vec2( PushConstants.scene_constants.inverse_view_matrix[3][0], PushConstants.scene_constants.inverse_view_matrix[3][2] );
     vec3 world_pos = vec3( flat_pos.x, 0, flat_pos.y );
 
 	gl_Position = PushConstants.scene_constants.view_projection_matrix * vec4(world_pos, 1);
