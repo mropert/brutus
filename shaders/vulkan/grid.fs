@@ -32,11 +32,11 @@ float ScaledFade(float value, vec2 fogScale)
 
 void main()
 {
-	float viewDist = length(inViewPos);
-	float majorFog = Fade(viewDist);
-	float minorFog = ScaledFade(viewDist, vec2(0.5, 0.85));
+	const float viewDist = length(inViewPos);
+	const float majorFog = Fade(viewDist);
+	const float minorFog = ScaledFade(viewDist, vec2(0.5, 0.85));
 
-	ivec2 lineIndex = ivec2(floor(inGridPos));
+	const ivec2 lineIndex = ivec2(floor(inGridPos));
 
 	vec2 lineWidth;
 	vec3 lineColor[2];
@@ -72,16 +72,16 @@ void main()
 	}
 
 
-	vec2 lineDist = abs(0.5 - fract(inGridPos));
-	vec2 lineAA = fwidth(inGridPos) * 1.5;
-	vec2 lineMask = 1 - smoothstep(lineWidth - lineAA, lineWidth + lineAA, lineDist);
+	const vec2 lineDist = abs(0.5 - fract(inGridPos));
+	const vec2 lineAA = fwidth(inGridPos) * 1.5;
+	const vec2 lineMask = 1 - smoothstep(lineWidth - lineAA, lineWidth + lineAA, lineDist);
 	vec2 blendFactors = lineMask * lineFog;
 
 	for (int i = 0; i < 2; i++)
 		if (lineIndex[1 - i] == 0 && lineIndex[i] != 0)
 			blendFactors[i] *= 1 - blendFactors[1 - i];
 
-    float alpha = max(blendFactors.x, blendFactors.y);
-	vec3 color = max(lineColor[0] * blendFactors.x, lineColor[1] * blendFactors.y);
+    const float alpha = max(blendFactors.x, blendFactors.y);
+	const vec3 color = max(lineColor[0] * blendFactors.x, lineColor[1] * blendFactors.y);
     outFragColor = vec4( mix( PushConstants.grid_color, color, alpha), 1 );
 }

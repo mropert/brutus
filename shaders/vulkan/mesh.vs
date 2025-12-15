@@ -34,9 +34,9 @@ layout( push_constant ) uniform constants
 
 void main() 
 {
-    Vertex v = PushConstants.vertex_buffer.vertices[gl_VertexIndex];
+    const Vertex v = PushConstants.vertex_buffer.vertices[gl_VertexIndex];
 
-    vec4 pos = PushConstants.instance_buffer.model_matrix[gl_InstanceIndex] * vec4(v.position, 1.0f);
+    const vec4 pos = PushConstants.instance_buffer.model_matrix[gl_InstanceIndex] * vec4(v.position, 1.0f);
     gl_Position = PushConstants.scene_constants.view_projection_matrix * pos;
     outUV.x = v.uv_x;
     outUV.y = v.uv_y;

@@ -18,8 +18,9 @@ const vec2 vertices[4] = { { -1, -1 }, { -1, 1 }, { 1, -1 }, { 1, 1 } };
 
 void main() 
 {	
-    vec2 flat_pos = ( vertices[gl_VertexIndex] * PushConstants.far_distance ) + vec2( PushConstants.scene_constants.inverse_view_matrix[3][0], PushConstants.scene_constants.inverse_view_matrix[3][2] );
-    vec3 world_pos = vec3( flat_pos.x, 0, flat_pos.y );
+    const vec2 flat_pos = ( vertices[gl_VertexIndex] * PushConstants.far_distance )
+                         + vec2( PushConstants.scene_constants.inverse_view_matrix[3][0], PushConstants.scene_constants.inverse_view_matrix[3][2] );
+    const vec3 world_pos = vec3( flat_pos.x, 0, flat_pos.y );
 
 	gl_Position = PushConstants.scene_constants.view_projection_matrix * vec4(world_pos, 1);
     outGridPos = flat_pos + 0.5;
