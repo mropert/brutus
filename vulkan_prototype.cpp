@@ -15,6 +15,7 @@
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_vulkan.h>
 #include <memory>
+#include <meshoptimizer.h>
 #include <numbers>
 #include <optick.h>
 #include <print>
@@ -154,6 +155,7 @@ struct gpu_mesh_data
 {
 	renderer::raii::Buffer vertices;
 	renderer::raii::Buffer indices;
+	std::array<uint32_t, 2> indices_count_for_lod;
 	gpu_material material;
 };
 
@@ -344,12 +346,35 @@ public:
 	void upload_vertices()
 	{
 		OPTICK_EVENT();
+		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
+		std::vector<std::vector<uint32_t>> simplified_indices( _meshes.size() );
+
+		{
+			OPTICK_EVENT( "lod_generation" );
+			for ( int i = 0; i < _meshes.size(); ++i )
+			{
+				simplified_indices[ i ].resize( _meshes[ i ].indices.length );
+				const auto positions = reinterpret_cast<const float*>( gltf_buffer.data() + _meshes[ i ].positions.offset );
+				const auto indices = reinterpret_cast<const uint32_t*>( gltf_buffer.data() + _meshes[ i ].indices.offset );
+				const uint32_t size = meshopt_simplify( simplified_indices[ i ].data(),
+														indices,
+														_meshes[ i ].indices.length,
+														positions,
+														_meshes[ i ].positions.length,
+														_meshes[ i ].positions.stride,
+														_meshes[ i ].indices.length * 0.2,
+														0.01f,
+														0,
+														nullptr );
+				simplified_indices[ i ].resize( size );
+			}
+		}
 
 		std::size_t alloc_size = 0;
-		for ( auto& mesh : _meshes )
+		for ( int i = 0; i < _meshes.size(); ++i )
 		{
-			alloc_size += sizeof( mesh_vertex ) * mesh.positions.length;
-			alloc_size += sizeof( uint32_t ) * mesh.indices.length;
+			alloc_size += sizeof( mesh_vertex ) * _meshes[ i ].positions.length;
+			alloc_size += sizeof( uint32_t ) * ( _meshes[ i ].indices.length + simplified_indices[ i ].size() );
 		}
 
 		_vertex_cmd_buffer->reset();
@@ -358,7 +383,6 @@ public:
 		using BufferUsage = renderer::Buffer::Usage;
 		_vertex_upload_buffer = _device.create_buffer( BufferUsage::TRANSFER_SRC, alloc_size, true );
 		const auto ptr = static_cast<std::byte*>( _vertex_upload_buffer.get_mapped_address() );
-		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
 
 		std::size_t offset = 0;
 		for ( int i = 0; i < _meshes.size(); ++i )
@@ -370,7 +394,8 @@ public:
 													   sizeof( mesh_vertex ) * mesh.positions.length );
 
 			gpu_data.indices = _device.create_buffer( BufferUsage::INDEX_BUFFER | BufferUsage::TRANSFER_DST,
-													  sizeof( uint32_t ) * mesh.indices.length );
+													  sizeof( uint32_t )
+														  * ( _meshes[ i ].indices.length + simplified_indices[ i ].size() ) );
 
 			{
 				OPTICK_EVENT( "repack_vertices" );
@@ -384,10 +409,10 @@ public:
 					verts[ i ].position[ 0 ] = positions[ i * 3 ];
 					verts[ i ].position[ 1 ] = positions[ i * 3 + 1 ];
 					verts[ i ].position[ 2 ] = positions[ i * 3 + 2 ];
+					verts[ i ].u = uvs[ i * 2 ];
 					verts[ i ].normal[ 0 ] = normals[ i * 3 ];
 					verts[ i ].normal[ 1 ] = normals[ i * 3 + 1 ];
 					verts[ i ].normal[ 2 ] = normals[ i * 3 + 2 ];
-					verts[ i ].u = uvs[ i * 2 ];
 					verts[ i ].v = uvs[ i * 2 + 1 ];
 					verts[ i ].tangent[ 0 ] = tangents[ i * 4 ];
 					verts[ i ].tangent[ 1 ] = tangents[ i * 4 + 1 ];
@@ -402,8 +427,14 @@ public:
 			offset += sizeof( mesh_vertex ) * mesh.positions.length;
 
 			memcpy( ptr + offset, gltf_buffer.data() + mesh.indices.offset, sizeof( uint32_t ) * mesh.indices.length );
-			_vertex_cmd_buffer->copy_buffer( _vertex_upload_buffer, offset, sizeof( uint32_t ) * mesh.indices.length, gpu_data.indices );
-			offset += sizeof( uint32_t ) * mesh.indices.length;
+			memcpy( ptr + offset + sizeof( uint32_t ) * mesh.indices.length,
+					simplified_indices[ i ].data(),
+					sizeof( uint32_t ) * simplified_indices[ i ].size() );
+			const auto total_index_buffer_size = sizeof( uint32_t ) * ( mesh.indices.length + simplified_indices[ i ].size() );
+			_vertex_cmd_buffer->copy_buffer( _vertex_upload_buffer, offset, total_index_buffer_size, gpu_data.indices );
+			offset += total_index_buffer_size;
+			gpu_data.indices_count_for_lod[ 0 ] = mesh.indices.length;
+			gpu_data.indices_count_for_lod[ 1 ] = simplified_indices[ i ].size();
 		}
 
 		_vertex_cmd_buffer->end();
@@ -614,16 +645,23 @@ struct ui_data
 {
 	int x_miku = 1;
 	int z_miku = 1;
+	bool hd_miku = true;
 };
 
-void draw_ui( ui_data& data )
+void draw_ui( ui_data& data, std::span<const gpu_mesh_data> meshes )
 {
 	OPTICK_EVENT();
 	ImGui::Begin( "Render settings" );
 	{
+		for ( int i = 0; i < meshes.size(); ++i )
+		{
+			ImGui::Text( "Mesh #%d: %d triangles", i, meshes[ i ].indices_count_for_lod[ 1 - data.hd_miku ] );
+		}
+
 		ImGui::Text( "Instance count" );
 		ImGui::SliderInt( "x", &data.x_miku, 1, 100 );
 		ImGui::SliderInt( "z", &data.z_miku, 1, 100 );
+		ImGui::Checkbox( "HD", &data.hd_miku );
 	}
 	ImGui::End();
 }
@@ -825,7 +863,7 @@ int main()
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
-		draw_ui( ui_state );
+		draw_ui( ui_state, meshes );
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
@@ -849,13 +887,16 @@ int main()
 		{
 			OPTICK_GPU_EVENT( "Draw Mesh" );
 
+			command_buffer->bind_index_buffer( mesh.indices );
 			const push_constants constants { .material = mesh.material,
 											 .scene_constants = constants_address,
 											 .vertex_buffer = mesh.vertices.get_device_address(),
 											 .instance_buffer = instances_address };
 
 			command_buffer->push_constants( pipelines.get( mesh_pipeline ), constants );
-			command_buffer->draw_indexed( mesh.indices, ui_state.x_miku * ui_state.z_miku );
+			command_buffer->draw_indexed( mesh.indices_count_for_lod[ 1 - ui_state.hd_miku ],
+										  ui_state.x_miku * ui_state.z_miku,
+										  ui_state.hd_miku ? 0 : mesh.indices_count_for_lod[ 0 ] );
 		}
 
 		{
