@@ -53,6 +53,7 @@ struct push_constants
 	gpu_material material;
 	renderer::BufferHandle scene_constants;
 	renderer::BufferHandle vertex_buffer;
+	renderer::BufferHandle instance_buffer;
 };
 
 SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
@@ -609,10 +610,22 @@ scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D 
 							 .main_light = main_light };
 }
 
-void draw_ui()
+struct ui_data
+{
+	int x_miku = 1;
+	int z_miku = 1;
+};
+
+void draw_ui( ui_data& data )
 {
 	OPTICK_EVENT();
-	ImGui::ShowDemoWindow();
+	ImGui::Begin( "Render settings" );
+	{
+		ImGui::Text( "Instance count" );
+		ImGui::SliderInt( "x", &data.x_miku, 1, 100 );
+		ImGui::SliderInt( "z", &data.z_miku, 1, 100 );
+	}
+	ImGui::End();
 }
 
 struct grid_constants
@@ -720,6 +733,13 @@ int main()
 												  true );
 	const auto constant_buffers_ptr = static_cast<scene_constants*>( constant_buffers.get_mapped_address() );
 
+	static const uint32_t max_instances = 128 * 128;
+	using Instances = std::array<glm::mat4, max_instances>;
+	auto instance_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+												  sizeof( Instances ) * renderer::MAX_FRAMES_IN_FLIGHT,
+												  true );
+	const auto instance_buffers_ptr = static_cast<Instances*>( instance_buffers.get_mapped_address() );
+
 	OPTICK_POP();
 
 	Camera camera { .position = glm::vec3( 0, 1.f, 2.f ) };
@@ -742,6 +762,7 @@ int main()
 	float time_of_day = 0.f;
 
 	bool relative_mouse = false;
+	ui_data ui_state;
 
 	while ( !quit )
 	{
@@ -787,13 +808,24 @@ int main()
 		memcpy( constant_buffers_ptr + image_index, &constants, sizeof( constants ) );
 		const auto constants_address = constant_buffers.get_device_address() + ( image_index * sizeof( constants ) );
 
+		auto instance_buffer = ( instance_buffers_ptr + image_index )->data();
+		for ( int z = 0; z < ui_state.z_miku; ++z )
+		{
+			for ( int x = 0; x < ui_state.x_miku; ++x )
+			{
+				*instance_buffer++ = glm::translate( glm::identity<glm::mat4>(),
+													 glm::vec3( x - ( ui_state.x_miku / 2 ), 0, z - ( ui_state.z_miku / 2 ) ) );
+			}
+		}
+		const auto instances_address = instance_buffers.get_device_address() + ( image_index * sizeof( Instances ) );
+
 		pipelines.update();
 
 		ImGui_ImplVulkan_NewFrame();
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
-		draw_ui();
+		draw_ui( ui_state );
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
@@ -819,10 +851,11 @@ int main()
 
 			const push_constants constants { .material = mesh.material,
 											 .scene_constants = constants_address,
-											 .vertex_buffer = mesh.vertices.get_device_address() };
+											 .vertex_buffer = mesh.vertices.get_device_address(),
+											 .instance_buffer = instances_address };
 
 			command_buffer->push_constants( pipelines.get( mesh_pipeline ), constants );
-			command_buffer->draw_indexed( mesh.indices );
+			command_buffer->draw_indexed( mesh.indices, ui_state.x_miku * ui_state.z_miku );
 		}
 
 		{
