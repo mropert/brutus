@@ -11,15 +11,15 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_aligned.hpp>
+#include <imgui.h>
+#include <imgui_impl_sdl3.h>
+#include <imgui_impl_vulkan.h>
 #include <memory>
 #include <numbers>
 #include <optick.h>
 #include <print>
 #include <span>
 #include <stdexcept>
-
-//
-
 #include <tbb/tbb.h>
 
 //
@@ -609,6 +609,12 @@ scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D 
 							 .main_light = main_light };
 }
 
+void draw_ui()
+{
+	OPTICK_EVENT();
+	ImGui::ShowDemoWindow();
+}
+
 struct grid_constants
 {
 	glm::aligned_vec3 grid_color = { 0.1f, 0.1f, 0.1f };
@@ -640,8 +646,33 @@ int main()
 	renderer::Swapchain swapchain( device, swapchain_image_format );
 	OPTICK_POP();
 
-	const auto draw_image_extent = device.get_extent();
 	constexpr auto draw_image_format = renderer::Texture::Format::R16G16B16A16_SFLOAT;
+
+	{
+		OPTICK_EVENT( "init_imgui" );
+		ImGui::CreateContext();
+		const auto internals = device.get_internals();
+		ImGui_ImplSDL3_InitForVulkan( internals.window );
+		const VkFormat color_format = static_cast<VkFormat>( draw_image_format );
+		ImGui_ImplVulkan_InitInfo info { .ApiVersion = internals.api_version,
+										 .Instance = internals.instance,
+										 .PhysicalDevice = internals.physical_device,
+										 .Device = internals.device,
+										 .QueueFamily = internals.queue_family,
+										 .Queue = internals.queue,
+										 .MinImageCount = swapchain.get_image_count(),
+										 .ImageCount = swapchain.get_image_count(),
+										 .MSAASamples = VK_SAMPLE_COUNT_4_BIT,
+										 .DescriptorPoolSize = renderer::MAX_FRAMES_IN_FLIGHT,
+										 .UseDynamicRendering = true,
+										 .PipelineRenderingCreateInfo = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
+																		  .colorAttachmentCount = 1,
+																		  .pColorAttachmentFormats = &color_format,
+																		  .depthAttachmentFormat = VK_FORMAT_D32_SFLOAT } };
+		ImGui_ImplVulkan_Init( &info );
+	}
+
+	const auto draw_image_extent = device.get_extent();
 	using usage = renderer::Texture::Usage;
 	auto draw_image = device.create_texture( draw_image_format, usage::COLOR_ATTACHMENT, draw_image_extent, 4 );
 	auto draw_image_view = device.create_texture_view( draw_image, renderer::TextureView::Aspect::COLOR );
@@ -710,6 +741,8 @@ int main()
 	constexpr float day_period = 10.f;
 	float time_of_day = 0.f;
 
+	bool relative_mouse = false;
+
 	while ( !quit )
 	{
 		OPTICK_FRAME( "MainThread" );
@@ -721,9 +754,18 @@ int main()
 			{
 				quit = true;
 			}
-			else
+			else if ( event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_LALT )
+			{
+				relative_mouse = !relative_mouse;
+				device.set_relative_mouse_mode( relative_mouse );
+			}
+			if ( relative_mouse )
 			{
 				camera.processSDLEvent( event );
+			}
+			else
+			{
+				ImGui_ImplSDL3_ProcessEvent( &event );
 			}
 		}
 		const auto old_time = time;
@@ -746,6 +788,12 @@ int main()
 		const auto constants_address = constant_buffers.get_device_address() + ( image_index * sizeof( constants ) );
 
 		pipelines.update();
+
+		ImGui_ImplVulkan_NewFrame();
+		ImGui_ImplSDL3_NewFrame();
+		ImGui::NewFrame();
+
+		draw_ui();
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
@@ -784,6 +832,12 @@ int main()
 			command_buffer->draw( 4 );
 		}
 
+		{
+			OPTICK_GPU_EVENT( "Draw UI" );
+			ImGui::Render();
+			ImGui_ImplVulkan_RenderDrawData( ImGui::GetDrawData(), command_buffer->get_impl() );
+		}
+
 		command_buffer->end_rendering();
 
 		command_buffer->transition_texture( draw_resolved_image, renderer::Texture::Layout::TRANSFER_SRC_OPTIMAL );
@@ -804,6 +858,10 @@ int main()
 
 	// Wait for the GPU to finish before we roll all the destructors
 	device.wait_idle();
+
+	ImGui_ImplVulkan_Shutdown();
+	ImGui_ImplSDL3_Shutdown();
+	ImGui::DestroyContext();
 
 	OPTICK_SHUTDOWN();
 
