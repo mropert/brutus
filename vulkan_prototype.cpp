@@ -155,7 +155,7 @@ struct gpu_mesh_data
 {
 	renderer::raii::Buffer vertices;
 	renderer::raii::Buffer indices;
-	std::array<uint32_t, 2> indices_count_for_lod;
+	std::array<uint32_t, 4> indices_count_for_lod;
 	gpu_material material;
 };
 
@@ -343,30 +343,43 @@ public:
 		_gpu_meshes.resize( _meshes.size() );
 	}
 
+	struct lod_indices
+	{
+		std::vector<uint32_t> indices;
+		std::array<uint32_t, 3> indices_per_lod;
+	};
+
 	void upload_vertices()
 	{
 		OPTICK_EVENT();
 		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
-		std::vector<std::vector<uint32_t>> simplified_indices( _meshes.size() );
+		std::vector<lod_indices> simplified_indices( _meshes.size() );
 
 		{
 			OPTICK_EVENT( "lod_generation" );
+			constexpr std::array<float, 3> lod_indices_factor { { 0.2, 0.05, 0.01 } };
+			constexpr std::array<float, 3> lod_error_factor { { 0.01, 0.04, 0.1 } };
+			std::vector<uint32_t> buffer;
 			for ( int i = 0; i < _meshes.size(); ++i )
 			{
-				simplified_indices[ i ].resize( _meshes[ i ].indices.length );
+				buffer.resize( _meshes[ i ].indices.length );
 				const auto positions = reinterpret_cast<const float*>( gltf_buffer.data() + _meshes[ i ].positions.offset );
 				const auto indices = reinterpret_cast<const uint32_t*>( gltf_buffer.data() + _meshes[ i ].indices.offset );
-				const uint32_t size = meshopt_simplify( simplified_indices[ i ].data(),
-														indices,
-														_meshes[ i ].indices.length,
-														positions,
-														_meshes[ i ].positions.length,
-														_meshes[ i ].positions.stride,
-														_meshes[ i ].indices.length * 0.2,
-														0.01f,
-														0,
-														nullptr );
-				simplified_indices[ i ].resize( size );
+				for ( int lod = 0; lod < simplified_indices[ i ].indices_per_lod.size(); ++lod )
+				{
+					const uint32_t size = meshopt_simplify( buffer.data(),
+															indices,
+															_meshes[ i ].indices.length,
+															positions,
+															_meshes[ i ].positions.length,
+															_meshes[ i ].positions.stride,
+															_meshes[ i ].indices.length * lod_indices_factor[ lod ],
+															lod_error_factor[ lod ],
+															0,
+															nullptr );
+					simplified_indices[ i ].indices_per_lod[ lod ] = size;
+					simplified_indices[ i ].indices.insert( end( simplified_indices[ i ].indices ), buffer.data(), buffer.data() + size );
+				}
 			}
 		}
 
@@ -374,7 +387,7 @@ public:
 		for ( int i = 0; i < _meshes.size(); ++i )
 		{
 			alloc_size += sizeof( mesh_vertex ) * _meshes[ i ].positions.length;
-			alloc_size += sizeof( uint32_t ) * ( _meshes[ i ].indices.length + simplified_indices[ i ].size() );
+			alloc_size += sizeof( uint32_t ) * ( _meshes[ i ].indices.length + simplified_indices[ i ].indices.size() );
 		}
 
 		_vertex_cmd_buffer->reset();
@@ -395,7 +408,7 @@ public:
 
 			gpu_data.indices = _device.create_buffer( BufferUsage::INDEX_BUFFER | BufferUsage::TRANSFER_DST,
 													  sizeof( uint32_t )
-														  * ( _meshes[ i ].indices.length + simplified_indices[ i ].size() ) );
+														  * ( _meshes[ i ].indices.length + simplified_indices[ i ].indices.size() ) );
 
 			{
 				OPTICK_EVENT( "repack_vertices" );
@@ -428,13 +441,15 @@ public:
 
 			memcpy( ptr + offset, gltf_buffer.data() + mesh.indices.offset, sizeof( uint32_t ) * mesh.indices.length );
 			memcpy( ptr + offset + sizeof( uint32_t ) * mesh.indices.length,
-					simplified_indices[ i ].data(),
-					sizeof( uint32_t ) * simplified_indices[ i ].size() );
-			const auto total_index_buffer_size = sizeof( uint32_t ) * ( mesh.indices.length + simplified_indices[ i ].size() );
+					simplified_indices[ i ].indices.data(),
+					sizeof( uint32_t ) * simplified_indices[ i ].indices.size() );
+			const auto total_index_buffer_size = sizeof( uint32_t ) * ( mesh.indices.length + simplified_indices[ i ].indices.size() );
 			_vertex_cmd_buffer->copy_buffer( _vertex_upload_buffer, offset, total_index_buffer_size, gpu_data.indices );
 			offset += total_index_buffer_size;
 			gpu_data.indices_count_for_lod[ 0 ] = mesh.indices.length;
-			gpu_data.indices_count_for_lod[ 1 ] = simplified_indices[ i ].size();
+			gpu_data.indices_count_for_lod[ 1 ] = simplified_indices[ i ].indices_per_lod[ 0 ];
+			gpu_data.indices_count_for_lod[ 2 ] = simplified_indices[ i ].indices_per_lod[ 1 ];
+			gpu_data.indices_count_for_lod[ 3 ] = simplified_indices[ i ].indices_per_lod[ 2 ];
 		}
 
 		_vertex_cmd_buffer->end();
@@ -655,7 +670,12 @@ void draw_ui( ui_data& data, std::span<const gpu_mesh_data> meshes )
 	{
 		for ( int i = 0; i < meshes.size(); ++i )
 		{
-			ImGui::Text( "Mesh #%d: %d / %d triangles", i, meshes[ i ].indices_count_for_lod[ 0 ], meshes[ i ].indices_count_for_lod[ 1 ] );
+			ImGui::Text( "Mesh #%d: %d / %d / %d / %d triangles",
+						 i,
+						 meshes[ i ].indices_count_for_lod[ 0 ],
+						 meshes[ i ].indices_count_for_lod[ 1 ],
+						 meshes[ i ].indices_count_for_lod[ 2 ],
+						 meshes[ i ].indices_count_for_lod[ 3 ] );
 		}
 
 		ImGui::Text( "Instance count" );
@@ -802,7 +822,7 @@ int main()
 	bool relative_mouse = false;
 	ui_data ui_state;
 
-	std::array<std::vector<glm::mat4>, 2> instances_per_lod;
+	std::array<std::vector<glm::mat4>, 4> instances_per_lod;
 
 	while ( !quit )
 	{
@@ -854,7 +874,12 @@ int main()
 			{
 				const auto pos = glm::vec3( x - ( ui_state.x_miku / 2 ), 0, z - ( ui_state.z_miku / 2 ) );
 				const auto distance = glm::distance( camera.position, pos );
-				instances_per_lod[ distance >= ui_state.lod_cutoff ? 1 : 0 ].push_back( glm::translate( glm::identity<glm::mat4>(), pos ) );
+				int lod = instances_per_lod.size() - 1;
+				while ( distance < ui_state.lod_cutoff * lod )
+				{
+					--lod;
+				}
+				instances_per_lod[ lod ].push_back( glm::translate( glm::identity<glm::mat4>(), pos ) );
 			}
 		}
 
@@ -863,11 +888,15 @@ int main()
 		memcpy( constant_buffers_ptr + image_index, &constants, sizeof( constants ) );
 		const auto constants_address = constant_buffers.get_device_address() + ( image_index * sizeof( constants ) );
 
-		const auto instance_buffer = ( instance_buffers_ptr + image_index )->data();
-		memcpy( instance_buffer, instances_per_lod[ 0 ].data(), instances_per_lod[ 0 ].size() * sizeof( glm::mat4 ) );
-		memcpy( instance_buffer + instances_per_lod[ 0 ].size(),
-				instances_per_lod[ 1 ].data(),
-				instances_per_lod[ 1 ].size() * sizeof( glm::mat4 ) );
+		auto instance_buffer = ( instance_buffers_ptr + image_index )->data();
+		for ( const auto& instances : instances_per_lod )
+		{
+			if ( !instances.empty() )
+			{
+				memcpy( instance_buffer, instances.data(), instances.size() * sizeof( glm::mat4 ) );
+				instance_buffer += instances.size();
+			}
+		}
 		const auto instances_address = instance_buffers.get_device_address() + ( image_index * sizeof( Instances ) );
 
 		pipelines.update();
@@ -907,16 +936,19 @@ int main()
 											 .instance_buffer = instances_address };
 
 			command_buffer->push_constants( pipelines.get( mesh_pipeline ), constants );
-			if ( instances_per_lod[ 0 ].size() > 0 )
+			uint32_t base_index = 0;
+			uint32_t base_instance = 0;
+			for ( int lod = 0; lod < instances_per_lod.size(); ++lod )
 			{
-				command_buffer->draw_indexed( mesh.indices_count_for_lod[ 0 ], instances_per_lod[ 0 ].size(), 0 );
-			}
-			if ( instances_per_lod[ 1 ].size() > 0 )
-			{
-				command_buffer->draw_indexed( mesh.indices_count_for_lod[ 1 ],
-											  instances_per_lod[ 1 ].size(),
-											  mesh.indices_count_for_lod[ 0 ],
-											  instances_per_lod[ 0 ].size() );
+				if ( !instances_per_lod[ lod ].empty() )
+				{
+					command_buffer->draw_indexed( mesh.indices_count_for_lod[ lod ],
+												  instances_per_lod[ lod ].size(),
+												  base_index,
+												  base_instance );
+					base_instance += instances_per_lod[ lod ].size();
+				}
+				base_index += mesh.indices_count_for_lod[ lod ];
 			}
 		}
 
