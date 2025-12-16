@@ -645,7 +645,7 @@ struct ui_data
 {
 	int x_miku = 1;
 	int z_miku = 1;
-	bool hd_miku = true;
+	float lod_cutoff = 10.f;
 };
 
 void draw_ui( ui_data& data, std::span<const gpu_mesh_data> meshes )
@@ -655,13 +655,13 @@ void draw_ui( ui_data& data, std::span<const gpu_mesh_data> meshes )
 	{
 		for ( int i = 0; i < meshes.size(); ++i )
 		{
-			ImGui::Text( "Mesh #%d: %d triangles", i, meshes[ i ].indices_count_for_lod[ 1 - data.hd_miku ] );
+			ImGui::Text( "Mesh #%d: %d / %d triangles", i, meshes[ i ].indices_count_for_lod[ 0 ], meshes[ i ].indices_count_for_lod[ 1 ] );
 		}
 
 		ImGui::Text( "Instance count" );
 		ImGui::SliderInt( "x", &data.x_miku, 1, 100 );
 		ImGui::SliderInt( "z", &data.z_miku, 1, 100 );
-		ImGui::Checkbox( "HD", &data.hd_miku );
+		ImGui::SliderFloat( "LOD cutoff", &data.lod_cutoff, 0.f, 200.f );
 	}
 	ImGui::End();
 }
@@ -802,6 +802,8 @@ int main()
 	bool relative_mouse = false;
 	ui_data ui_state;
 
+	std::array<std::vector<glm::mat4>, 2> instances_per_lod;
+
 	while ( !quit )
 	{
 		OPTICK_FRAME( "MainThread" );
@@ -841,20 +843,31 @@ int main()
 
 		const auto constants = build_scene_constants( camera, draw_image_extent, time_of_day / day_period );
 
+		for ( auto& instances : instances_per_lod )
+		{
+			instances.clear();
+		}
+
+		for ( int z = 0; z < ui_state.z_miku; ++z )
+		{
+			for ( int x = 0; x < ui_state.x_miku; ++x )
+			{
+				const auto pos = glm::vec3( x - ( ui_state.x_miku / 2 ), 0, z - ( ui_state.z_miku / 2 ) );
+				const auto distance = glm::distance( camera.position, pos );
+				instances_per_lod[ distance >= ui_state.lod_cutoff ? 1 : 0 ].push_back( glm::translate( glm::identity<glm::mat4>(), pos ) );
+			}
+		}
+
 		auto [ image_index, swapchain_image, swapchain_image_view ] = swapchain.acquire();
 
 		memcpy( constant_buffers_ptr + image_index, &constants, sizeof( constants ) );
 		const auto constants_address = constant_buffers.get_device_address() + ( image_index * sizeof( constants ) );
 
-		auto instance_buffer = ( instance_buffers_ptr + image_index )->data();
-		for ( int z = 0; z < ui_state.z_miku; ++z )
-		{
-			for ( int x = 0; x < ui_state.x_miku; ++x )
-			{
-				*instance_buffer++ = glm::translate( glm::identity<glm::mat4>(),
-													 glm::vec3( x - ( ui_state.x_miku / 2 ), 0, z - ( ui_state.z_miku / 2 ) ) );
-			}
-		}
+		const auto instance_buffer = ( instance_buffers_ptr + image_index )->data();
+		memcpy( instance_buffer, instances_per_lod[ 0 ].data(), instances_per_lod[ 0 ].size() * sizeof( glm::mat4 ) );
+		memcpy( instance_buffer + instances_per_lod[ 0 ].size(),
+				instances_per_lod[ 1 ].data(),
+				instances_per_lod[ 1 ].size() * sizeof( glm::mat4 ) );
 		const auto instances_address = instance_buffers.get_device_address() + ( image_index * sizeof( Instances ) );
 
 		pipelines.update();
@@ -894,9 +907,17 @@ int main()
 											 .instance_buffer = instances_address };
 
 			command_buffer->push_constants( pipelines.get( mesh_pipeline ), constants );
-			command_buffer->draw_indexed( mesh.indices_count_for_lod[ 1 - ui_state.hd_miku ],
-										  ui_state.x_miku * ui_state.z_miku,
-										  ui_state.hd_miku ? 0 : mesh.indices_count_for_lod[ 0 ] );
+			if ( instances_per_lod[ 0 ].size() > 0 )
+			{
+				command_buffer->draw_indexed( mesh.indices_count_for_lod[ 0 ], instances_per_lod[ 0 ].size(), 0 );
+			}
+			if ( instances_per_lod[ 1 ].size() > 0 )
+			{
+				command_buffer->draw_indexed( mesh.indices_count_for_lod[ 1 ],
+											  instances_per_lod[ 1 ].size(),
+											  mesh.indices_count_for_lod[ 0 ],
+											  instances_per_lod[ 0 ].size() );
+			}
 		}
 
 		{
