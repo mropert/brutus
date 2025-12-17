@@ -663,11 +663,14 @@ struct ui_data
 	float lod_cutoff = 10.f;
 };
 
-void draw_ui( ui_data& data, std::span<const gpu_mesh_data> meshes )
+void draw_ui( ui_data& data, std::span<const gpu_mesh_data> meshes, float gpu_time, std::span<float> lod_times )
 {
 	OPTICK_EVENT();
-	ImGui::Begin( "Render settings" );
+	ImGui::Begin( "Vulkan renderer" );
 	{
+		ImGui::SeparatorText( "Stats" );
+		ImGui::Text( "GPU time(ms): %.2f", gpu_time );
+		ImGui::Text( "Per LOD GPU time(ms): %.2f / %.2f / %.2f / %.2f", lod_times[ 0 ], lod_times[ 1 ], lod_times[ 2 ], lod_times[ 3 ] );
 		for ( int i = 0; i < meshes.size(); ++i )
 		{
 			ImGui::Text( "Mesh #%d: %d / %d / %d / %d triangles",
@@ -678,6 +681,7 @@ void draw_ui( ui_data& data, std::span<const gpu_mesh_data> meshes )
 						 meshes[ i ].indices_count_for_lod[ 3 ] );
 		}
 
+		ImGui::SeparatorText( "Settings" );
 		ImGui::Text( "Instance count" );
 		ImGui::SliderInt( "x", &data.x_miku, 1, 100 );
 		ImGui::SliderInt( "z", &data.z_miku, 1, 100 );
@@ -693,6 +697,20 @@ struct grid_constants
 	float near_distance = 50.f;
 	float far_distance = 60.f;
 };
+
+namespace Timestamps
+{
+	enum : uint32_t
+	{
+		FRAME_START = 0,
+		DRAW_MESHES,
+		DRAW_GRID = DRAW_MESHES + 64,
+		DRAW_UI,
+		BLIT,
+		FRAME_END,
+		COUNT
+	};
+}
 
 int main()
 {
@@ -798,6 +816,10 @@ int main()
 												  true );
 	const auto instance_buffers_ptr = static_cast<Instances*>( instance_buffers.get_mapped_address() );
 
+	const auto timestamp_period = device.get_timestamp_period();
+	std::array<renderer::raii::QueryPool, renderer::MAX_FRAMES_IN_FLIGHT> query_pools { device.create_query_pool( Timestamps::COUNT ),
+																						device.create_query_pool( Timestamps::COUNT ) };
+
 	OPTICK_POP();
 
 	Camera camera { .position = glm::vec3( 0, 1.f, 2.f ) };
@@ -885,6 +907,26 @@ int main()
 
 		auto [ image_index, swapchain_image, swapchain_image_view ] = swapchain.acquire();
 
+		const uint32_t query_pool_offset = image_index * Timestamps::COUNT;
+		std::array<uint64_t, Timestamps::COUNT> timestamps;
+		float gpu_time = 0.f;
+		std::array<float, 4> per_lod_gpu_time {};
+		if ( frame_count > renderer::MAX_FRAMES_IN_FLIGHT )
+		{
+			device.get_query_pool_results( query_pools[ image_index ], 0, timestamps );
+			gpu_time = ( timestamps[ Timestamps::FRAME_END ] - timestamps[ Timestamps::FRAME_START ] ) * timestamp_period * 1e-6f;
+			for ( int lod = 0; lod < 4; ++lod )
+			{
+				uint64_t time = 0;
+				for ( int mesh = 0; mesh < meshes.size(); ++mesh )
+				{
+					time += timestamps[ Timestamps::DRAW_MESHES + ( mesh * 4 ) + lod + 1 ]
+						- timestamps[ Timestamps::DRAW_MESHES + ( mesh * 4 ) + lod ];
+				}
+				per_lod_gpu_time[ lod ] = time * timestamp_period * 1e-6f;
+			}
+		}
+
 		memcpy( constant_buffers_ptr + image_index, &constants, sizeof( constants ) );
 		const auto constants_address = constant_buffers.get_device_address() + ( image_index * sizeof( constants ) );
 
@@ -905,11 +947,14 @@ int main()
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
-		draw_ui( ui_state, meshes );
+		draw_ui( ui_state, meshes, gpu_time, per_lod_gpu_time );
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
 		command_buffer->begin();
+
+		command_buffer->reset_query_pool( query_pools[ image_index ], 0, Timestamps::COUNT );
+		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::FRAME_START );
 
 		command_buffer->transition_texture( draw_image, renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL );
 		command_buffer->transition_texture( draw_resolved_image, renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL );
@@ -923,12 +968,13 @@ int main()
 
 		command_buffer->set_viewport( draw_image_extent );
 		command_buffer->set_scissor( draw_image_extent );
+
 		command_buffer->bind_pipeline( pipelines.get( mesh_pipeline ), tex_manager );
+		int mesh_draws = 0;
 
 		for ( const auto& mesh : meshes )
 		{
 			OPTICK_GPU_EVENT( "Draw Mesh" );
-
 			command_buffer->bind_index_buffer( mesh.indices );
 			const push_constants constants { .material = mesh.material,
 											 .scene_constants = constants_address,
@@ -940,6 +986,7 @@ int main()
 			uint32_t base_instance = 0;
 			for ( int lod = 0; lod < instances_per_lod.size(); ++lod )
 			{
+				command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES + mesh_draws );
 				if ( !instances_per_lod[ lod ].empty() )
 				{
 					command_buffer->draw_indexed( mesh.indices_count_for_lod[ lod ],
@@ -949,11 +996,14 @@ int main()
 					base_instance += instances_per_lod[ lod ].size();
 				}
 				base_index += mesh.indices_count_for_lod[ lod ];
+				++mesh_draws;
 			}
 		}
+		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES + mesh_draws );
 
 		{
 			OPTICK_GPU_EVENT( "Draw Grid" );
+			command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_GRID );
 			command_buffer->bind_pipeline( pipelines.get( grid_pipeline ), tex_manager );
 			command_buffer->push_constants( pipelines.get( grid_pipeline ), grid_constants { .scene_constants = constants_address } );
 			command_buffer->draw( 4 );
@@ -961,11 +1011,15 @@ int main()
 
 		{
 			OPTICK_GPU_EVENT( "Draw UI" );
+			command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_UI );
 			ImGui::Render();
 			ImGui_ImplVulkan_RenderDrawData( ImGui::GetDrawData(), command_buffer->get_impl() );
 		}
 
 		command_buffer->end_rendering();
+
+		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::BLIT );
+
 
 		command_buffer->transition_texture( draw_resolved_image, renderer::Texture::Layout::TRANSFER_SRC_OPTIMAL );
 		command_buffer->transition_texture( swapchain_image, renderer::Texture::Layout::TRANSFER_DST_OPTIMAL );
@@ -973,6 +1027,8 @@ int main()
 		command_buffer->blit_texture( draw_resolved_image, swapchain_image );
 
 		command_buffer->transition_texture( swapchain_image, renderer::Texture::Layout::PRESENT_SRC );
+
+		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::FRAME_END );
 
 		command_buffer->end();
 
