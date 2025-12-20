@@ -663,11 +663,21 @@ struct ui_data
 	float lod_cutoff = 10.f;
 };
 
-void draw_ui( ui_data& data, std::span<const gpu_mesh_data> meshes, float gpu_time, std::span<float> lod_times )
+void draw_ui( ui_data& data,
+			  const renderer::Device::Properties& props,
+			  std::span<const gpu_mesh_data> meshes,
+			  float gpu_time,
+			  std::span<float> lod_times )
 {
 	OPTICK_EVENT();
 	ImGui::Begin( "Vulkan renderer" );
 	{
+		ImGui::SeparatorText( "Hardware" );
+		ImGui::Text( "GPU: %s", props.name.c_str() );
+		ImGui::Text( "Memory (MB): RAM: %zu, VRAM: %zu, BAR: %zu",
+						  props.host_memory_size >> 20,
+						  props.device_memory_size >> 20,
+						  props.transfer_memory_size >> 20 );
 		ImGui::SeparatorText( "Stats" );
 		ImGui::Text( "GPU time(ms): %.2f", gpu_time );
 		ImGui::Text( "Per LOD GPU time(ms): %.2f / %.2f / %.2f / %.2f", lod_times[ 0 ], lod_times[ 1 ], lod_times[ 2 ], lod_times[ 3 ] );
@@ -728,11 +738,12 @@ int main()
 
 	OPTICK_PUSH( "create_device" );
 	renderer::Device device( "Brutus-NG [Vulkan]" );
+	const auto props = device.get_properties();
 	OPTICK_POP();
 
 	OPTICK_PUSH( "create_swapchain" );
 	constexpr auto swapchain_image_format = renderer::Texture::Format::R8G8B8A8_SRGB;
-	renderer::Swapchain swapchain( device, swapchain_image_format );
+	renderer::Swapchain swapchain( device, swapchain_image_format, false );
 	OPTICK_POP();
 
 	constexpr auto draw_image_format = renderer::Texture::Format::R16G16B16A16_SFLOAT;
@@ -947,7 +958,7 @@ int main()
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
-		draw_ui( ui_state, meshes, gpu_time, per_lod_gpu_time );
+		draw_ui( ui_state, props, meshes, gpu_time, per_lod_gpu_time );
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
