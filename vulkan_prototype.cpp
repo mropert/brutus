@@ -661,6 +661,7 @@ struct ui_data
 	int x_miku = 1;
 	int z_miku = 1;
 	float lod_cutoff = 10.f;
+	bool vsync;
 };
 
 void draw_ui( ui_data& data,
@@ -675,9 +676,9 @@ void draw_ui( ui_data& data,
 		ImGui::SeparatorText( "Hardware" );
 		ImGui::Text( "GPU: %s", props.name.c_str() );
 		ImGui::Text( "Memory (MB): RAM: %zu, VRAM: %zu, BAR: %zu",
-						  props.host_memory_size >> 20,
-						  props.device_memory_size >> 20,
-						  props.transfer_memory_size >> 20 );
+					 props.host_memory_size >> 20,
+					 props.device_memory_size >> 20,
+					 props.transfer_memory_size >> 20 );
 		ImGui::SeparatorText( "Stats" );
 		ImGui::Text( "GPU time(ms): %.2f", gpu_time );
 		ImGui::Text( "Per LOD GPU time(ms): %.2f / %.2f / %.2f / %.2f", lod_times[ 0 ], lod_times[ 1 ], lod_times[ 2 ], lod_times[ 3 ] );
@@ -692,6 +693,7 @@ void draw_ui( ui_data& data,
 		}
 
 		ImGui::SeparatorText( "Settings" );
+		ImGui::Checkbox( "V-Sync", &data.vsync );
 		ImGui::Text( "Instance count" );
 		ImGui::SliderInt( "x", &data.x_miku, 1, 100 );
 		ImGui::SliderInt( "z", &data.z_miku, 1, 100 );
@@ -741,9 +743,11 @@ int main()
 	const auto props = device.get_properties();
 	OPTICK_POP();
 
+	bool vsync = true;
+
 	OPTICK_PUSH( "create_swapchain" );
 	constexpr auto swapchain_image_format = renderer::Texture::Format::R8G8B8A8_SRGB;
-	renderer::Swapchain swapchain( device, swapchain_image_format, false );
+	renderer::Swapchain swapchain( device, swapchain_image_format, vsync );
 	OPTICK_POP();
 
 	constexpr auto draw_image_format = renderer::Texture::Format::R16G16B16A16_SFLOAT;
@@ -853,7 +857,7 @@ int main()
 	float time_of_day = 0.f;
 
 	bool relative_mouse = false;
-	ui_data ui_state;
+	ui_data ui_state { .vsync = vsync };
 
 	std::array<std::vector<glm::mat4>, 4> instances_per_lod;
 
@@ -1046,8 +1050,14 @@ int main()
 		swapchain.submit( *command_buffer );
 
 		swapchain.present();
-
 		++frame_count;
+
+		if ( ui_state.vsync != vsync )
+		{
+			vsync = ui_state.vsync;
+			swapchain.recreate( swapchain_image_format, vsync );
+			ImGui_ImplVulkan_SetMinImageCount( swapchain.get_image_count() );
+		}
 	}
 
 	// Wait for the GPU to finish before we roll all the destructors
