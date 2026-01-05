@@ -804,8 +804,8 @@ int main()
 				mesh_pipeline = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
 																		  .depth_format = depth_image.get_format(),
 																		  .push_constants_size = sizeof( push_constants ) },
-											   "mesh.vs",
-											   "mesh.fs" );
+											   "mesh.vert",
+											   "mesh.frag" );
 			},
 			[ & ]
 			{
@@ -813,8 +813,8 @@ int main()
 																		  .depth_format = depth_image.get_format(),
 																		  .topology = renderer::Pipeline::PrimitiveTopology::TRIANGLE_STRIP,
 																		  .push_constants_size = sizeof( grid_constants ) },
-											   "grid.vs",
-											   "grid.fs" );
+											   "grid.vert",
+											   "grid.frag" );
 			},
 			[ & ] { meshes = load_model( device, tex_manager ); } );
 	}
