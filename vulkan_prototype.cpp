@@ -353,6 +353,28 @@ public:
 	{
 		OPTICK_EVENT();
 		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
+
+		std::vector<std::vector<mesh_vertex>> vertex_data( _meshes.size() );
+		for ( int i = 0; i < _meshes.size(); ++i )
+		{
+			OPTICK_EVENT( "repack_vertices" );
+			vertex_data[ i ].reserve( _meshes[ i ].positions.length );
+
+			const auto positions = reinterpret_cast<const float*>( gltf_buffer.data() + _meshes[ i ].positions.offset );
+			const auto normals = reinterpret_cast<const float*>( gltf_buffer.data() + _meshes[ i ].normals.offset );
+			const auto tangents = reinterpret_cast<const float*>( gltf_buffer.data() + _meshes[ i ].tangents.offset );
+			const auto uvs = reinterpret_cast<const float*>( gltf_buffer.data() + _meshes[ i ].uvs.offset );
+			for ( int v = 0; v < _meshes[ i ].positions.length; ++v )
+			{
+				vertex_data[ i ].emplace_back(
+					glm::vec3( positions[ v * 3 ], positions[ v * 3 + 1 ], positions[ v * 3 + 2 ] ),
+					uvs[ v * 2 ],
+					glm::vec3( normals[ v * 3 ], normals[ v * 3 + 1 ], normals[ v * 3 + 2 ] ),
+					uvs[ v * 2 + 1 ],
+					glm::vec4( tangents[ v * 4 ], tangents[ v * 4 + 1 ], tangents[ v * 4 + 2 ], tangents[ v * 4 + 3 ] ) );
+			}
+		}
+
 		std::vector<lod_indices> simplified_indices( _meshes.size() );
 
 		{
@@ -363,20 +385,25 @@ public:
 			for ( int i = 0; i < _meshes.size(); ++i )
 			{
 				buffer.resize( _meshes[ i ].indices.length );
-				const auto positions = reinterpret_cast<const float*>( gltf_buffer.data() + _meshes[ i ].positions.offset );
 				const auto indices = reinterpret_cast<const uint32_t*>( gltf_buffer.data() + _meshes[ i ].indices.offset );
 				for ( int lod = 0; lod < simplified_indices[ i ].indices_per_lod.size(); ++lod )
 				{
-					const uint32_t size = meshopt_simplify( buffer.data(),
-															indices,
-															_meshes[ i ].indices.length,
-															positions,
-															_meshes[ i ].positions.length,
-															_meshes[ i ].positions.stride,
-															_meshes[ i ].indices.length * lod_indices_factor[ lod ],
-															lod_error_factor[ lod ],
-															0,
-															nullptr );
+					const float attr_weights[ 3 ] = { 0.5f, 0.5f, 0.5f };
+					const uint32_t size = meshopt_simplifyWithAttributes( buffer.data(),
+																		  indices,
+																		  _meshes[ i ].indices.length,
+																		  &vertex_data[ i ].front().position.x,
+																		  vertex_data[ i ].size(),
+																		  sizeof( mesh_vertex ),
+																		  &vertex_data[ i ].front().normal.x,
+																		  sizeof( mesh_vertex ),
+																		  attr_weights,
+																		  3,
+																		  nullptr,
+																		  _meshes[ i ].indices.length * lod_indices_factor[ lod ],
+																		  lod_error_factor[ lod ],
+																		  0,
+																		  nullptr );
 					simplified_indices[ i ].indices_per_lod[ lod ] = size;
 					simplified_indices[ i ].indices.insert( end( simplified_indices[ i ].indices ), buffer.data(), buffer.data() + size );
 				}
@@ -386,7 +413,7 @@ public:
 		std::size_t alloc_size = 0;
 		for ( int i = 0; i < _meshes.size(); ++i )
 		{
-			alloc_size += sizeof( mesh_vertex ) * _meshes[ i ].positions.length;
+			alloc_size += sizeof( mesh_vertex ) * vertex_data[ i ].size();
 			alloc_size += sizeof( uint32_t ) * ( _meshes[ i ].indices.length + simplified_indices[ i ].indices.size() );
 		}
 
@@ -410,34 +437,12 @@ public:
 													  sizeof( uint32_t )
 														  * ( _meshes[ i ].indices.length + simplified_indices[ i ].indices.size() ) );
 
-			{
-				OPTICK_EVENT( "repack_vertices" );
-				const auto verts = reinterpret_cast<mesh_vertex*>( ptr + offset );
-				const auto positions = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.positions.offset );
-				const auto normals = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.normals.offset );
-				const auto tangents = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.tangents.offset );
-				const auto uvs = reinterpret_cast<const float*>( gltf_buffer.data() + mesh.uvs.offset );
-				for ( int i = 0; i < mesh.positions.length; ++i )
-				{
-					verts[ i ].position[ 0 ] = positions[ i * 3 ];
-					verts[ i ].position[ 1 ] = positions[ i * 3 + 1 ];
-					verts[ i ].position[ 2 ] = positions[ i * 3 + 2 ];
-					verts[ i ].u = uvs[ i * 2 ];
-					verts[ i ].normal[ 0 ] = normals[ i * 3 ];
-					verts[ i ].normal[ 1 ] = normals[ i * 3 + 1 ];
-					verts[ i ].normal[ 2 ] = normals[ i * 3 + 2 ];
-					verts[ i ].v = uvs[ i * 2 + 1 ];
-					verts[ i ].tangent[ 0 ] = tangents[ i * 4 ];
-					verts[ i ].tangent[ 1 ] = tangents[ i * 4 + 1 ];
-					verts[ i ].tangent[ 2 ] = tangents[ i * 4 + 2 ];
-					verts[ i ].tangent[ 3 ] = tangents[ i * 4 + 3 ];
-				}
-			}
+			memcpy( ptr + offset, vertex_data[ i ].data(), sizeof( mesh_vertex ) * vertex_data[ i ].size() );
 			_vertex_cmd_buffer->copy_buffer( _vertex_upload_buffer,
 											 offset,
-											 sizeof( mesh_vertex ) * mesh.positions.length,
+											 sizeof( mesh_vertex ) * vertex_data[ i ].size(),
 											 gpu_data.vertices );
-			offset += sizeof( mesh_vertex ) * mesh.positions.length;
+			offset += sizeof( mesh_vertex ) * vertex_data[ i ].size();
 
 			memcpy( ptr + offset, gltf_buffer.data() + mesh.indices.offset, sizeof( uint32_t ) * mesh.indices.length );
 			memcpy( ptr + offset + sizeof( uint32_t ) * mesh.indices.length,
