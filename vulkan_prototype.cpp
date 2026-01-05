@@ -460,9 +460,11 @@ public:
 	{
 		OPTICK_EVENT();
 
+		0uz;
+
 		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
 		tbb::parallel_for(
-			size_t( 0 ),
+			0uz,
 			_textures.size(),
 			[ & ]( size_t index )
 			{
@@ -801,20 +803,20 @@ int main()
 		tbb::parallel_invoke(
 			[ & ]
 			{
-				mesh_pipeline = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
-																		  .depth_format = depth_image.get_format(),
-																		  .push_constants_size = sizeof( push_constants ) },
-											   "mesh.vert",
-											   "mesh.frag" );
+				mesh_pipeline = pipelines.add(
+					renderer::Pipeline::Desc { .color_format = draw_image_format,
+											   .depth_format = depth_image.get_format(),
+											   .push_constants_size = sizeof( push_constants ) },
+					{ { "mesh.vert", renderer::ShaderStage::VERTEX }, { "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
 			},
 			[ & ]
 			{
-				grid_pipeline = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
-																		  .depth_format = depth_image.get_format(),
-																		  .topology = renderer::Pipeline::PrimitiveTopology::TRIANGLE_STRIP,
-																		  .push_constants_size = sizeof( grid_constants ) },
-											   "grid.vert",
-											   "grid.frag" );
+				grid_pipeline = pipelines.add(
+					renderer::Pipeline::Desc { .color_format = draw_image_format,
+											   .depth_format = depth_image.get_format(),
+											   .topology = renderer::Pipeline::PrimitiveTopology::TRIANGLE_STRIP,
+											   .push_constants_size = sizeof( grid_constants ) },
+					{ { "grid.vert", renderer::ShaderStage::VERTEX }, { "grid.frag", renderer::ShaderStage::FRAGMENT } } );
 			},
 			[ & ] { meshes = load_model( device, tex_manager ); } );
 	}
