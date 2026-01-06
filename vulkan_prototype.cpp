@@ -1127,12 +1127,15 @@ int main()
 				const push_constants constants { .material = mesh.material,
 												 .scene_constants = constants_address,
 												 .vertex_buffer = mesh.vertices.get_device_address(),
+												 .instance_buffer = instances_address,
 												 .meshlets_buffer = mesh.meshlets.get_device_address(),
 												 .meshlets_vertices_buffer = mesh.meshlets_vertices.get_device_address(),
 												 .meshlets_triangles_buffer = mesh.meshlets_triangles.get_device_address() };
 				command_buffer->push_constants( pipelines.get( mesh_pipeline_meshlet ), constants );
 				command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES + mesh_draws );
-				command_buffer->draw_mesh_task( mesh.meshlet_count_for_lod[ 0 ] );
+				const auto max_draws = static_cast<std::size_t>( props.max_mesh_shader_groups ) / mesh.meshlet_count_for_lod[ 0 ];
+				const auto count = std::min( max_draws, instances_per_lod[ 0 ].size() );
+				command_buffer->draw_mesh_task( mesh.meshlet_count_for_lod[ 0 ], count, 1 );
 				++mesh_draws;
 				for ( int i = 0; i < 3; ++i )
 				{
