@@ -28,22 +28,28 @@ taskPayloadSharedEXT MeshletDraw payload;
 
 void main()
 {
-    payload.position = vec3(gl_WorkGroupID) - (vec3(gl_NumWorkGroups / 2));
-    payload.position.y = 0;
-    const float dist = distance(PushConstants.scene_constants.camera_position, payload.position);
-    int lod = 3;
-    while ( dist < lod * PushConstants.lod_cutoff )
+    vec3 world_position = vec3(gl_WorkGroupID) - (vec3(gl_NumWorkGroups / 2));
+    world_position.y = 0;
+    vec4 view_position = PushConstants.scene_constants.view_matrix * vec4(world_position, 1);
+
+    if ( view_position.z < 0.1f )
     {
-        --lod;
+        payload.position = world_position;
+        const float dist = distance(PushConstants.scene_constants.camera_position, payload.position);
+        int lod = 3;
+        while ( dist < lod * PushConstants.lod_cutoff )
+        {
+            --lod;
+        }
+        payload.meshlets_offset = 0;
+        payload.meshlets_vertices_offset = 0;
+        payload.meshlets_triangles_offset = 0;
+        for ( int i = 0; i < lod; ++i )
+        {
+            payload.meshlets_offset += PushConstants.meshlet_counts[i];
+            payload.meshlets_vertices_offset += PushConstants.meshlets_vertices_count[i];
+            payload.meshlets_triangles_offset += PushConstants.meshlets_triangles_count[i];
+        }
+        EmitMeshTasksEXT(PushConstants.meshlet_counts[lod], 1, 1);
     }
-    payload.meshlets_offset = 0;
-    payload.meshlets_vertices_offset = 0;
-    payload.meshlets_triangles_offset = 0;
-    for ( int i = 0; i < lod; ++i )
-    {
-        payload.meshlets_offset += PushConstants.meshlet_counts[i];
-        payload.meshlets_vertices_offset += PushConstants.meshlets_vertices_count[i];
-        payload.meshlets_triangles_offset += PushConstants.meshlets_triangles_count[i];
-    }
-   	EmitMeshTasksEXT(PushConstants.meshlet_counts[lod], 1, 1);
 }
