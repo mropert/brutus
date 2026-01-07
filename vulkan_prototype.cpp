@@ -439,6 +439,7 @@ public:
 					const auto indices = lod == 0 ? reinterpret_cast<const uint32_t*>( gltf_buffer.data() + _meshes[ i ].indices.offset )
 												  : simplified_indices[ i ].indices.data() + index_offset;
 					const auto indices_count = lod == 0 ? _meshes[ i ].indices.length : simplified_indices[ i ].indices_per_lod[ lod - 1 ];
+					index_offset += lod == 0 ? 0 : indices_count;
 
 					auto max_meshlets = meshopt_buildMeshletsBound( indices_count, 64, 96 );
 					auto& meshlets = all_meshlets.emplace_back( max_meshlets );
