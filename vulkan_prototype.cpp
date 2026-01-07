@@ -417,6 +417,8 @@ public:
 																		  lod_error_factor[ lod ],
 																		  0,
 																		  nullptr );
+
+					meshopt_optimizeVertexCache( buffer.data(), buffer.data(), size, vertex_data[ i ].size() );
 					simplified_indices[ i ].indices_per_lod[ lod ] = size;
 					simplified_indices[ i ].indices.insert( end( simplified_indices[ i ].indices ), buffer.data(), buffer.data() + size );
 				}
