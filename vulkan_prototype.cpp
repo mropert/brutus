@@ -58,7 +58,10 @@ struct push_constants
 	renderer::BufferHandle meshlets_buffer;
 	renderer::BufferHandle meshlets_vertices_buffer;
 	renderer::BufferHandle meshlets_triangles_buffer;
-	uint32_t meshlet_count = 0;
+	std::array<uint32_t, 4> meshlet_counts;
+	std::array<uint32_t, 4> meshlets_vertices_count;
+	std::array<uint32_t, 4> meshlets_triangles_count;
+	float lod_cutoff = 10.;
 };
 
 SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
@@ -1034,23 +1037,28 @@ int main()
 
 		const auto constants = build_scene_constants( camera, draw_image_extent, time_of_day / day_period );
 
-		for ( auto& instances : instances_per_lod )
-		{
-			instances.clear();
-		}
+		const bool mesh_shading = ui_state.mesh_shading;
 
-		for ( int z = 0; z < ui_state.z_miku; ++z )
+		if ( !mesh_shading )
 		{
-			for ( int x = 0; x < ui_state.x_miku; ++x )
+			for ( auto& instances : instances_per_lod )
 			{
-				const auto pos = glm::vec3( x - ( ui_state.x_miku / 2 ), 0, z - ( ui_state.z_miku / 2 ) );
-				const auto distance = glm::distance( camera.position, pos );
-				int lod = instances_per_lod.size() - 1;
-				while ( distance < ui_state.lod_cutoff * lod )
+				instances.clear();
+			}
+
+			for ( int z = 0; z < ui_state.z_miku; ++z )
+			{
+				for ( int x = 0; x < ui_state.x_miku; ++x )
 				{
-					--lod;
+					const auto pos = glm::vec3( x - ( ui_state.x_miku / 2 ), 0, z - ( ui_state.z_miku / 2 ) );
+					const auto distance = glm::distance( camera.position, pos );
+					int lod = instances_per_lod.size() - 1;
+					while ( distance < ui_state.lod_cutoff * lod )
+					{
+						--lod;
+					}
+					instances_per_lod[ lod ].push_back( glm::translate( glm::identity<glm::mat4>(), pos ) );
 				}
-				instances_per_lod[ lod ].push_back( glm::translate( glm::identity<glm::mat4>(), pos ) );
 			}
 		}
 
@@ -1120,7 +1128,7 @@ int main()
 
 		int mesh_draws = 0;
 
-		if ( ui_state.mesh_shading )
+		if ( mesh_shading )
 		{
 			command_buffer->bind_pipeline( pipelines.get( mesh_pipeline_meshlet ), tex_manager );
 			for ( const auto& mesh : meshes )
@@ -1133,10 +1141,13 @@ int main()
 												 .meshlets_buffer = mesh.meshlets.get_device_address(),
 												 .meshlets_vertices_buffer = mesh.meshlets_vertices.get_device_address(),
 												 .meshlets_triangles_buffer = mesh.meshlets_triangles.get_device_address(),
-												 .meshlet_count = mesh.meshlet_count_for_lod[ 0 ] };
+												 .meshlet_counts = mesh.meshlet_count_for_lod,
+												 .meshlets_vertices_count = mesh.meshlet_vertices_count_for_lod,
+												 .meshlets_triangles_count = mesh.meshlet_triangles_count_for_lod,
+												 .lod_cutoff = ui_state.lod_cutoff };
 				command_buffer->push_constants( pipelines.get( mesh_pipeline_meshlet ), constants );
 				command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES + mesh_draws );
-				command_buffer->draw_mesh_task( instances_per_lod[ 0 ].size(), 1, 1 );
+				command_buffer->draw_mesh_task( ui_state.x_miku, 1, ui_state.z_miku );
 				++mesh_draws;
 				for ( int i = 0; i < 3; ++i )
 				{

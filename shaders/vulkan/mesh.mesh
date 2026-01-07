@@ -52,28 +52,36 @@ layout( push_constant ) uniform constants
     MeshletTriangles mtb;
 } PushConstants;
 
-taskPayloadSharedEXT uint payload;
+struct MeshletDraw
+{
+    vec3 position;
+    uint meshlets_offset;
+    uint meshlets_vertices_offset;
+    uint meshlets_triangles_offset;
+};
+
+taskPayloadSharedEXT MeshletDraw payload;
 
 void main()
 {
-    Meshlet meshlet = PushConstants.mb.meshlets[gl_WorkGroupID.x];
+    Meshlet meshlet = PushConstants.mb.meshlets[gl_WorkGroupID.x + payload.meshlets_offset];
     SetMeshOutputsEXT(meshlet.vertex_count, meshlet.triangle_count);
 
     for (uint i = gl_LocalInvocationIndex; i < meshlet.vertex_count; i += gl_WorkGroupSize.x) {
-        const uint index = PushConstants.mvb.meshlet_vertices[meshlet.vertex_offset + i];
+        const uint index = PushConstants.mvb.meshlet_vertices[meshlet.vertex_offset + i + payload.meshlets_vertices_offset];
         const Vertex v = PushConstants.vertex_buffer.vertices[index];
-        const vec4 pos = PushConstants.instance_buffer.model_matrix[payload] * vec4(v.position, 1);
-        gl_MeshVerticesEXT[i].gl_Position = PushConstants.scene_constants.view_projection_matrix * pos;
+        const vec3 pos = v.position + payload.position;
+        gl_MeshVerticesEXT[i].gl_Position = PushConstants.scene_constants.view_projection_matrix * vec4(pos, 1);
         outUV[i].x = v.uv_x;
         outUV[i].y = v.uv_y;
         outNormal[i] = v.normal;
-        outWorldPos[i] = pos.xyz;
+        outWorldPos[i] = pos;
         outTangent[i] = v.tangent.xyz;
         outBitangent[i] = cross(outNormal[i], outTangent[i]) * v.tangent.w;
     }
 
     for (uint i = gl_LocalInvocationIndex; i < meshlet.triangle_count; i += gl_WorkGroupSize.x) {
-        uint offset = meshlet.triangle_offset + i * 3;
+        const uint offset = meshlet.triangle_offset + payload.meshlets_triangles_offset + i * 3;
         gl_PrimitiveTriangleIndicesEXT[i] = uvec3(
             PushConstants.mtb.meshlet_triangles[offset], PushConstants.mtb.meshlet_triangles[offset + 1], PushConstants.mtb.meshlet_triangles[offset + 2]);
     }
