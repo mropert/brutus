@@ -1,30 +1,22 @@
 #version 450
 #extension GL_EXT_buffer_reference : require
-#extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_mesh_shader: require
+#extension GL_EXT_shader_8bit_storage: require
+#extension GL_GOOGLE_include_directive : require
 
 #include "constants.glsl"
+#include "mesh.glsl"
 
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 
 layout( push_constant ) uniform constants
 {
-    layout(offset = 32) SceneConstants scene_constants;
-    layout(offset = 80) uvec4 meshlet_counts;
-    uvec4 meshlets_vertices_count;
-    uvec4 meshlets_triangles_count;
-    float lod_cutoff;
+    Mesh mesh;
+    SceneConstants scene_constants;
+    layout(offset = 160) float lod_cutoff;
 } PushConstants;
 
-struct MeshletDraw
-{
-    vec3 position;
-    uint meshlets_offset;
-    uint meshlets_vertices_offset;
-    uint meshlets_triangles_offset;
-};
-
-taskPayloadSharedEXT MeshletDraw payload;
+taskPayloadSharedEXT MeshletTaskPayload payload;
 
 void main()
 {
@@ -35,21 +27,13 @@ void main()
     if ( view_position.z < 0.1f )
     {
         payload.position = world_position;
-        const float dist = distance(PushConstants.scene_constants.camera_position, payload.position);
+        const float dist = distance(PushConstants.scene_constants.camera_position, world_position);
         int lod = 3;
         while ( dist < lod * PushConstants.lod_cutoff )
         {
             --lod;
         }
-        payload.meshlets_offset = 0;
-        payload.meshlets_vertices_offset = 0;
-        payload.meshlets_triangles_offset = 0;
-        for ( int i = 0; i < lod; ++i )
-        {
-            payload.meshlets_offset += PushConstants.meshlet_counts[i];
-            payload.meshlets_vertices_offset += PushConstants.meshlets_vertices_count[i];
-            payload.meshlets_triangles_offset += PushConstants.meshlets_triangles_count[i];
-        }
-        EmitMeshTasksEXT(PushConstants.meshlet_counts[lod], 1, 1);
+        payload.lod = lod;
+        EmitMeshTasksEXT(PushConstants.mesh.lods[lod].meshlets_count, 1, 1);
     }
 }

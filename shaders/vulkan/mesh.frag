@@ -1,5 +1,6 @@
 #version 450
 #extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_8bit_storage: require
 #extension GL_GOOGLE_include_directive : require
 
 layout (location = 0) in vec2 inUV;
@@ -13,108 +14,105 @@ layout(set = 0, binding = 0) uniform texture2D textures[1024];
 layout(set = 0, binding = 1) uniform sampler sampl;
 
 #include "constants.glsl"
+#include "mesh.glsl"
 
-layout(push_constant) uniform constants
+layout( push_constant ) uniform constants
 {
-	vec4 baseColor;
-	float metalness;
-	float roughness;
-	uint albedo_index;
-	uint normal_index;
-	SceneConstants scene_constants;
+    Mesh mesh;
+    SceneConstants scene_constants;
 } PushConstants;
 
 const float PI = 3.14159265359;
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0)
 {
-	return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
 float DistributionGGX(vec3 N, vec3 H, float roughness)
 {
-	const float a      = roughness*roughness;
-	const float a2     = a*a;
-	const float NdotH  = max(dot(N, H), 0.0);
-	const float NdotH2 = NdotH*NdotH;
+    const float a      = roughness*roughness;
+    const float a2     = a*a;
+    const float NdotH  = max(dot(N, H), 0.0);
+    const float NdotH2 = NdotH*NdotH;
 
-	const float num   = a2;
-	float denom = (NdotH2 * (a2 - 1.0) + 1.0);
-	denom = PI * denom * denom;
+    const float num   = a2;
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = PI * denom * denom;
 
-	return num / denom;
+    return num / denom;
 }
 
 float GeometrySchlickGGX(float NdotV, float roughness)
 {
-	const float r = (roughness + 1.0);
-	const float k = (r*r) / 8.0;
+    const float r = (roughness + 1.0);
+    const float k = (r*r) / 8.0;
 
-	const float num   = NdotV;
-	const float denom = NdotV * (1.0 - k) + k;
+    const float num   = NdotV;
+    const float denom = NdotV * (1.0 - k) + k;
 
-	return num / denom;
+    return num / denom;
 }
 float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness)
 {
-	const float NdotV = max(dot(N, V), 0.0);
-	const float NdotL = max(dot(N, L), 0.0);
-	const float ggx2  = GeometrySchlickGGX(NdotV, roughness);
-	const float ggx1  = GeometrySchlickGGX(NdotL, roughness);
+    const float NdotV = max(dot(N, V), 0.0);
+    const float NdotL = max(dot(N, L), 0.0);
+    const float ggx2  = GeometrySchlickGGX(NdotV, roughness);
+    const float ggx1  = GeometrySchlickGGX(NdotL, roughness);
 
-	return ggx1 * ggx2;
+    return ggx1 * ggx2;
 }
 
 void main_flat()
 {
-	const vec3 albedo = texture(sampler2D(textures[PushConstants.albedo_index], sampl), inUV).xyz * PushConstants.baseColor.xyz;
-	outFragColor = vec4(albedo, 1.0);
+    const vec3 albedo = texture(sampler2D(textures[PushConstants.mesh.material.albedo_index], sampl), inUV).xyz * PushConstants.mesh.material.baseColor.xyz;
+    outFragColor = vec4(albedo, 1.0);
 }
 
 void main_basic_diffuse()
 {
-	vec3 albedo = texture(sampler2D(textures[PushConstants.albedo_index], sampl), inUV).xyz * PushConstants.baseColor.xyz;
-	const vec3 N = normalize(inNormal);
-	const vec3 L = normalize(PushConstants.scene_constants.main_light.xyz);
-	const float NdotL = max(dot(N, -L), 0.0);
+    vec3 albedo = texture(sampler2D(textures[PushConstants.mesh.material.albedo_index], sampl), inUV).xyz * PushConstants.mesh.material.baseColor.xyz;
+    const vec3 N = normalize(inNormal);
+    const vec3 L = normalize(PushConstants.scene_constants.main_light.xyz);
+    const float NdotL = max(dot(N, -L), 0.0);
 
-	albedo = albedo * (NdotL + 0.1);
-	outFragColor = vec4(albedo, 1.0);
+    albedo = albedo * (NdotL + 0.1);
+    outFragColor = vec4(albedo, 1.0);
 }
 
 void main()
 {
-	const vec3 albedo = texture(sampler2D(textures[PushConstants.albedo_index], sampl), inUV).xyz * PushConstants.baseColor.xyz;
-	vec3 F0 = vec3(0.04);
-    F0 = mix(F0, albedo, PushConstants.metalness);
+    const vec3 albedo = texture(sampler2D(textures[PushConstants.mesh.material.albedo_index], sampl), inUV).xyz * PushConstants.mesh.material.baseColor.xyz;
+    vec3 F0 = vec3(0.04);
+    F0 = mix(F0, albedo, PushConstants.mesh.material.metalness);
 
-	const vec3 normalDisplacement = (texture(sampler2D(textures[PushConstants.normal_index], sampl), inUV).xyz * 2.0) - 1.0;
-	const mat3 TBN = mat3(normalize(inTangent), normalize(inBitangent), normalize(inNormal));
-	const vec3 N = normalize(TBN * normalDisplacement);
+    const vec3 normalDisplacement = (texture(sampler2D(textures[PushConstants.mesh.material.normal_index], sampl), inUV).xyz * 2.0) - 1.0;
+    const mat3 TBN = mat3(normalize(inTangent), normalize(inBitangent), normalize(inNormal));
+    const vec3 N = normalize(TBN * normalDisplacement);
 
-	const vec3 V = normalize(PushConstants.scene_constants.camera_position - inFragPos);
+    const vec3 V = normalize(PushConstants.scene_constants.camera_position - inFragPos);
 
-	const vec3 L = normalize(-PushConstants.scene_constants.main_light.xyz);
-	const vec3 H = normalize(V + L);
-	const float attenuation = PushConstants.scene_constants.main_light.w;
-	const vec3 radiance     = vec3(1.0, 1.0, 1.0) * attenuation;
+    const vec3 L = normalize(-PushConstants.scene_constants.main_light.xyz);
+    const vec3 H = normalize(V + L);
+    const float attenuation = PushConstants.scene_constants.main_light.w;
+    const vec3 radiance     = vec3(1.0, 1.0, 1.0) * attenuation;
 
-	// cook-torrance brdf
-	const float NDF = DistributionGGX(N, H, PushConstants.roughness);
-	const float G   = GeometrySmith(N, V, L, PushConstants.roughness);
-	const vec3 F    = fresnelSchlick(max(dot(H, V), 0.0), F0);
+    // cook-torrance brdf
+    const float NDF = DistributionGGX(N, H, PushConstants.mesh.material.roughness);
+    const float G   = GeometrySmith(N, V, L, PushConstants.mesh.material.roughness);
+    const vec3 F    = fresnelSchlick(max(dot(H, V), 0.0), F0);
 
-	const vec3 kS = F;
-	vec3 kD = vec3(1.0) - kS;
-	kD *= 1.0 - PushConstants.metalness;
+    const vec3 kS = F;
+    vec3 kD = vec3(1.0) - kS;
+    kD *= 1.0 - PushConstants.mesh.material.metalness;
 
-	const vec3 numerator    = NDF * G * F;
-	const float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
-	const vec3 specular     = numerator / denominator;
+    const vec3 numerator    = NDF * G * F;
+    const float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
+    const vec3 specular     = numerator / denominator;
 
-	// add to outgoing radiance Lo
-	const float NdotL = max(dot(N, L), 0.0);
-	const vec3 Lo = (kD * albedo / PI + specular) * radiance * NdotL;
+    // add to outgoing radiance Lo
+    const float NdotL = max(dot(N, L), 0.0);
+    const vec3 Lo = (kD * albedo / PI + specular) * radiance * NdotL;
 
     const vec3 ambient = vec3(0.03) * albedo;// * ao;
     const vec3 color = ambient + Lo;
