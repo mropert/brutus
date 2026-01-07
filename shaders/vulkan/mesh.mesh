@@ -52,6 +52,8 @@ layout( push_constant ) uniform constants
     MeshletTriangles mtb;
 } PushConstants;
 
+taskPayloadSharedEXT uint payload;
+
 void main()
 {
     Meshlet meshlet = PushConstants.mb.meshlets[gl_WorkGroupID.x];
@@ -60,7 +62,7 @@ void main()
     for (uint i = gl_LocalInvocationIndex; i < meshlet.vertex_count; i += gl_WorkGroupSize.x) {
         const uint index = PushConstants.mvb.meshlet_vertices[meshlet.vertex_offset + i];
         const Vertex v = PushConstants.vertex_buffer.vertices[index];
-        const vec4 pos = PushConstants.instance_buffer.model_matrix[gl_WorkGroupID.y] * vec4(v.position, 1);
+        const vec4 pos = PushConstants.instance_buffer.model_matrix[payload] * vec4(v.position, 1);
         gl_MeshVerticesEXT[i].gl_Position = PushConstants.scene_constants.view_projection_matrix * pos;
         outUV[i].x = v.uv_x;
         outUV[i].y = v.uv_y;

@@ -58,6 +58,7 @@ struct push_constants
 	renderer::BufferHandle meshlets_buffer;
 	renderer::BufferHandle meshlets_vertices_buffer;
 	renderer::BufferHandle meshlets_triangles_buffer;
+	uint32_t meshlet_count = 0;
 };
 
 SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
@@ -930,11 +931,12 @@ int main()
 			},
 			[ & ]
 			{
-				mesh_pipeline_meshlet = pipelines.add(
-					renderer::Pipeline::Desc { .color_format = draw_image_format,
-											   .depth_format = depth_image.get_format(),
-											   .push_constants_size = sizeof( push_constants ) },
-					{ { "mesh.mesh", renderer::ShaderStage::MESH }, { "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
+				mesh_pipeline_meshlet = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
+																				  .depth_format = depth_image.get_format(),
+																				  .push_constants_size = sizeof( push_constants ) },
+													   { { "mesh.task", renderer::ShaderStage::TASK },
+														 { "mesh.mesh", renderer::ShaderStage::MESH },
+														 { "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
 			},
 			[ & ]
 			{
@@ -1130,12 +1132,11 @@ int main()
 												 .instance_buffer = instances_address,
 												 .meshlets_buffer = mesh.meshlets.get_device_address(),
 												 .meshlets_vertices_buffer = mesh.meshlets_vertices.get_device_address(),
-												 .meshlets_triangles_buffer = mesh.meshlets_triangles.get_device_address() };
+												 .meshlets_triangles_buffer = mesh.meshlets_triangles.get_device_address(),
+												 .meshlet_count = mesh.meshlet_count_for_lod[ 0 ] };
 				command_buffer->push_constants( pipelines.get( mesh_pipeline_meshlet ), constants );
 				command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES + mesh_draws );
-				const auto max_draws = static_cast<std::size_t>( props.max_mesh_shader_groups ) / mesh.meshlet_count_for_lod[ 0 ];
-				const auto count = std::min( max_draws, instances_per_lod[ 0 ].size() );
-				command_buffer->draw_mesh_task( mesh.meshlet_count_for_lod[ 0 ], count, 1 );
+				command_buffer->draw_mesh_task( instances_per_lod[ 0 ].size(), 1, 1 );
 				++mesh_draws;
 				for ( int i = 0; i < 3; ++i )
 				{
