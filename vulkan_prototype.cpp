@@ -175,25 +175,25 @@ struct MeshManager
 	MeshManager( renderer::Device& device )
 		: vertices( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
 											  | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-										  128 * 1024 * 1024 ) )
+										  32 * 1024 * 1024 ) )
 		, indices( device.create_buffer( renderer::Buffer::Usage::INDEX_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
 											 | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-										 128 * 1024 * 1024 ) )
+										 16 * 1024 * 1024 ) )
 		, materials( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
 											   | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-										   128 * 1024 * 1024 ) )
+										   1 * 1024 * 1024 ) )
 		, meshes( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
 											| renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-										128 * 1024 * 1024 ) )
+										1 * 1024 * 1024 ) )
 		, meshlets( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
 											  | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-										  128 * 1024 * 1024 ) )
+										  1 * 1024 * 1024 ) )
 		, meshlets_vertices( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
 													   | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-												   128 * 1024 * 1024 ) )
+												   4 * 1024 * 1024 ) )
 		, meshlets_triangles( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
 														| renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-													128 * 1024 * 1024 ) )
+													4 * 1024 * 1024 ) )
 	{
 	}
 
@@ -858,6 +858,8 @@ struct ui_data
 
 void draw_ui( ui_data& data,
 			  const renderer::Device::Properties& props,
+			  const renderer::BindlessManager& tex_manager,
+			  const MeshManager& mesh_manager,
 			  std::span<const gpu_mesh> meshes,
 			  float gpu_time,
 			  std::span<float> lod_times )
@@ -871,6 +873,23 @@ void draw_ui( ui_data& data,
 					 props.host_memory_size >> 20,
 					 props.device_memory_size >> 20,
 					 props.transfer_memory_size >> 20 );
+		ImGui::SeparatorText( "VRAM usage" );
+		ImGui::Text( "Textures (MB): %zu", tex_manager.get_texture_memory_usage() >> 20 );
+		ImGui::Text( "Vertices (KB): %zu / %zu",
+					 ( mesh_manager.vertex_count * sizeof( mesh_vertex ) ) >> 10,
+					 mesh_manager.vertices.get_size() >> 10 );
+		ImGui::Text( "Indices (KB): %zu / %zu",
+					 ( mesh_manager.index_count * sizeof( uint32_t ) ) >> 10,
+					 mesh_manager.indices.get_size() >> 10 );
+		ImGui::Text( "Meshlets (KB): %zu / %zu",
+					 ( mesh_manager.meshlet_count * sizeof( meshopt_Meshlet ) ) >> 10,
+					 mesh_manager.meshlets.get_size() >> 10 );
+		ImGui::Text( "Meshlet indices (KB): %zu / %zu",
+					 ( mesh_manager.meshlet_vertex_count * sizeof( uint32_t ) ) >> 10,
+					 mesh_manager.meshlets.get_size() >> 10 );
+		ImGui::Text( "Meshlet triangles (KB): %zu / %zu",
+					 ( mesh_manager.meshlet_triangle_count * sizeof( uint8_t ) ) >> 10,
+					 mesh_manager.meshlets_triangles.get_size() >> 10 );
 		ImGui::SeparatorText( "Stats" );
 		ImGui::Text( "GPU time(ms): %.2f", gpu_time );
 		ImGui::Text( "Per LOD GPU time(ms): %.2f / %.2f / %.2f / %.2f", lod_times[ 0 ], lod_times[ 1 ], lod_times[ 2 ], lod_times[ 3 ] );
@@ -1065,7 +1084,7 @@ int main()
 	float time_of_day = 0.f;
 
 	bool relative_mouse = false;
-	ui_data ui_state { .vsync = vsync, .mesh_shading = /* props.mesh_shader_support */ false };
+	ui_data ui_state { .vsync = vsync, .mesh_shading = props.mesh_shader_support };
 
 	std::array<std::vector<glm::mat4>, 4> instances_per_lod;
 
@@ -1178,7 +1197,7 @@ int main()
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
-		draw_ui( ui_state, props, meshes, gpu_time, per_lod_gpu_time );
+		draw_ui( ui_state, props, tex_manager, mesh_manager, meshes, gpu_time, per_lod_gpu_time );
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
