@@ -15,14 +15,14 @@ layout (location = 4) out vec3 outBitangent;
 layout( push_constant, std430 ) uniform constants
 {
     Mesh mesh;
+    Material material;
     SceneConstants scene_constants;
-    VertexBuffer vertex_buffer;
     InstanceBuffer instance_buffer;
 } PushConstants;
 
 void main() 
 {
-    const Vertex v = PushConstants.vertex_buffer.vertices[gl_VertexIndex + PushConstants.mesh.vertices_offset];
+    const Vertex v = PushConstants.mesh.vb.vertices[gl_VertexIndex];
 
     const vec4 pos = PushConstants.instance_buffer.model_matrix[gl_InstanceIndex] * vec4(v.position, 1.0f);
     gl_Position = PushConstants.scene_constants.view_projection_matrix * pos;

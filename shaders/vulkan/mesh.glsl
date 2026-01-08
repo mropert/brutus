@@ -23,24 +23,11 @@ struct MeshLOD
     uint meshlets_count;
 };
 
-struct Mesh
-{
-    Material material;
-    MeshLOD lods[4];
-    uint vertices_offset;
-};
-
 struct Meshlet {
     uint vertex_offset;
     uint triangle_offset;
     uint vertex_count;
     uint triangle_count;
-};
-
-struct MeshletTaskPayload
-{
-    vec3 position;
-    uint lod;
 };
 
 layout(buffer_reference, std430) readonly buffer VertexBuffer { Vertex vertices[]; };
@@ -49,3 +36,18 @@ layout(buffer_reference, std430) readonly buffer MaterialBuffer { Material mater
 layout(buffer_reference, std430) readonly buffer MeshletBuffer { Meshlet meshlets[]; };
 layout(buffer_reference, std430) readonly buffer MeshletVertexBuffer { uint meshlet_vertices[]; };
 layout(buffer_reference) readonly buffer MeshletTriangleBuffer { uint8_t meshlet_triangles[]; };
+
+struct Mesh
+{
+    MeshLOD lods[4];
+    VertexBuffer vb;
+    MeshletBuffer mb;
+    MeshletVertexBuffer mvb;
+    MeshletTriangleBuffer mtb;
+};
+
+struct MeshletTaskPayload
+{
+    vec3 position;
+    uint lod;
+};

@@ -19,24 +19,20 @@ layout (location = 4) out vec3 outBitangent[];
 layout( push_constant, std430 ) uniform constants
 {
     Mesh mesh;
+    Material material;
     SceneConstants scene_constants;
-    VertexBuffer vertex_buffer;
-    InstanceBuffer instance_buffer;
-    MeshletBuffer mb;
-    MeshletVertexBuffer mvb;
-    MeshletTriangleBuffer mtb;
 } PushConstants;
 
 taskPayloadSharedEXT MeshletTaskPayload payload;
 
 void main()
 {
-    Meshlet meshlet = PushConstants.mb.meshlets[gl_WorkGroupID.x + PushConstants.mesh.lods[payload.lod].meshlets_offset];
+    Meshlet meshlet = PushConstants.mesh.mb.meshlets[gl_WorkGroupID.x + PushConstants.mesh.lods[payload.lod].meshlets_offset];
     SetMeshOutputsEXT(meshlet.vertex_count, meshlet.triangle_count);
 
     for (uint i = gl_LocalInvocationIndex; i < meshlet.vertex_count; i += gl_WorkGroupSize.x) {
-        const uint index = PushConstants.mvb.meshlet_vertices[meshlet.vertex_offset + i];
-        const Vertex v = PushConstants.vertex_buffer.vertices[PushConstants.mesh.vertices_offset + index];
+        const uint index = PushConstants.mesh.mvb.meshlet_vertices[meshlet.vertex_offset + i];
+        const Vertex v = PushConstants.mesh.vb.vertices[index];
         const vec3 pos = v.position + payload.position;
         gl_MeshVerticesEXT[i].gl_Position = PushConstants.scene_constants.view_projection_matrix * vec4(pos, 1);
         outUV[i].x = v.uv_x;
@@ -50,6 +46,6 @@ void main()
     for (uint i = gl_LocalInvocationIndex; i < meshlet.triangle_count; i += gl_WorkGroupSize.x) {
         const uint offset = meshlet.triangle_offset + i * 3;
         gl_PrimitiveTriangleIndicesEXT[i] = uvec3(
-            PushConstants.mtb.meshlet_triangles[offset], PushConstants.mtb.meshlet_triangles[offset + 1], PushConstants.mtb.meshlet_triangles[offset + 2]);
+            PushConstants.mesh.mtb.meshlet_triangles[offset], PushConstants.mesh.mtb.meshlet_triangles[offset + 1], PushConstants.mesh.mtb.meshlet_triangles[offset + 2]);
     }
 }

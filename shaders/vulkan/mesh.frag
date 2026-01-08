@@ -16,9 +16,10 @@ layout(set = 0, binding = 1) uniform sampler sampl;
 #include "constants.glsl"
 #include "mesh.glsl"
 
-layout( push_constant ) uniform constants
+layout( push_constant, std430 ) uniform constants
 {
     Mesh mesh;
+    Material material;
     SceneConstants scene_constants;
 } PushConstants;
 
@@ -65,13 +66,13 @@ float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness)
 
 void main_flat()
 {
-    const vec3 albedo = texture(sampler2D(textures[PushConstants.mesh.material.albedo_index], sampl), inUV).xyz * PushConstants.mesh.material.baseColor.xyz;
+    const vec3 albedo = texture(sampler2D(textures[PushConstants.material.albedo_index], sampl), inUV).xyz * PushConstants.material.baseColor.xyz;
     outFragColor = vec4(albedo, 1.0);
 }
 
 void main_basic_diffuse()
 {
-    vec3 albedo = texture(sampler2D(textures[PushConstants.mesh.material.albedo_index], sampl), inUV).xyz * PushConstants.mesh.material.baseColor.xyz;
+    vec3 albedo = texture(sampler2D(textures[PushConstants.material.albedo_index], sampl), inUV).xyz * PushConstants.material.baseColor.xyz;
     const vec3 N = normalize(inNormal);
     const vec3 L = normalize(PushConstants.scene_constants.main_light.xyz);
     const float NdotL = max(dot(N, -L), 0.0);
@@ -82,11 +83,11 @@ void main_basic_diffuse()
 
 void main()
 {
-    const vec3 albedo = texture(sampler2D(textures[PushConstants.mesh.material.albedo_index], sampl), inUV).xyz * PushConstants.mesh.material.baseColor.xyz;
+    const vec3 albedo = texture(sampler2D(textures[PushConstants.material.albedo_index], sampl), inUV).xyz * PushConstants.material.baseColor.xyz;
     vec3 F0 = vec3(0.04);
-    F0 = mix(F0, albedo, PushConstants.mesh.material.metalness);
+    F0 = mix(F0, albedo, PushConstants.material.metalness);
 
-    const vec3 normalDisplacement = (texture(sampler2D(textures[PushConstants.mesh.material.normal_index], sampl), inUV).xyz * 2.0) - 1.0;
+    const vec3 normalDisplacement = (texture(sampler2D(textures[PushConstants.material.normal_index], sampl), inUV).xyz * 2.0) - 1.0;
     const mat3 TBN = mat3(normalize(inTangent), normalize(inBitangent), normalize(inNormal));
     const vec3 N = normalize(TBN * normalDisplacement);
 
@@ -98,13 +99,13 @@ void main()
     const vec3 radiance     = vec3(1.0, 1.0, 1.0) * attenuation;
 
     // cook-torrance brdf
-    const float NDF = DistributionGGX(N, H, PushConstants.mesh.material.roughness);
-    const float G   = GeometrySmith(N, V, L, PushConstants.mesh.material.roughness);
+    const float NDF = DistributionGGX(N, H, PushConstants.material.roughness);
+    const float G   = GeometrySmith(N, V, L, PushConstants.material.roughness);
     const vec3 F    = fresnelSchlick(max(dot(H, V), 0.0), F0);
 
     const vec3 kS = F;
     vec3 kD = vec3(1.0) - kS;
-    kD *= 1.0 - PushConstants.mesh.material.metalness;
+    kD *= 1.0 - PushConstants.material.metalness;
 
     const vec3 numerator    = NDF * G * F;
     const float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;

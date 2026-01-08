@@ -1,11 +1,8 @@
 #include <SDL3/SDL.h>
-#include <SDL3/SDL_vulkan.h>
 #include <SDL3_image/SDL_image.h>
 #include <array>
 #include <chrono>
-#include <expected>
 #include <fastgltf/core.hpp>
-#include <filesystem>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -17,10 +14,9 @@
 #include <memory>
 #include <meshoptimizer.h>
 #include <numbers>
+#include <numeric>
 #include <optick.h>
-#include <print>
 #include <span>
-#include <stdexcept>
 #include <tbb/tbb.h>
 
 //
@@ -58,23 +54,38 @@ struct gpu_mesh_lod
 
 struct gpu_mesh
 {
-	gpu_material material;
 	std::array<gpu_mesh_lod, 4> lods;
-	uint32_t vertices_offset;
+	renderer::BufferHandle vertices;
+	renderer::BufferHandle meshlets;
+	renderer::BufferHandle meshlet_vertices;
+	renderer::BufferHandle meshlet_triangles;
+};
+
+struct mesh
+{
+	renderer::raii::Buffer data_buffer; // vertex + meshlets
+	renderer::raii::Buffer index_buffer; // only used by traditional pipeline
+	// Data below is only for debugging purposes, a CPU side copy of the GPU-side descriptor
+	gpu_mesh gpu_data;
+};
+
+struct model
+{
+	std::vector<mesh> meshes;
+	std::vector<gpu_material> materials;
 };
 
 struct push_constants
 {
 	gpu_mesh mesh;
-	uint64_t padding; // SPIR-V is weird in the way stuff gets aligned after gpu_mesh
+	gpu_material material;
 	renderer::BufferHandle scene_constants;
-	renderer::BufferHandle vertex_buffer;
 	renderer::BufferHandle instance_buffer;
-	renderer::BufferHandle meshlets_buffer;
-	renderer::BufferHandle meshlets_vertices_buffer;
-	renderer::BufferHandle meshlets_triangles_buffer;
 	float lod_cutoff = 10.;
 };
+
+constexpr auto a = offsetof( push_constants, material );
+constexpr auto b = offsetof( push_constants, scene_constants );
 
 SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
 {
@@ -133,34 +144,6 @@ std::size_t get_format_size( VkFormat format )
 	}
 }
 
-struct mesh_attribute
-{
-	std::size_t offset = 0;
-	std::size_t stride = 0;
-	std::size_t length = 0;
-	VkFormat format = VK_FORMAT_UNDEFINED;
-};
-
-struct mesh_texture
-{
-	fastgltf::MimeType type = fastgltf::MimeType::None;
-	std::size_t offset = 0;
-	std::size_t size = 0;
-	sdl::raii::Surface image;
-};
-
-struct mesh_data
-{
-	mesh_attribute positions;
-	mesh_attribute normals;
-	mesh_attribute tangents;
-	mesh_attribute uvs;
-	mesh_attribute indices;
-	int albedo_idx = -1;
-	int normal_idx = -1;
-	pbr_data pbr_data;
-};
-
 struct mesh_vertex
 {
 	glm::vec3 position;
@@ -168,49 +151,6 @@ struct mesh_vertex
 	glm::vec3 normal;
 	float v;
 	glm::vec4 tangent;
-};
-
-struct MeshManager
-{
-	MeshManager( renderer::Device& device )
-		: vertices( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
-											  | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-										  32 * 1024 * 1024 ) )
-		, indices( device.create_buffer( renderer::Buffer::Usage::INDEX_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
-											 | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-										 16 * 1024 * 1024 ) )
-		, materials( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
-											   | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-										   1 * 1024 * 1024 ) )
-		, meshes( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
-											| renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-										1 * 1024 * 1024 ) )
-		, meshlets( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
-											  | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-										  1 * 1024 * 1024 ) )
-		, meshlets_vertices( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
-													   | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-												   4 * 1024 * 1024 ) )
-		, meshlets_triangles( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
-														| renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-													4 * 1024 * 1024 ) )
-	{
-	}
-
-	renderer::raii::Buffer vertices;
-	renderer::raii::Buffer indices;
-	renderer::raii::Buffer materials;
-	renderer::raii::Buffer meshes;
-	renderer::raii::Buffer meshlets;
-	renderer::raii::Buffer meshlets_vertices;
-	renderer::raii::Buffer meshlets_triangles;
-	uint32_t vertex_count = 0;
-	uint32_t index_count = 0;
-	uint32_t material_count = 0;
-	uint32_t mesh_count = 0;
-	uint32_t meshlet_count = 0;
-	uint32_t meshlet_vertex_count = 0;
-	uint32_t meshlet_triangle_count = 0;
 };
 
 renderer::raii::Texture make_image_from_surface( renderer::Device& device, const SDL_Surface& surface, bool sRGB )
@@ -261,16 +201,16 @@ public:
 	}
 
 	template <typename T>
-	void queue( std::span<const T> data, renderer::Buffer& buffer, const uint32_t item_offset = 0 )
+	void queue( std::span<const T> data, renderer::Buffer& buffer, const uint32_t offset = 0 )
 	{
-		// TODO: should we align _offset to alignof(T) ??
-		queue( data.data(), data.size_bytes(), buffer, item_offset * sizeof( T ) );
+		assert( offset % alignof( T ) == 0 );
+		queue( data.data(), data.size_bytes(), buffer, offset );
 	}
 
 	template <typename T>
-	void queue( const std::vector<T>& data, renderer::Buffer& buffer, const uint32_t item_offset = 0 )
+	void queue( const std::vector<T>& data, renderer::Buffer& buffer, const uint32_t offset = 0 )
 	{
-		queue( std::span<const T>( data ), buffer, item_offset );
+		queue( std::span<const T>( data ), buffer, offset );
 	}
 
 	void queue( const SDL_Surface& surface, renderer::Texture& texture )
@@ -330,11 +270,39 @@ private:
 
 class mesh_load_job
 {
+	struct mesh_attribute
+	{
+		std::size_t offset = 0;
+		std::size_t stride = 0;
+		std::size_t length = 0;
+		VkFormat format = VK_FORMAT_UNDEFINED;
+	};
+
+	struct mesh_texture
+	{
+		fastgltf::MimeType type = fastgltf::MimeType::None;
+		std::size_t offset = 0;
+		std::size_t size = 0;
+		sdl::raii::Surface image;
+	};
+
+	struct mesh_data
+	{
+		mesh_attribute positions;
+		mesh_attribute normals;
+		mesh_attribute tangents;
+		mesh_attribute uvs;
+		mesh_attribute indices;
+		int albedo_idx = -1;
+		int normal_idx = -1;
+		pbr_data pbr_data;
+	};
+
+
 public:
-	mesh_load_job( renderer::Device& device, renderer::BindlessManager& tex_manager, MeshManager& mesh_manager, std::filesystem::path path )
+	mesh_load_job( renderer::Device& device, renderer::BindlessManager& tex_manager, std::filesystem::path path )
 		: _device( device )
 		, _tex_manager( tex_manager )
-		, _mesh_manager( mesh_manager )
 		, _path( std::move( path ) )
 		, _mesh_upload( device, 32 * 1024 * 1024 )
 		, _texture_upload( device, 128 * 1024 * 1024 )
@@ -430,7 +398,7 @@ public:
 
 		for ( const auto& mesh : _asset.meshes )
 		{
-			auto& m = _meshes.emplace_back();
+			auto& m = _parsed_meshes.emplace_back();
 			if ( mesh.primitives[ 0 ].materialIndex )
 			{
 				const auto& material = _asset.materials[ *mesh.primitives[ 0 ].materialIndex ];
@@ -477,7 +445,8 @@ public:
 			}
 		}
 
-		_gpu_meshes.resize( _meshes.size() );
+		_meshes.resize( _parsed_meshes.size() );
+		_materials.resize( _parsed_meshes.size() );
 	}
 
 	struct lod_indices
@@ -495,13 +464,13 @@ public:
 		for ( int i = 0; i < _meshes.size(); ++i )
 		{
 			OPTICK_EVENT( "repack_vertices" );
-			vertex_data[ i ].reserve( _meshes[ i ].positions.length );
+			vertex_data[ i ].reserve( _parsed_meshes[ i ].positions.length );
 
-			const auto positions = reinterpret_cast<const float*>( gltf_buffer.data() + _meshes[ i ].positions.offset );
-			const auto normals = reinterpret_cast<const float*>( gltf_buffer.data() + _meshes[ i ].normals.offset );
-			const auto tangents = reinterpret_cast<const float*>( gltf_buffer.data() + _meshes[ i ].tangents.offset );
-			const auto uvs = reinterpret_cast<const float*>( gltf_buffer.data() + _meshes[ i ].uvs.offset );
-			for ( int v = 0; v < _meshes[ i ].positions.length; ++v )
+			const auto positions = reinterpret_cast<const float*>( gltf_buffer.data() + _parsed_meshes[ i ].positions.offset );
+			const auto normals = reinterpret_cast<const float*>( gltf_buffer.data() + _parsed_meshes[ i ].normals.offset );
+			const auto tangents = reinterpret_cast<const float*>( gltf_buffer.data() + _parsed_meshes[ i ].tangents.offset );
+			const auto uvs = reinterpret_cast<const float*>( gltf_buffer.data() + _parsed_meshes[ i ].uvs.offset );
+			for ( int v = 0; v < _parsed_meshes[ i ].positions.length; ++v )
 			{
 				vertex_data[ i ].emplace_back(
 					glm::vec3( positions[ v * 3 ], positions[ v * 3 + 1 ], positions[ v * 3 + 2 ] ),
@@ -521,14 +490,14 @@ public:
 			std::vector<uint32_t> buffer;
 			for ( int i = 0; i < _meshes.size(); ++i )
 			{
-				buffer.resize( _meshes[ i ].indices.length );
-				const auto indices = reinterpret_cast<const uint32_t*>( gltf_buffer.data() + _meshes[ i ].indices.offset );
+				buffer.resize( _parsed_meshes[ i ].indices.length );
+				const auto indices = reinterpret_cast<const uint32_t*>( gltf_buffer.data() + _parsed_meshes[ i ].indices.offset );
 				for ( int lod = 0; lod < simplified_indices[ i ].indices_per_lod.size(); ++lod )
 				{
 					const float attr_weights[ 3 ] = { 0.5f, 0.5f, 0.5f };
 					const uint32_t size = meshopt_simplifyWithAttributes( buffer.data(),
 																		  indices,
-																		  _meshes[ i ].indices.length,
+																		  _parsed_meshes[ i ].indices.length,
 																		  &vertex_data[ i ].front().position.x,
 																		  vertex_data[ i ].size(),
 																		  sizeof( mesh_vertex ),
@@ -537,7 +506,7 @@ public:
 																		  attr_weights,
 																		  3,
 																		  nullptr,
-																		  _meshes[ i ].indices.length * lod_indices_factor[ lod ],
+																		  _parsed_meshes[ i ].indices.length * lod_indices_factor[ lod ],
 																		  lod_error_factor[ lod ],
 																		  0,
 																		  nullptr );
@@ -552,19 +521,20 @@ public:
 		std::vector<std::vector<meshopt_Meshlet>> all_meshlets;
 		std::vector<std::vector<uint32_t>> all_meshlet_vertices;
 		std::vector<std::vector<uint8_t>> all_meshlet_triangles;
-		std::vector<std::size_t> meshlets_counts( _meshes.size() );
-		std::vector<std::size_t> meshlets_vertices_counts( _meshes.size() );
-		std::vector<std::size_t> meshlets_triangles_counts( _meshes.size() );
 		{
 			OPTICK_EVENT( "meshlet_generation" );
 			for ( int i = 0; i < _meshes.size(); ++i )
 			{
 				uint32_t index_offset = 0;
+				uint32_t meshlet_vertices_offset = 0;
+				uint32_t meshlet_triangles_offset = 0;
 				for ( int lod = 0; lod < 4; ++lod )
 				{
-					const auto indices = lod == 0 ? reinterpret_cast<const uint32_t*>( gltf_buffer.data() + _meshes[ i ].indices.offset )
-												  : simplified_indices[ i ].indices.data() + index_offset;
-					const auto indices_count = lod == 0 ? _meshes[ i ].indices.length : simplified_indices[ i ].indices_per_lod[ lod - 1 ];
+					const auto indices = lod == 0
+						? reinterpret_cast<const uint32_t*>( gltf_buffer.data() + _parsed_meshes[ i ].indices.offset )
+						: simplified_indices[ i ].indices.data() + index_offset;
+					const auto indices_count = lod == 0 ? _parsed_meshes[ i ].indices.length
+														: simplified_indices[ i ].indices_per_lod[ lod - 1 ];
 					index_offset += lod == 0 ? 0 : indices_count;
 
 					auto max_meshlets = meshopt_buildMeshletsBound( indices_count, 64, 96 );
@@ -589,74 +559,96 @@ public:
 					meshlet_vertices.resize( last.vertex_offset + last.vertex_count );
 					meshlet_triangles.resize( last.triangle_offset + last.triangle_count * 3 );
 					meshlets.resize( meshlet_count );
-					meshlets_counts[ i ] += meshlets.size();
-					meshlets_vertices_counts[ i ] += meshlet_vertices.size();
-					meshlets_triangles_counts[ i ] += meshlet_triangles.size();
+
+					// Fixup offsets
+					for ( auto& meshlet : meshlets )
+					{
+						meshlet.vertex_offset += meshlet_vertices_offset;
+						meshlet.triangle_offset += meshlet_triangles_offset;
+					}
+					meshlet_vertices_offset += meshlet_vertices.size();
+					meshlet_triangles_offset += meshlet_triangles.size();
 				}
 			}
 		}
 
-		for ( int i = 0; i < _meshes.size(); ++i )
+		for ( int i = 0; i < _parsed_meshes.size(); ++i )
 		{
-			const auto& mesh = _meshes[ i ];
-			auto& gpu_data = _gpu_meshes[ i ];
+			const auto& parsed_mesh = _parsed_meshes[ i ];
+			auto& mesh = _meshes[ i ];
 
-			_mesh_upload.queue( vertex_data[ i ], _mesh_manager.vertices, _mesh_manager.vertex_count );
-			gpu_data.vertices_offset = _mesh_manager.vertex_count;
-			_mesh_manager.vertex_count += vertex_data[ i ].size();
+			// Index buffer
+			const auto indices_count = std::accumulate( begin( simplified_indices[ i ].indices_per_lod ),
+														end( simplified_indices[ i ].indices_per_lod ),
+														parsed_mesh.indices.length );
+			mesh.index_buffer = _device.create_buffer( renderer::Buffer::Usage::INDEX_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
+														   | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+													   indices_count * sizeof( uint32_t ) );
 
-			_mesh_upload.queue( gltf_buffer.data() + mesh.indices.offset,
-								sizeof( uint32_t ) * mesh.indices.length,
-								_mesh_manager.indices,
-								sizeof( uint32_t ) * _mesh_manager.index_count );
-			gpu_data.lods[ 0 ].indices_offset = _mesh_manager.index_count;
-			gpu_data.lods[ 0 ].indices_count = mesh.indices.length;
-			_mesh_manager.index_count += mesh.indices.length;
+			_mesh_upload.queue( gltf_buffer.data() + parsed_mesh.indices.offset,
+								sizeof( uint32_t ) * parsed_mesh.indices.length,
+								mesh.index_buffer );
+			mesh.gpu_data.lods[ 0 ].indices_offset = 0;
+			mesh.gpu_data.lods[ 0 ].indices_count = parsed_mesh.indices.length;
 
-			_mesh_upload.queue( simplified_indices[ i ].indices, _mesh_manager.indices, _mesh_manager.index_count );
-			for ( int lod = 1; lod < gpu_data.lods.size(); ++lod )
+			_mesh_upload.queue( simplified_indices[ i ].indices,
+								mesh.index_buffer,
+								mesh.gpu_data.lods[ 0 ].indices_count * sizeof( uint32_t ) );
+			for ( int lod = 1; lod < mesh.gpu_data.lods.size(); ++lod )
 			{
-				gpu_data.lods[ lod ].indices_offset = _mesh_manager.index_count;
-				gpu_data.lods[ lod ].indices_count = simplified_indices[ i ].indices_per_lod[ lod - 1 ];
-				_mesh_manager.index_count += simplified_indices[ i ].indices_per_lod[ lod - 1 ];
+				mesh.gpu_data.lods[ lod ].indices_offset = mesh.gpu_data.lods[ lod - 1 ].indices_offset
+					+ mesh.gpu_data.lods[ lod - 1 ].indices_count;
+				mesh.gpu_data.lods[ lod ].indices_count = simplified_indices[ i ].indices_per_lod[ lod - 1 ];
 			}
 
+			// Data buffer (vertices + meshlets)
+			auto data_buffer_size = vertex_data[ i ].size() * sizeof( mesh_vertex );
+			for ( const auto& meshlets : std::span( all_meshlets.data() + ( i * 4 ), 4 ) )
+			{
+				data_buffer_size += meshlets.size() * sizeof( meshopt_Meshlet );
+			}
+			for ( const auto& meshlet_vertices : std::span( all_meshlet_vertices.data() + ( i * 4 ), 4 ) )
+			{
+				data_buffer_size += meshlet_vertices.size() * sizeof( uint32_t );
+			}
+			for ( const auto& meshlet_triangles : std::span( all_meshlet_triangles.data() + ( i * 4 ), 4 ) )
+			{
+				data_buffer_size += meshlet_triangles.size() * sizeof( uint8_t );
+			}
+
+			mesh.data_buffer = _device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
+														  | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+													  data_buffer_size );
+
+			mesh.gpu_data.vertices = mesh.data_buffer.get_device_address();
+			_mesh_upload.queue( vertex_data[ i ], mesh.data_buffer );
+			auto offset = vertex_data[ i ].size() * sizeof( mesh_vertex );
+
+			mesh.gpu_data.meshlets = mesh.data_buffer.get_device_address() + offset;
 			for ( int lod = 0; lod < 4; ++lod )
 			{
-				_mesh_upload.queue( all_meshlet_vertices[ i * 4 + lod ],
-									_mesh_manager.meshlets_vertices,
-									_mesh_manager.meshlet_vertex_count );
-
-				// Fixup offsets know that we now their final offset
-				for ( auto& meshlet : all_meshlets[ i * 4 + lod ] )
+				_mesh_upload.queue( all_meshlets[ i * 4 + lod ], mesh.data_buffer, offset );
+				offset += all_meshlets[ i * 4 + lod ].size() * sizeof( meshopt_Meshlet );
+				mesh.gpu_data.lods[ lod ].meshlets_count = all_meshlets[ i * 4 + lod ].size();
+				if ( lod > 0 )
 				{
-					meshlet.vertex_offset += _mesh_manager.meshlet_vertex_count;
+					mesh.gpu_data.lods[ lod ].meshlets_offset = mesh.gpu_data.lods[ lod - 1 ].meshlets_offset
+						+ mesh.gpu_data.lods[ lod - 1 ].meshlets_count;
 				}
-
-				_mesh_manager.meshlet_vertex_count += all_meshlet_vertices[ i * 4 + lod ].size();
 			}
 
+			mesh.gpu_data.meshlet_vertices = mesh.data_buffer.get_device_address() + offset;
 			for ( int lod = 0; lod < 4; ++lod )
 			{
-				_mesh_upload.queue( all_meshlet_triangles[ i * 4 + lod ],
-									_mesh_manager.meshlets_triangles,
-									_mesh_manager.meshlet_triangle_count );
-
-				// Fixup offsets know that we now their final offset
-				for ( auto& meshlet : all_meshlets[ i * 4 + lod ] )
-				{
-					meshlet.triangle_offset += _mesh_manager.meshlet_triangle_count;
-				}
-
-				_mesh_manager.meshlet_triangle_count += all_meshlet_triangles[ i * 4 + lod ].size();
+				_mesh_upload.queue( all_meshlet_vertices[ i * 4 + lod ], mesh.data_buffer, offset );
+				offset += all_meshlet_vertices[ i * 4 + lod ].size() * sizeof( uint32_t );
 			}
 
+			mesh.gpu_data.meshlet_triangles = mesh.data_buffer.get_device_address() + offset;
 			for ( int lod = 0; lod < 4; ++lod )
 			{
-				_mesh_upload.queue( all_meshlets[ i * 4 + lod ], _mesh_manager.meshlets, _mesh_manager.meshlet_count );
-				gpu_data.lods[ lod ].meshlets_offset = _mesh_manager.meshlet_count;
-				gpu_data.lods[ lod ].meshlets_count = all_meshlets[ i * 4 + lod ].size();
-				_mesh_manager.meshlet_count += gpu_data.lods[ lod ].meshlets_count;
+				_mesh_upload.queue( all_meshlet_triangles[ i * 4 + lod ], mesh.data_buffer, offset );
+				offset += all_meshlet_triangles[ i * 4 + lod ].size() * sizeof( uint8_t );
 			}
 		}
 
@@ -694,28 +686,28 @@ public:
 		std::size_t offset = 0;
 		for ( int i = 0; i < _meshes.size(); ++i )
 		{
-			const auto& mesh = _meshes[ i ];
-			auto& gpu_data = _gpu_meshes[ i ];
+			const auto& parsed_mesh = _parsed_meshes[ i ];
+			auto& material = _materials[ i ];
 
-			auto tex = make_image_from_surface( _device, *_textures[ mesh.albedo_idx ].image, true );
-			_texture_upload.queue( *_textures[ mesh.albedo_idx ].image, tex );
-			gpu_data.material.albedo_texture_index = _tex_manager.add_texture( std::move( tex ) );
+			auto tex = make_image_from_surface( _device, *_textures[ parsed_mesh.albedo_idx ].image, true );
+			_texture_upload.queue( *_textures[ parsed_mesh.albedo_idx ].image, tex );
+			material.albedo_texture_index = _tex_manager.add_texture( std::move( tex ) );
 
-			tex = make_image_from_surface( _device, *_textures[ mesh.normal_idx ].image, false );
-			_texture_upload.queue( *_textures[ mesh.normal_idx ].image, tex );
-			gpu_data.material.normal_texture_index = _tex_manager.add_texture( std::move( tex ) );
+			tex = make_image_from_surface( _device, *_textures[ parsed_mesh.normal_idx ].image, false );
+			_texture_upload.queue( *_textures[ parsed_mesh.normal_idx ].image, tex );
+			material.normal_texture_index = _tex_manager.add_texture( std::move( tex ) );
 
-			gpu_data.material.pbr_data = mesh.pbr_data;
+			material.pbr_data = parsed_mesh.pbr_data;
 		}
 
 		_texture_upload.submit();
 	}
 
-	std::vector<gpu_mesh> finalize()
+	model finalize()
 	{
 		OPTICK_EVENT();
 		gpu_upload_job::wait_all_done( { &_mesh_upload, &_texture_upload } );
-		return std::move( _gpu_meshes );
+		return model { std::move( _meshes ), std::move( _materials ) };
 	}
 
 	std::size_t get_texture_count() const { return _textures.size(); }
@@ -723,20 +715,20 @@ public:
 private:
 	renderer::Device& _device;
 	renderer::BindlessManager& _tex_manager;
-	MeshManager& _mesh_manager;
 	std::filesystem::path _path;
 	gpu_upload_job _mesh_upload;
 	gpu_upload_job _texture_upload;
 	fastgltf::Asset _asset;
 	std::vector<mesh_texture> _textures;
-	std::vector<mesh_data> _meshes;
-	std::vector<gpu_mesh> _gpu_meshes;
+	std::vector<mesh_data> _parsed_meshes;
+	std::vector<mesh> _meshes;
+	std::vector<gpu_material> _materials;
 };
 
-std::vector<gpu_mesh> load_model( renderer::Device& device, renderer::BindlessManager& tex_manager, MeshManager& mesh_manager )
+model load_model( renderer::Device& device, renderer::BindlessManager& tex_manager )
 {
 	OPTICK_EVENT();
-	mesh_load_job job( device, tex_manager, mesh_manager, "../assets/player.glb" );
+	mesh_load_job job( device, tex_manager, "../assets/player.glb" );
 	job.parse();
 	tbb::parallel_invoke( [ & ]() { job.upload_vertices(); },
 						  [ & ]
@@ -859,8 +851,7 @@ struct ui_data
 void draw_ui( ui_data& data,
 			  const renderer::Device::Properties& props,
 			  const renderer::BindlessManager& tex_manager,
-			  const MeshManager& mesh_manager,
-			  std::span<const gpu_mesh> meshes,
+			  std::span<const mesh> meshes,
 			  float gpu_time,
 			  std::span<float> lod_times )
 {
@@ -875,21 +866,16 @@ void draw_ui( ui_data& data,
 					 props.transfer_memory_size >> 20 );
 		ImGui::SeparatorText( "VRAM usage" );
 		ImGui::Text( "Textures (MB): %zu", tex_manager.get_texture_memory_usage() >> 20 );
-		ImGui::Text( "Vertices (KB): %zu / %zu",
-					 ( mesh_manager.vertex_count * sizeof( mesh_vertex ) ) >> 10,
-					 mesh_manager.vertices.get_size() >> 10 );
-		ImGui::Text( "Indices (KB): %zu / %zu",
-					 ( mesh_manager.index_count * sizeof( uint32_t ) ) >> 10,
-					 mesh_manager.indices.get_size() >> 10 );
-		ImGui::Text( "Meshlets (KB): %zu / %zu",
-					 ( mesh_manager.meshlet_count * sizeof( meshopt_Meshlet ) ) >> 10,
-					 mesh_manager.meshlets.get_size() >> 10 );
-		ImGui::Text( "Meshlet indices (KB): %zu / %zu",
-					 ( mesh_manager.meshlet_vertex_count * sizeof( uint32_t ) ) >> 10,
-					 mesh_manager.meshlets.get_size() >> 10 );
-		ImGui::Text( "Meshlet triangles (KB): %zu / %zu",
-					 ( mesh_manager.meshlet_triangle_count * sizeof( uint8_t ) ) >> 10,
-					 mesh_manager.meshlets_triangles.get_size() >> 10 );
+		size_t meshes_bytes = 0;
+		size_t indices_bytes = 0;
+		for ( const auto& mesh : meshes )
+		{
+			meshes_bytes += mesh.data_buffer.get_size();
+			indices_bytes += mesh.index_buffer.get_size();
+		}
+		ImGui::Text( "Meshes (MB): %zu", meshes_bytes >> 20 );
+		ImGui::Text( "Indices (MB): %zu", indices_bytes >> 20 );
+
 		ImGui::SeparatorText( "Stats" );
 		ImGui::Text( "GPU time(ms): %.2f", gpu_time );
 		ImGui::Text( "Per LOD GPU time(ms): %.2f / %.2f / %.2f / %.2f", lod_times[ 0 ], lod_times[ 1 ], lod_times[ 2 ], lod_times[ 3 ] );
@@ -897,10 +883,10 @@ void draw_ui( ui_data& data,
 		{
 			ImGui::Text( "Mesh #%d: %d / %d / %d / %d triangles",
 						 i,
-						 meshes[ i ].lods[ 0 ].indices_count,
-						 meshes[ i ].lods[ 1 ].indices_count,
-						 meshes[ i ].lods[ 2 ].indices_count,
-						 meshes[ i ].lods[ 3 ].indices_count );
+						 meshes[ i ].gpu_data.lods[ 0 ].indices_count,
+						 meshes[ i ].gpu_data.lods[ 1 ].indices_count,
+						 meshes[ i ].gpu_data.lods[ 2 ].indices_count,
+						 meshes[ i ].gpu_data.lods[ 3 ].indices_count );
 		}
 
 		ImGui::SeparatorText( "Settings" );
@@ -1008,12 +994,11 @@ int main()
 
 	renderer::BindlessManager tex_manager( device );
 	renderer::PipelineManager pipelines( device, "../shaders/vulkan", tex_manager );
-	MeshManager mesh_manager( device );
 
 	renderer::PipelineHandle mesh_pipeline;
 	renderer::PipelineHandle mesh_pipeline_meshlet;
 	renderer::PipelineHandle grid_pipeline;
-	std::vector<gpu_mesh> meshes;
+	model model;
 	{
 		renderer::ShaderCompiler compiler( "../shaders/vulkan" );
 		tbb::parallel_invoke(
@@ -1043,7 +1028,7 @@ int main()
 											   .push_constants_size = sizeof( grid_constants ) },
 					{ { "grid.vert", renderer::ShaderStage::VERTEX }, { "grid.frag", renderer::ShaderStage::FRAGMENT } } );
 			},
-			[ & ] { meshes = load_model( device, tex_manager, mesh_manager ); } );
+			[ & ] { model = load_model( device, tex_manager ); } );
 	}
 
 	auto constant_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
@@ -1168,7 +1153,7 @@ int main()
 			for ( int lod = 0; lod < 4; ++lod )
 			{
 				uint64_t time = 0;
-				for ( int mesh = 0; mesh < meshes.size(); ++mesh )
+				for ( int mesh = 0; mesh < model.meshes.size(); ++mesh )
 				{
 					time += timestamps[ Timestamps::DRAW_MESHES + ( mesh * 4 ) + lod + 1 ]
 						- timestamps[ Timestamps::DRAW_MESHES + ( mesh * 4 ) + lod ];
@@ -1197,7 +1182,7 @@ int main()
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
-		draw_ui( ui_state, props, tex_manager, mesh_manager, meshes, gpu_time, per_lod_gpu_time );
+		draw_ui( ui_state, props, tex_manager, model.meshes, gpu_time, per_lod_gpu_time );
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
@@ -1224,22 +1209,19 @@ int main()
 		if ( mesh_shading )
 		{
 			command_buffer->bind_pipeline( pipelines.get( mesh_pipeline_meshlet ), tex_manager );
-			for ( const auto& mesh : meshes )
+			for ( int i = 0; i < model.meshes.size(); ++i )
 			{
 				OPTICK_GPU_EVENT( "Draw Meshlet" );
-				const push_constants constants { .mesh = mesh,
+				const push_constants constants { .mesh = model.meshes[ i ].gpu_data,
+												 .material = model.materials[ i ],
 												 .scene_constants = constants_address,
-												 .vertex_buffer = mesh_manager.vertices.get_device_address(),
 												 .instance_buffer = instances_address,
-												 .meshlets_buffer = mesh_manager.meshlets.get_device_address(),
-												 .meshlets_vertices_buffer = mesh_manager.meshlets_vertices.get_device_address(),
-												 .meshlets_triangles_buffer = mesh_manager.meshlets_triangles.get_device_address(),
 												 .lod_cutoff = ui_state.lod_cutoff };
 				command_buffer->push_constants( pipelines.get( mesh_pipeline_meshlet ), constants );
 				command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES + mesh_draws );
 				command_buffer->draw_mesh_task( ui_state.x_miku, 1, ui_state.z_miku );
 				++mesh_draws;
-				for ( int i = 0; i < 3; ++i )
+				for ( int lod = 1; lod < 4; ++lod )
 				{
 					command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES + mesh_draws );
 					++mesh_draws;
@@ -1249,13 +1231,13 @@ int main()
 		else
 		{
 			command_buffer->bind_pipeline( pipelines.get( mesh_pipeline ), tex_manager );
-			command_buffer->bind_index_buffer( mesh_manager.indices );
-			for ( const auto& mesh : meshes )
+			for ( int i = 0; i < model.meshes.size(); ++i )
 			{
 				OPTICK_GPU_EVENT( "Draw Mesh" );
-				const push_constants constants { .mesh = mesh,
+				command_buffer->bind_index_buffer( model.meshes[ i ].index_buffer );
+				const push_constants constants { .mesh = model.meshes[ i ].gpu_data,
+												 .material = model.materials[ i ],
 												 .scene_constants = constants_address,
-												 .vertex_buffer = mesh_manager.vertices.get_device_address(),
 												 .instance_buffer = instances_address };
 
 				command_buffer->push_constants( pipelines.get( mesh_pipeline ), constants );
@@ -1265,9 +1247,9 @@ int main()
 					command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES + mesh_draws );
 					if ( !instances_per_lod[ lod ].empty() )
 					{
-						command_buffer->draw_indexed( mesh.lods[ lod ].indices_count,
+						command_buffer->draw_indexed( model.meshes[ i ].gpu_data.lods[ lod ].indices_count,
 													  instances_per_lod[ lod ].size(),
-													  mesh.lods[ lod ].indices_offset,
+													  model.meshes[ i ].gpu_data.lods[ lod ].indices_offset,
 													  base_instance );
 						base_instance += instances_per_lod[ lod ].size();
 					}

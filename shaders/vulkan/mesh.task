@@ -12,8 +12,10 @@ layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 layout( push_constant ) uniform constants
 {
     Mesh mesh;
+    Material material;
     SceneConstants scene_constants;
-    layout(offset = 160) float lod_cutoff;
+    InstanceBuffer instance_buffer;
+    float lod_cutoff;
 } PushConstants;
 
 taskPayloadSharedEXT MeshletTaskPayload payload;
