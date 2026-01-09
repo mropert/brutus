@@ -4,8 +4,13 @@
 #extension GL_EXT_shader_8bit_storage: require
 #extension GL_GOOGLE_include_directive : require
 
+#include "constants.glsl"
+#include "mesh.glsl"
+
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 layout(triangles, max_vertices = 64, max_primitives = 96) out;
+
+layout(std430, set = 0, binding = 2) readonly buffer ssbo1 { Mesh meshes[]; };
 
 layout (location = 0) out vec2 outUV[];
 layout (location = 1) out vec3 outWorldPos[];
@@ -13,13 +18,10 @@ layout (location = 2) out vec3 outNormal[];
 layout (location = 3) out vec3 outTangent[];
 layout (location = 4) out vec3 outBitangent[];
 
-#include "constants.glsl"
-#include "mesh.glsl"
-
 layout( push_constant, std430 ) uniform constants
 {
-    Mesh mesh;
-    Material material;
+    uint mesh;
+    uint material;
     SceneConstants scene_constants;
 } PushConstants;
 
@@ -27,12 +29,12 @@ taskPayloadSharedEXT MeshletTaskPayload payload;
 
 void main()
 {
-    Meshlet meshlet = PushConstants.mesh.mb.meshlets[gl_WorkGroupID.x + PushConstants.mesh.lods[payload.lod].meshlets_offset];
+    Meshlet meshlet = meshes[PushConstants.mesh].mb.meshlets[gl_WorkGroupID.x + meshes[PushConstants.mesh].lods[payload.lod].meshlets_offset];
     SetMeshOutputsEXT(meshlet.vertex_count, meshlet.triangle_count);
 
     for (uint i = gl_LocalInvocationIndex; i < meshlet.vertex_count; i += gl_WorkGroupSize.x) {
-        const uint index = PushConstants.mesh.mvb.meshlet_vertices[meshlet.vertex_offset + i];
-        const Vertex v = PushConstants.mesh.vb.vertices[index];
+        const uint index = meshes[PushConstants.mesh].mvb.meshlet_vertices[meshlet.vertex_offset + i];
+        const Vertex v =meshes[PushConstants.mesh].vb.vertices[index];
         const vec3 pos = v.position + payload.position;
         gl_MeshVerticesEXT[i].gl_Position = PushConstants.scene_constants.view_projection_matrix * vec4(pos, 1);
         outUV[i].x = v.uv_x;
@@ -46,6 +48,8 @@ void main()
     for (uint i = gl_LocalInvocationIndex; i < meshlet.triangle_count; i += gl_WorkGroupSize.x) {
         const uint offset = meshlet.triangle_offset + i * 3;
         gl_PrimitiveTriangleIndicesEXT[i] = uvec3(
-            PushConstants.mesh.mtb.meshlet_triangles[offset], PushConstants.mesh.mtb.meshlet_triangles[offset + 1], PushConstants.mesh.mtb.meshlet_triangles[offset + 2]);
+            meshes[PushConstants.mesh].mtb.meshlet_triangles[offset],
+            meshes[PushConstants.mesh].mtb.meshlet_triangles[offset + 1],
+            meshes[PushConstants.mesh].mtb.meshlet_triangles[offset + 2]);
     }
 }

@@ -61,31 +61,43 @@ struct gpu_mesh
 	renderer::BufferHandle meshlet_triangles;
 };
 
+using mesh_handle = renderer::BindlessHandle<gpu_mesh>;
+using material_handle = renderer::BindlessHandle<gpu_material>;
+
 struct mesh
 {
 	renderer::raii::Buffer data_buffer; // vertex + meshlets
 	renderer::raii::Buffer index_buffer; // only used by traditional pipeline
+	mesh_handle handle;
 	// Data below is only for debugging purposes, a CPU side copy of the GPU-side descriptor
 	gpu_mesh gpu_data;
+};
+
+struct material
+{
+	material_handle handle;
+	// Data below is only for debugging purposes, a CPU side copy of the GPU-side descriptor
+	gpu_material gpu_data;
 };
 
 struct model
 {
 	std::vector<mesh> meshes;
-	std::vector<gpu_material> materials;
+	std::vector<material> materials;
 };
 
 struct push_constants
 {
-	gpu_mesh mesh;
-	gpu_material material;
+	mesh_handle mesh;
+	material_handle material;
 	renderer::BufferHandle scene_constants;
 	renderer::BufferHandle instance_buffer;
 	float lod_cutoff = 10.;
 };
 
-constexpr auto a = offsetof( push_constants, material );
-constexpr auto b = offsetof( push_constants, scene_constants );
+using BindlessManager = renderer::BindlessManager<gpu_mesh, gpu_material>;
+static constexpr uint32_t MAX_MESHES = 8192;
+static constexpr uint32_t MAX_MATERIALS = 8192;
 
 SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
 {
@@ -300,9 +312,9 @@ class mesh_load_job
 
 
 public:
-	mesh_load_job( renderer::Device& device, renderer::BindlessManager& tex_manager, std::filesystem::path path )
+	mesh_load_job( renderer::Device& device, BindlessManager& bindless_manager, std::filesystem::path path )
 		: _device( device )
-		, _tex_manager( tex_manager )
+		, _bindless_manager( bindless_manager )
 		, _path( std::move( path ) )
 		, _mesh_upload( device, 32 * 1024 * 1024 )
 		, _texture_upload( device, 128 * 1024 * 1024 )
@@ -455,7 +467,7 @@ public:
 		std::array<uint32_t, 3> indices_per_lod;
 	};
 
-	void upload_vertices()
+	void upload_mesh()
 	{
 		OPTICK_EVENT();
 		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
@@ -650,6 +662,8 @@ public:
 				_mesh_upload.queue( all_meshlet_triangles[ i * 4 + lod ], mesh.data_buffer, offset );
 				offset += all_meshlet_triangles[ i * 4 + lod ].size() * sizeof( uint8_t );
 			}
+
+			mesh.handle = _bindless_manager.add_buffer_entry( mesh.gpu_data );
 		}
 
 		_mesh_upload.submit();
@@ -673,7 +687,7 @@ public:
 			} );
 	}
 
-	void upload_textures()
+	void upload_materials()
 	{
 		OPTICK_EVENT();
 
@@ -691,13 +705,15 @@ public:
 
 			auto tex = make_image_from_surface( _device, *_textures[ parsed_mesh.albedo_idx ].image, true );
 			_texture_upload.queue( *_textures[ parsed_mesh.albedo_idx ].image, tex );
-			material.albedo_texture_index = _tex_manager.add_texture( std::move( tex ) );
+			material.gpu_data.albedo_texture_index = _bindless_manager.add_texture( std::move( tex ) );
 
 			tex = make_image_from_surface( _device, *_textures[ parsed_mesh.normal_idx ].image, false );
 			_texture_upload.queue( *_textures[ parsed_mesh.normal_idx ].image, tex );
-			material.normal_texture_index = _tex_manager.add_texture( std::move( tex ) );
+			material.gpu_data.normal_texture_index = _bindless_manager.add_texture( std::move( tex ) );
 
-			material.pbr_data = parsed_mesh.pbr_data;
+			material.gpu_data.pbr_data = parsed_mesh.pbr_data;
+
+			material.handle = _bindless_manager.add_buffer_entry( material.gpu_data );
 		}
 
 		_texture_upload.submit();
@@ -714,7 +730,7 @@ public:
 
 private:
 	renderer::Device& _device;
-	renderer::BindlessManager& _tex_manager;
+	BindlessManager& _bindless_manager;
 	std::filesystem::path _path;
 	gpu_upload_job _mesh_upload;
 	gpu_upload_job _texture_upload;
@@ -722,19 +738,19 @@ private:
 	std::vector<mesh_texture> _textures;
 	std::vector<mesh_data> _parsed_meshes;
 	std::vector<mesh> _meshes;
-	std::vector<gpu_material> _materials;
+	std::vector<material> _materials;
 };
 
-model load_model( renderer::Device& device, renderer::BindlessManager& tex_manager )
+model load_model( renderer::Device& device, BindlessManager& bindless_manager )
 {
 	OPTICK_EVENT();
-	mesh_load_job job( device, tex_manager, "../assets/player.glb" );
+	mesh_load_job job( device, bindless_manager, "../assets/player.glb" );
 	job.parse();
-	tbb::parallel_invoke( [ & ]() { job.upload_vertices(); },
+	tbb::parallel_invoke( [ & ]() { job.upload_mesh(); },
 						  [ & ]
 						  {
 							  job.decompress_textures();
-							  job.upload_textures();
+							  job.upload_materials();
 						  } );
 	return job.finalize();
 }
@@ -850,7 +866,7 @@ struct ui_data
 
 void draw_ui( ui_data& data,
 			  const renderer::Device::Properties& props,
-			  const renderer::BindlessManager& tex_manager,
+			  const BindlessManager& bindless_manager,
 			  std::span<const mesh> meshes,
 			  float gpu_time,
 			  std::span<float> lod_times )
@@ -865,7 +881,7 @@ void draw_ui( ui_data& data,
 					 props.device_memory_size >> 20,
 					 props.transfer_memory_size >> 20 );
 		ImGui::SeparatorText( "VRAM usage" );
-		ImGui::Text( "Textures (MB): %zu", tex_manager.get_texture_memory_usage() >> 20 );
+		ImGui::Text( "Textures (MB): %zu", bindless_manager.get_texture_memory_usage() >> 20 );
 		size_t meshes_bytes = 0;
 		size_t indices_bytes = 0;
 		for ( const auto& mesh : meshes )
@@ -992,8 +1008,8 @@ int main()
 	auto draw_resolved_image = device.create_texture( draw_image_format, usage::TRANSFER_SRC | usage::COLOR_ATTACHMENT, draw_image_extent );
 	auto draw_resolved_image_view = device.create_texture_view( draw_resolved_image, renderer::TextureView::Aspect::COLOR );
 
-	renderer::BindlessManager tex_manager( device );
-	renderer::PipelineManager pipelines( device, "../shaders/vulkan", tex_manager );
+	BindlessManager bindless_manager( device, std::array{ MAX_MESHES, MAX_MATERIALS } );
+	renderer::PipelineManager pipelines( device, "../shaders/vulkan", bindless_manager );
 
 	renderer::PipelineHandle mesh_pipeline;
 	renderer::PipelineHandle mesh_pipeline_meshlet;
@@ -1028,7 +1044,7 @@ int main()
 											   .push_constants_size = sizeof( grid_constants ) },
 					{ { "grid.vert", renderer::ShaderStage::VERTEX }, { "grid.frag", renderer::ShaderStage::FRAGMENT } } );
 			},
-			[ & ] { model = load_model( device, tex_manager ); } );
+			[ & ] { model = load_model( device, bindless_manager ); } );
 	}
 
 	auto constant_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
@@ -1182,7 +1198,7 @@ int main()
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
-		draw_ui( ui_state, props, tex_manager, model.meshes, gpu_time, per_lod_gpu_time );
+		draw_ui( ui_state, props, bindless_manager, model.meshes, gpu_time, per_lod_gpu_time );
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
@@ -1208,12 +1224,12 @@ int main()
 
 		if ( mesh_shading )
 		{
-			command_buffer->bind_pipeline( pipelines.get( mesh_pipeline_meshlet ), tex_manager );
+			command_buffer->bind_pipeline( pipelines.get( mesh_pipeline_meshlet ), bindless_manager );
 			for ( int i = 0; i < model.meshes.size(); ++i )
 			{
 				OPTICK_GPU_EVENT( "Draw Meshlet" );
-				const push_constants constants { .mesh = model.meshes[ i ].gpu_data,
-												 .material = model.materials[ i ],
+				const push_constants constants { .mesh = model.meshes[ i ].handle,
+												 .material = model.materials[ i ].handle,
 												 .scene_constants = constants_address,
 												 .instance_buffer = instances_address,
 												 .lod_cutoff = ui_state.lod_cutoff };
@@ -1230,13 +1246,13 @@ int main()
 		}
 		else
 		{
-			command_buffer->bind_pipeline( pipelines.get( mesh_pipeline ), tex_manager );
+			command_buffer->bind_pipeline( pipelines.get( mesh_pipeline ), bindless_manager );
 			for ( int i = 0; i < model.meshes.size(); ++i )
 			{
 				OPTICK_GPU_EVENT( "Draw Mesh" );
 				command_buffer->bind_index_buffer( model.meshes[ i ].index_buffer );
-				const push_constants constants { .mesh = model.meshes[ i ].gpu_data,
-												 .material = model.materials[ i ],
+				const push_constants constants { .mesh = model.meshes[ i ].handle,
+												 .material = model.materials[ i ].handle,
 												 .scene_constants = constants_address,
 												 .instance_buffer = instances_address };
 
@@ -1262,7 +1278,7 @@ int main()
 		{
 			OPTICK_GPU_EVENT( "Draw Grid" );
 			command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_GRID );
-			command_buffer->bind_pipeline( pipelines.get( grid_pipeline ), tex_manager );
+			command_buffer->bind_pipeline( pipelines.get( grid_pipeline ), bindless_manager );
 			command_buffer->push_constants( pipelines.get( grid_pipeline ), grid_constants { .scene_constants = constants_address } );
 			command_buffer->draw( 4 );
 		}
