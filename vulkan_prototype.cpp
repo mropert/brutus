@@ -984,13 +984,11 @@ int main()
 										 .Queue = internals.queue,
 										 .MinImageCount = swapchain.get_image_count(),
 										 .ImageCount = swapchain.get_image_count(),
-										 .MSAASamples = VK_SAMPLE_COUNT_4_BIT,
 										 .DescriptorPoolSize = renderer::MAX_FRAMES_IN_FLIGHT,
 										 .UseDynamicRendering = true,
 										 .PipelineRenderingCreateInfo = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
 																		  .colorAttachmentCount = 1,
-																		  .pColorAttachmentFormats = &color_format,
-																		  .depthAttachmentFormat = VK_FORMAT_D32_SFLOAT } };
+																		  .pColorAttachmentFormats = &color_format } };
 		ImGui_ImplVulkan_Init( &info );
 	}
 
@@ -1008,7 +1006,7 @@ int main()
 	auto draw_resolved_image = device.create_texture( draw_image_format, usage::TRANSFER_SRC | usage::COLOR_ATTACHMENT, draw_image_extent );
 	auto draw_resolved_image_view = device.create_texture_view( draw_resolved_image, renderer::TextureView::Aspect::COLOR );
 
-	BindlessManager bindless_manager( device, std::array{ MAX_MESHES, MAX_MATERIALS } );
+	BindlessManager bindless_manager( device, std::array { MAX_MESHES, MAX_MATERIALS } );
 	renderer::PipelineManager pipelines( device, "../shaders/vulkan", bindless_manager );
 
 	renderer::PipelineHandle mesh_pipeline;
@@ -1283,6 +1281,10 @@ int main()
 			command_buffer->draw( 4 );
 		}
 
+		command_buffer->end_rendering();
+
+		command_buffer->begin_rendering( draw_image_extent, renderer::RenderAttachment { .target = draw_resolved_image_view } );
+
 		{
 			OPTICK_GPU_EVENT( "Draw UI" );
 			command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_UI );
@@ -1293,7 +1295,6 @@ int main()
 		command_buffer->end_rendering();
 
 		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::BLIT );
-
 
 		command_buffer->transition_texture( draw_resolved_image, renderer::Texture::Layout::TRANSFER_SRC_OPTIMAL );
 		command_buffer->transition_texture( swapchain_image, renderer::Texture::Layout::TRANSFER_DST_OPTIMAL );
