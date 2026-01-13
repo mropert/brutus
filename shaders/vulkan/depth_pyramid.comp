@@ -1,0 +1,22 @@
+#version 450
+
+layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D textures[1024];
+layout(set = 0, binding = 1, r32f) uniform writeonly image2D images[1024];
+layout(set = 0, binding = 2) uniform sampler sampl;
+
+layout( push_constant, std430 ) uniform block
+{
+    uint depth_in;
+    uint depth_out;
+    vec2 image_size;
+};
+
+void main()
+{
+    const uvec2 pos = gl_GlobalInvocationID.xy;
+    const float depth = texture( sampler2D(textures[depth_in], sampl) , ( vec2( pos ) + 0.5 ) / image_size ).x;
+    //const float depth = 0.42;
+    imageStore( images[depth_out], ivec2( pos ), vec4( depth ) );
+}

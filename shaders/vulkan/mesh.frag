@@ -14,8 +14,8 @@ layout (location = 4) in vec3 inBitangent;
 layout (location = 0) out vec4 outFragColor;
 
 layout(set = 0, binding = 0) uniform texture2D textures[1024];
-layout(set = 0, binding = 1) uniform sampler sampl;
-layout(std430, set = 0, binding = 3) readonly buffer ssbo2 { Material materials[]; };
+layout(set = 0, binding = 2) uniform sampler sampl;
+layout(std430, set = 1, binding = 1) readonly buffer ssbo2 { Material materials[]; };
 
 layout( push_constant, std430 ) uniform constants
 {

@@ -40,8 +40,8 @@ struct pbr_data
 struct gpu_material
 {
 	pbr_data pbr_data;
-	renderer::TextureHandle albedo_texture_index;
-	renderer::TextureHandle normal_texture_index;
+	uint32_t albedo_texture_index;
+	uint32_t normal_texture_index;
 };
 
 struct gpu_mesh_lod
@@ -705,11 +705,11 @@ public:
 
 			auto tex = make_image_from_surface( _device, *_textures[ parsed_mesh.albedo_idx ].image, true );
 			_texture_upload.queue( *_textures[ parsed_mesh.albedo_idx ].image, tex );
-			material.gpu_data.albedo_texture_index = _bindless_manager.add_texture( std::move( tex ) );
+			material.gpu_data.albedo_texture_index = _bindless_manager.add_texture_read_only( std::move( tex ) ).texture_index;
 
 			tex = make_image_from_surface( _device, *_textures[ parsed_mesh.normal_idx ].image, false );
 			_texture_upload.queue( *_textures[ parsed_mesh.normal_idx ].image, tex );
-			material.gpu_data.normal_texture_index = _bindless_manager.add_texture( std::move( tex ) );
+			material.gpu_data.normal_texture_index = _bindless_manager.add_texture_read_only( std::move( tex ) ).texture_index;
 
 			material.gpu_data.pbr_data = parsed_mesh.pbr_data;
 
@@ -928,6 +928,13 @@ struct grid_constants
 	float far_distance = 60.f;
 };
 
+struct depth_pyramid_constants
+{
+	uint32_t depth_in;
+	uint32_t depth_out;
+	glm::aligned_vec2 size;
+};
+
 namespace Timestamps
 {
 	enum : uint32_t
@@ -940,6 +947,11 @@ namespace Timestamps
 		FRAME_END,
 		COUNT
 	};
+}
+
+uint32_t calc_group_count( uint32_t count )
+{
+	return ( count + 32 - 1 ) / 32;
 }
 
 int main()
@@ -1007,10 +1019,25 @@ int main()
 	auto draw_resolved_image_view = device.create_texture_view( draw_resolved_image, renderer::TextureView::Aspect::COLOR );
 
 	BindlessManager bindless_manager( device, std::array { MAX_MESHES, MAX_MATERIALS } );
+
+	auto depth_resolved_image = bindless_manager.add_texture_read_only(
+		device.create_texture( renderer::Texture::Format::D32_SFLOAT,
+							   usage::SAMPLED | usage::DEPTH_STENCIL_ATTACHMENT,
+							   draw_image_extent ) );
+
+	std::array<renderer::BindlessTexture, 4> depth_pyramid;
+	for ( int i = 0; i < depth_pyramid.size(); ++i )
+	{
+		const renderer::Extent2D extent { draw_image_extent.width >> ( i + 1 ), draw_image_extent.height >> ( i + 1 ) };
+		depth_pyramid[ i ] = bindless_manager.add_texture_read_write(
+			device.create_texture( renderer::Texture::Format::R32_SFLOAT, usage::SAMPLED | usage::STORAGE, extent ) );
+	}
+
 	renderer::PipelineManager pipelines( device, "../shaders/vulkan", bindless_manager );
 
 	renderer::PipelineHandle mesh_pipeline;
 	renderer::PipelineHandle mesh_pipeline_meshlet;
+	renderer::PipelineHandle depth_pyramid_pipeline;
 	renderer::PipelineHandle grid_pipeline;
 	model model;
 	{
@@ -1032,6 +1059,12 @@ int main()
 													   { { "mesh.task", renderer::ShaderStage::TASK },
 														 { "mesh.mesh", renderer::ShaderStage::MESH },
 														 { "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
+			},
+			[ & ]
+			{
+				depth_pyramid_pipeline = pipelines.add(
+					renderer::Pipeline::Desc { .push_constants_size = sizeof( depth_pyramid_constants ) },
+					{ { "depth_pyramid.comp", renderer::ShaderStage::COMPUTE } } );
 			},
 			[ & ]
 			{
@@ -1208,12 +1241,14 @@ int main()
 		command_buffer->transition_texture( draw_image, renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL );
 		command_buffer->transition_texture( draw_resolved_image, renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL );
 		command_buffer->transition_texture( depth_image, renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL );
+		command_buffer->transition_texture( depth_resolved_image.texture, renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL );
 
-		command_buffer->begin_rendering( draw_image_extent,
-										 renderer::RenderAttachment { .target = draw_image_view,
-																	  .resolve_target = draw_resolved_image_view,
-																	  .clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } } },
-										 renderer::RenderAttachment { .target = depth_image_view } );
+		command_buffer->begin_rendering(
+			draw_image_extent,
+			renderer::RenderAttachment { .target = draw_image_view,
+										 .resolve_target = draw_resolved_image_view,
+										 .clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } } },
+			renderer::RenderAttachment { .target = depth_image_view, .resolve_target = depth_resolved_image.view } );
 
 		command_buffer->set_viewport( draw_image_extent );
 		command_buffer->set_scissor( draw_image_extent );
@@ -1282,6 +1317,27 @@ int main()
 		}
 
 		command_buffer->end_rendering();
+
+		command_buffer->transition_texture( depth_resolved_image.texture, renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
+
+		{
+			OPTICK_GPU_EVENT( "Depth Pyramid" );
+			command_buffer->bind_pipeline( pipelines.get( depth_pyramid_pipeline ), bindless_manager );
+			for ( int i = 0; i < depth_pyramid.size(); ++i )
+			{
+				command_buffer->transition_texture( depth_pyramid[ i ].texture, renderer::Texture::Layout::GENERAL );
+				const depth_pyramid_constants constants { .depth_in = i == 0 ? depth_resolved_image.texture_index
+																			 : depth_pyramid[ i - 1 ].texture_index,
+														  .depth_out = depth_pyramid[ i ].storage_index,
+														  .size = glm::aligned_vec2( depth_pyramid[ i ].texture.get_extent().width,
+																					 depth_pyramid[ i ].texture.get_extent().height ) };
+				command_buffer->push_constants( pipelines.get( depth_pyramid_pipeline ), constants );
+				command_buffer->dispatch( calc_group_count( depth_pyramid[ i ].texture.get_extent().width ),
+										  calc_group_count( depth_pyramid[ i ].texture.get_extent().height ),
+										  1 );
+				command_buffer->transition_texture( depth_pyramid[ i ].texture, renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
+			}
+		}
 
 		command_buffer->begin_rendering( draw_image_extent, renderer::RenderAttachment { .target = draw_resolved_image_view } );
 

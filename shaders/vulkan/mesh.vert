@@ -12,7 +12,7 @@ layout (location = 2) out vec3 outNormal;
 layout (location = 3) out vec3 outTangent;
 layout (location = 4) out vec3 outBitangent;
 
-layout(std430, set = 0, binding = 2) readonly buffer ssbo1 { Mesh meshes[]; };
+layout(std430, set = 1, binding = 0) readonly buffer ssbo1 { Mesh meshes[]; };
 
 layout( push_constant, std430 ) uniform constants
 {
