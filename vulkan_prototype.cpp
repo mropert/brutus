@@ -174,9 +174,9 @@ renderer::raii::Texture make_image_from_surface( renderer::Device& device, const
 		throw renderer::Error( "Unsupported format" );
 	}
 	using TexUsage = renderer::Texture::Usage;
-	return device.create_texture( static_cast<renderer::Texture::Format>( format ),
-								  TexUsage::TRANSFER_DST | TexUsage::SAMPLED,
-								  renderer::Extent2D( surface.w, surface.h ) );
+	return device.create_texture( renderer::Texture::Desc { static_cast<renderer::Texture::Format>( format ),
+															TexUsage::TRANSFER_DST | TexUsage::SAMPLED,
+															renderer::Extent2D( surface.w, surface.h ) } );
 }
 
 class gpu_upload_job
@@ -233,9 +233,11 @@ public:
 		const auto pitch = surface.w * get_format_size( sdl_to_vulkan_format( gpu_format ) );
 		assert( _offset + pitch * surface.h < _size );
 		SDL_ConvertPixels( surface.w, surface.h, surface.format, surface.pixels, surface.pitch, gpu_format, ptr + _offset, pitch );
-		_cmd_buffer->transition_texture( texture, renderer::Texture::Layout::TRANSFER_DST_OPTIMAL );
+		_cmd_buffer->transition_texture( texture, renderer::Texture::Layout::UNDEFINED, renderer::Texture::Layout::TRANSFER_DST_OPTIMAL );
 		_cmd_buffer->copy_buffer_to_texture( _upload_buffer, _offset, texture );
-		_cmd_buffer->transition_texture( texture, renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
+		_cmd_buffer->transition_texture( texture,
+										 renderer::Texture::Layout::TRANSFER_DST_OPTIMAL,
+										 renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
 		_offset += pitch * surface.h;
 	}
 
@@ -705,11 +707,11 @@ public:
 
 			auto tex = make_image_from_surface( _device, *_textures[ parsed_mesh.albedo_idx ].image, true );
 			_texture_upload.queue( *_textures[ parsed_mesh.albedo_idx ].image, tex );
-			material.gpu_data.albedo_texture_index = _bindless_manager.add_texture_read_only( std::move( tex ) ).texture_index;
+			material.gpu_data.albedo_texture_index = _bindless_manager.add_texture( std::move( tex ) ).handles.texture_index;
 
 			tex = make_image_from_surface( _device, *_textures[ parsed_mesh.normal_idx ].image, false );
 			_texture_upload.queue( *_textures[ parsed_mesh.normal_idx ].image, tex );
-			material.gpu_data.normal_texture_index = _bindless_manager.add_texture_read_only( std::move( tex ) ).texture_index;
+			material.gpu_data.normal_texture_index = _bindless_manager.add_texture( std::move( tex ) ).handles.texture_index;
 
 			material.gpu_data.pbr_data = parsed_mesh.pbr_data;
 
@@ -1006,32 +1008,38 @@ int main()
 
 	const auto draw_image_extent = device.get_extent();
 	using usage = renderer::Texture::Usage;
-	auto draw_image = device.create_texture( draw_image_format, usage::COLOR_ATTACHMENT, draw_image_extent, 4 );
+	auto draw_image = device.create_texture( renderer::Texture::Desc { .format = draw_image_format,
+																	   .usage = usage::COLOR_ATTACHMENT,
+																	   .extent = draw_image_extent,
+																	   .samples = 4 } );
 	auto draw_image_view = device.create_texture_view( draw_image, renderer::TextureView::Aspect::COLOR );
 
-	auto depth_image = device.create_texture( renderer::Texture::Format::D32_SFLOAT,
-											  usage::DEPTH_STENCIL_ATTACHMENT,
-											  draw_image_extent,
-											  4 );
+	auto depth_image = device.create_texture( renderer::Texture::Desc { .format = renderer::Texture::Format::D32_SFLOAT,
+																		.usage = usage::DEPTH_STENCIL_ATTACHMENT,
+																		.extent = draw_image_extent,
+																		.samples = 4 } );
+
 	auto depth_image_view = device.create_texture_view( depth_image, renderer::TextureView::Aspect::DEPTH );
 
-	auto draw_resolved_image = device.create_texture( draw_image_format, usage::TRANSFER_SRC | usage::COLOR_ATTACHMENT, draw_image_extent );
+	auto draw_resolved_image = device.create_texture( renderer::Texture::Desc { .format = draw_image_format,
+																				.usage = usage::COLOR_ATTACHMENT | usage::TRANSFER_SRC,
+																				.extent = draw_image_extent } );
 	auto draw_resolved_image_view = device.create_texture_view( draw_resolved_image, renderer::TextureView::Aspect::COLOR );
 
 	BindlessManager bindless_manager( device, std::array { MAX_MESHES, MAX_MATERIALS } );
 
-	auto depth_resolved_image = bindless_manager.add_texture_read_only(
-		device.create_texture( renderer::Texture::Format::D32_SFLOAT,
-							   usage::SAMPLED | usage::DEPTH_STENCIL_ATTACHMENT,
-							   draw_image_extent ) );
+	const auto depth_resolved_image = bindless_manager.add_texture(
+		device.create_texture( renderer::Texture::Desc { .format = renderer::Texture::Format::D32_SFLOAT,
+														 .usage = usage::DEPTH_STENCIL_ATTACHMENT | usage::SAMPLED,
+														 .extent = draw_image_extent } ) );
 
-	std::array<renderer::BindlessTexture, 4> depth_pyramid;
-	for ( int i = 0; i < depth_pyramid.size(); ++i )
-	{
-		const renderer::Extent2D extent { draw_image_extent.width >> ( i + 1 ), draw_image_extent.height >> ( i + 1 ) };
-		depth_pyramid[ i ] = bindless_manager.add_texture_read_write(
-			device.create_texture( renderer::Texture::Format::R32_SFLOAT, usage::SAMPLED | usage::STORAGE, extent ) );
-	}
+	const auto depth_pyramid = bindless_manager.add_texture(
+		device.create_texture(
+			renderer::Texture::Desc { .format = renderer::Texture::Format::R32_SFLOAT,
+									  .usage = usage::SAMPLED | usage::STORAGE,
+									  .extent = { .width = draw_image_extent.width / 2, .height = draw_image_extent.height / 2 },
+									  .mips = 8 } ),
+		true );
 
 	renderer::PipelineManager pipelines( device, "../shaders/vulkan", bindless_manager );
 
@@ -1238,17 +1246,25 @@ int main()
 		command_buffer->reset_query_pool( query_pools[ image_index ], 0, Timestamps::COUNT );
 		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::FRAME_START );
 
-		command_buffer->transition_texture( draw_image, renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL );
-		command_buffer->transition_texture( draw_resolved_image, renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL );
-		command_buffer->transition_texture( depth_image, renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL );
-		command_buffer->transition_texture( depth_resolved_image.texture, renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL );
+		command_buffer->transition_texture( draw_image,
+											renderer::Texture::Layout::UNDEFINED,
+											renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL );
+		command_buffer->transition_texture( draw_resolved_image,
+											renderer::Texture::Layout::UNDEFINED,
+											renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL );
+		command_buffer->transition_texture( depth_image,
+											renderer::Texture::Layout::UNDEFINED,
+											renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL );
+		command_buffer->transition_texture( depth_resolved_image.texture,
+											renderer::Texture::Layout::UNDEFINED,
+											renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL );
 
 		command_buffer->begin_rendering(
 			draw_image_extent,
 			renderer::RenderAttachment { .target = draw_image_view,
 										 .resolve_target = draw_resolved_image_view,
 										 .clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } } },
-			renderer::RenderAttachment { .target = depth_image_view, .resolve_target = depth_resolved_image.view } );
+			renderer::RenderAttachment { .target = depth_image_view, .resolve_target = depth_resolved_image.handles.view } );
 
 		command_buffer->set_viewport( draw_image_extent );
 		command_buffer->set_scissor( draw_image_extent );
@@ -1317,25 +1333,33 @@ int main()
 		}
 
 		command_buffer->end_rendering();
-
-		command_buffer->transition_texture( depth_resolved_image.texture, renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
+		command_buffer->transition_texture( depth_resolved_image.texture,
+											renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL,
+											renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
 
 		{
 			OPTICK_GPU_EVENT( "Depth Pyramid" );
 			command_buffer->bind_pipeline( pipelines.get( depth_pyramid_pipeline ), bindless_manager );
-			for ( int i = 0; i < depth_pyramid.size(); ++i )
+			auto extent = depth_resolved_image.texture.get_extent();
+			for ( int mip = 0; mip < depth_pyramid.mips.size(); ++mip )
 			{
-				command_buffer->transition_texture( depth_pyramid[ i ].texture, renderer::Texture::Layout::GENERAL );
-				const depth_pyramid_constants constants { .depth_in = i == 0 ? depth_resolved_image.texture_index
-																			 : depth_pyramid[ i - 1 ].texture_index,
-														  .depth_out = depth_pyramid[ i ].storage_index,
-														  .size = glm::aligned_vec2( depth_pyramid[ i ].texture.get_extent().width,
-																					 depth_pyramid[ i ].texture.get_extent().height ) };
+				command_buffer->transition_texture( depth_pyramid.texture,
+													renderer::Texture::Layout::UNDEFINED,
+													renderer::Texture::Layout::GENERAL,
+													mip );
+				extent.width /= 2;
+				extent.height /= 2;
+				const depth_pyramid_constants constants { .depth_in = mip == 0 ? depth_resolved_image.handles.texture_index
+																			   : depth_pyramid.mips[ mip - 1 ].texture_index,
+														  .depth_out = depth_pyramid.mips[ mip ].storage_index,
+														  .size = glm::aligned_vec2( extent.width, extent.height ) };
 				command_buffer->push_constants( pipelines.get( depth_pyramid_pipeline ), constants );
-				command_buffer->dispatch( calc_group_count( depth_pyramid[ i ].texture.get_extent().width ),
-										  calc_group_count( depth_pyramid[ i ].texture.get_extent().height ),
-										  1 );
-				command_buffer->transition_texture( depth_pyramid[ i ].texture, renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
+				command_buffer->dispatch( calc_group_count( extent.width ), calc_group_count( extent.height ), 1 );
+
+				command_buffer->transition_texture( depth_pyramid.texture,
+													renderer::Texture::Layout::GENERAL,
+													renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL,
+													mip );
 			}
 		}
 
@@ -1352,12 +1376,18 @@ int main()
 
 		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::BLIT );
 
-		command_buffer->transition_texture( draw_resolved_image, renderer::Texture::Layout::TRANSFER_SRC_OPTIMAL );
-		command_buffer->transition_texture( swapchain_image, renderer::Texture::Layout::TRANSFER_DST_OPTIMAL );
+		command_buffer->transition_texture( draw_resolved_image,
+											renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL,
+											renderer::Texture::Layout::TRANSFER_SRC_OPTIMAL );
+		command_buffer->transition_texture( swapchain_image,
+											renderer::Texture::Layout::UNDEFINED,
+											renderer::Texture::Layout::TRANSFER_DST_OPTIMAL );
 
 		command_buffer->blit_texture( draw_resolved_image, swapchain_image );
 
-		command_buffer->transition_texture( swapchain_image, renderer::Texture::Layout::PRESENT_SRC );
+		command_buffer->transition_texture( swapchain_image,
+											renderer::Texture::Layout::TRANSFER_DST_OPTIMAL,
+											renderer::Texture::Layout::PRESENT_SRC );
 
 		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::FRAME_END );
 
