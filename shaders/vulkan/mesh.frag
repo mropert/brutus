@@ -14,7 +14,7 @@ layout (location = 4) in vec3 inBitangent;
 layout (location = 0) out vec4 outFragColor;
 
 layout(set = 0, binding = 0) uniform texture2D textures[1024];
-layout(set = 0, binding = 2) uniform sampler sampl;
+layout(set = 0, binding = 2) uniform sampler samplers[8];
 layout(std430, set = 1, binding = 1) readonly buffer ssbo2 { Material materials[]; };
 
 layout( push_constant, std430 ) uniform constants
@@ -67,13 +67,13 @@ float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness)
 
 void main_flat()
 {
-    const vec3 albedo = texture(sampler2D(textures[materials[PushConstants.material].albedo_index], sampl), inUV).xyz * materials[PushConstants.material].baseColor.xyz;
+    const vec3 albedo = texture(sampler2D(textures[materials[PushConstants.material].albedo_index], samplers[0]), inUV).xyz * materials[PushConstants.material].baseColor.xyz;
     outFragColor = vec4(albedo, 1.0);
 }
 
 void main_basic_diffuse()
 {
-    vec3 albedo = texture(sampler2D(textures[materials[PushConstants.material].albedo_index], sampl), inUV).xyz * materials[PushConstants.material].baseColor.xyz;
+    vec3 albedo = texture(sampler2D(textures[materials[PushConstants.material].albedo_index], samplers[0]), inUV).xyz * materials[PushConstants.material].baseColor.xyz;
     const vec3 N = normalize(inNormal);
     const vec3 L = normalize(PushConstants.scene_constants.main_light.xyz);
     const float NdotL = max(dot(N, -L), 0.0);
@@ -84,11 +84,11 @@ void main_basic_diffuse()
 
 void main()
 {
-    const vec3 albedo = texture(sampler2D(textures[materials[PushConstants.material].albedo_index], sampl), inUV).xyz * materials[PushConstants.material].baseColor.xyz;
+    const vec3 albedo = texture(sampler2D(textures[materials[PushConstants.material].albedo_index], samplers[0]), inUV).xyz * materials[PushConstants.material].baseColor.xyz;
     vec3 F0 = vec3(0.04);
     F0 = mix(F0, albedo, materials[PushConstants.material].metalness);
 
-    const vec3 normalDisplacement = (texture(sampler2D(textures[materials[PushConstants.material].normal_index], sampl), inUV).xyz * 2.0) - 1.0;
+    const vec3 normalDisplacement = (texture(sampler2D(textures[materials[PushConstants.material].normal_index], samplers[0]), inUV).xyz * 2.0) - 1.0;
     const mat3 TBN = mat3(normalize(inTangent), normalize(inBitangent), normalize(inNormal));
     const vec3 N = normalize(TBN * normalDisplacement);
 
