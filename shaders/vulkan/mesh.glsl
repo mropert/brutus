@@ -28,6 +28,7 @@ struct Meshlet {
     uint triangle_offset;
     uint vertex_count;
     uint triangle_count;
+    vec4 bounding_sphere;
 };
 
 layout(buffer_reference, std430) readonly buffer VertexBuffer { Vertex vertices[]; };
@@ -39,6 +40,7 @@ layout(buffer_reference) readonly buffer MeshletTriangleBuffer { uint8_t meshlet
 
 struct Mesh
 {
+    vec4 bounding_sphere;
     MeshLOD lods[4];
     VertexBuffer vb;
     MeshletBuffer mb;

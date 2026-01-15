@@ -52,8 +52,18 @@ struct gpu_mesh_lod
 	uint32_t meshlets_count;
 };
 
+struct gpu_meshlet
+{
+	uint32_t vertex_offset;
+	uint32_t triangle_offset;
+	uint32_t vertex_count;
+	uint32_t triangle_count;
+	glm::aligned_vec4 bounding_sphere; // z is radius
+};
+
 struct gpu_mesh
 {
+	glm::aligned_vec4 bounding_sphere; // z is radius
 	std::array<gpu_mesh_lod, 4> lods;
 	renderer::BufferHandle vertices;
 	renderer::BufferHandle meshlets;
@@ -532,11 +542,12 @@ public:
 			}
 		}
 
-		std::vector<std::vector<meshopt_Meshlet>> all_meshlets;
+		std::vector<std::vector<gpu_meshlet>> all_meshlets;
 		std::vector<std::vector<uint32_t>> all_meshlet_vertices;
 		std::vector<std::vector<uint8_t>> all_meshlet_triangles;
 		{
 			OPTICK_EVENT( "meshlet_generation" );
+			std::vector<meshopt_Meshlet> meshlet_buffer;
 			for ( int i = 0; i < _meshes.size(); ++i )
 			{
 				uint32_t index_offset = 0;
@@ -552,11 +563,11 @@ public:
 					index_offset += lod == 0 ? 0 : indices_count;
 
 					auto max_meshlets = meshopt_buildMeshletsBound( indices_count, 64, 96 );
-					auto& meshlets = all_meshlets.emplace_back( max_meshlets );
+					meshlet_buffer.resize( max_meshlets );
 					auto& meshlet_vertices = all_meshlet_vertices.emplace_back( indices_count );
 					auto& meshlet_triangles = all_meshlet_triangles.emplace_back( indices_count + max_meshlets * 3 );
 
-					const auto meshlet_count = meshopt_buildMeshlets( meshlets.data(),
+					const auto meshlet_count = meshopt_buildMeshlets( meshlet_buffer.data(),
 																	  meshlet_vertices.data(),
 																	  meshlet_triangles.data(),
 																	  indices,
@@ -568,17 +579,31 @@ public:
 																	  96,
 																	  0.f );
 
-					const auto& last = meshlets[ meshlet_count - 1 ];
+					const auto& last = meshlet_buffer[ meshlet_count - 1 ];
 
 					meshlet_vertices.resize( last.vertex_offset + last.vertex_count );
 					meshlet_triangles.resize( last.triangle_offset + last.triangle_count * 3 );
-					meshlets.resize( meshlet_count );
 
-					// Fixup offsets
-					for ( auto& meshlet : meshlets )
+					auto& meshlets = all_meshlets.emplace_back();
+					meshlets.reserve( meshlet_count );
+
+					for ( const auto& meshlet : std::span( meshlet_buffer.data(), meshlet_count ) )
 					{
-						meshlet.vertex_offset += meshlet_vertices_offset;
-						meshlet.triangle_offset += meshlet_triangles_offset;
+						const auto bounds = meshopt_computeMeshletBounds( meshlet_vertices.data() + meshlet.vertex_offset,
+																		  meshlet_triangles.data() + meshlet.triangle_offset,
+																		  meshlet.triangle_count,
+																		  &vertex_data[ i ].front().position.x,
+																		  vertex_data[ i ].size(),
+																		  sizeof( mesh_vertex ) );
+
+						// Meshes store meshlets vertices and triangles for all LODs together in one array so we need to fixup the base offset
+						// We could also store the base offset in each LOD definition but that wouldn't save us any space
+						meshlets.emplace_back(
+							meshlet.vertex_offset + meshlet_vertices_offset,
+							meshlet.triangle_offset + meshlet_triangles_offset,
+							meshlet.vertex_count,
+							meshlet.triangle_count,
+							glm::aligned_vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ) );
 					}
 					meshlet_vertices_offset += meshlet_vertices.size();
 					meshlet_triangles_offset += meshlet_triangles.size();
@@ -590,6 +615,16 @@ public:
 		{
 			const auto& parsed_mesh = _parsed_meshes[ i ];
 			auto& mesh = _meshes[ i ];
+
+			const auto bounds = meshopt_computeSphereBounds( &vertex_data[ i ][ 0 ].position.x,
+															 vertex_data[ i ].size(),
+															 sizeof( mesh_vertex ),
+															 nullptr,
+															 0 );
+			mesh.gpu_data.bounding_sphere.x = bounds.center[ 0 ];
+			mesh.gpu_data.bounding_sphere.y = bounds.center[ 1 ];
+			mesh.gpu_data.bounding_sphere.z = bounds.center[ 2 ];
+			mesh.gpu_data.bounding_sphere.w = bounds.radius;
 
 			// Index buffer
 			const auto indices_count = std::accumulate( begin( simplified_indices[ i ].indices_per_lod ),
@@ -619,7 +654,7 @@ public:
 			auto data_buffer_size = vertex_data[ i ].size() * sizeof( mesh_vertex );
 			for ( const auto& meshlets : std::span( all_meshlets.data() + ( i * 4 ), 4 ) )
 			{
-				data_buffer_size += meshlets.size() * sizeof( meshopt_Meshlet );
+				data_buffer_size += meshlets.size() * sizeof( gpu_meshlet );
 			}
 			for ( const auto& meshlet_vertices : std::span( all_meshlet_vertices.data() + ( i * 4 ), 4 ) )
 			{
@@ -642,7 +677,7 @@ public:
 			for ( int lod = 0; lod < 4; ++lod )
 			{
 				_mesh_upload.queue( all_meshlets[ i * 4 + lod ], mesh.data_buffer, offset );
-				offset += all_meshlets[ i * 4 + lod ].size() * sizeof( meshopt_Meshlet );
+				offset += all_meshlets[ i * 4 + lod ].size() * sizeof( gpu_meshlet );
 				mesh.gpu_data.lods[ lod ].meshlets_count = all_meshlets[ i * 4 + lod ].size();
 				if ( lod > 0 )
 				{
