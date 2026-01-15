@@ -866,12 +866,27 @@ struct ui_data
 	bool mesh_shading;
 };
 
+namespace Timestamps
+{
+	enum : uint32_t
+	{
+		FRAME_START = 0,
+		DRAW_MESHES,
+		DRAW_GRID = DRAW_MESHES + 64,
+		DEPTH_PYRAMID,
+		DRAW_UI,
+		BLIT,
+		FRAME_END,
+		COUNT
+	};
+}
+
 void draw_ui( ui_data& data,
 			  const renderer::Device::Properties& props,
 			  const BindlessManager& bindless_manager,
 			  std::span<const mesh> meshes,
-			  float gpu_time,
-			  std::span<float> lod_times )
+			  std::span<const uint64_t> gpu_timestamps,
+			  float gpu_timestamp_period )
 {
 	OPTICK_EVENT();
 	ImGui::Begin( "Vulkan renderer" );
@@ -894,9 +909,21 @@ void draw_ui( ui_data& data,
 		ImGui::Text( "Meshes (MB): %zu", meshes_bytes >> 20 );
 		ImGui::Text( "Indices (MB): %zu", indices_bytes >> 20 );
 
+		std::array<float, 4> per_lod_gpu_time {};
+		const auto gpu_time = ( gpu_timestamps[ Timestamps::FRAME_END ] - gpu_timestamps[ Timestamps::FRAME_START ] ) * gpu_timestamp_period
+			* 1e-6f;
+		const auto meshes_time = ( gpu_timestamps[ Timestamps::DRAW_GRID ] - gpu_timestamps[ Timestamps::DRAW_MESHES ] )
+			* gpu_timestamp_period * 1e-6f;
+		const auto depth_pyramid_time = ( gpu_timestamps[ Timestamps::DEPTH_PYRAMID + 1 ] - gpu_timestamps[ Timestamps::DEPTH_PYRAMID ] )
+			* gpu_timestamp_period * 1e-6f;
+		const auto ui_time = ( gpu_timestamps[ Timestamps::DRAW_UI + 1 ] - gpu_timestamps[ Timestamps::DRAW_UI ] ) * gpu_timestamp_period
+			* 1e-6f;
+
 		ImGui::SeparatorText( "Stats" );
-		ImGui::Text( "GPU time(ms): %.2f", gpu_time );
-		ImGui::Text( "Per LOD GPU time(ms): %.2f / %.2f / %.2f / %.2f", lod_times[ 0 ], lod_times[ 1 ], lod_times[ 2 ], lod_times[ 3 ] );
+		ImGui::Text( "GPU time (ms): %.2f", gpu_time );
+		ImGui::BulletText( "Meshes: %.2f", meshes_time );
+		ImGui::BulletText( "Depth pyramid: %.2f", depth_pyramid_time );
+		ImGui::BulletText( "UI: %.2f", ui_time );
 		for ( int i = 0; i < meshes.size(); ++i )
 		{
 			ImGui::Text( "Mesh #%d: %d / %d / %d / %d triangles",
@@ -936,20 +963,6 @@ struct depth_pyramid_constants
 	uint32_t depth_out;
 	glm::aligned_vec2 size;
 };
-
-namespace Timestamps
-{
-	enum : uint32_t
-	{
-		FRAME_START = 0,
-		DRAW_MESHES,
-		DRAW_GRID = DRAW_MESHES + 64,
-		DRAW_UI,
-		BLIT,
-		FRAME_END,
-		COUNT
-	};
-}
 
 uint32_t calc_group_count( uint32_t count )
 {
@@ -1199,22 +1212,9 @@ int main()
 
 		const uint32_t query_pool_offset = image_index * Timestamps::COUNT;
 		std::array<uint64_t, Timestamps::COUNT> timestamps;
-		float gpu_time = 0.f;
-		std::array<float, 4> per_lod_gpu_time {};
 		if ( frame_count > renderer::MAX_FRAMES_IN_FLIGHT )
 		{
 			device.get_query_pool_results( query_pools[ image_index ], 0, timestamps );
-			gpu_time = ( timestamps[ Timestamps::FRAME_END ] - timestamps[ Timestamps::FRAME_START ] ) * timestamp_period * 1e-6f;
-			for ( int lod = 0; lod < 4; ++lod )
-			{
-				uint64_t time = 0;
-				for ( int mesh = 0; mesh < model.meshes.size(); ++mesh )
-				{
-					time += timestamps[ Timestamps::DRAW_MESHES + ( mesh * 4 ) + lod + 1 ]
-						- timestamps[ Timestamps::DRAW_MESHES + ( mesh * 4 ) + lod ];
-				}
-				per_lod_gpu_time[ lod ] = time * timestamp_period * 1e-6f;
-			}
 		}
 
 		memcpy( constant_buffers_ptr + image_index, &constants, sizeof( constants ) );
@@ -1237,7 +1237,7 @@ int main()
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
-		draw_ui( ui_state, props, bindless_manager, model.meshes, gpu_time, per_lod_gpu_time );
+		draw_ui( ui_state, props, bindless_manager, model.meshes, timestamps, timestamp_period );
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
@@ -1338,6 +1338,7 @@ int main()
 											renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
 
 		{
+			command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DEPTH_PYRAMID );
 			OPTICK_GPU_EVENT( "Depth Pyramid" );
 			command_buffer->bind_pipeline( pipelines.get( depth_pyramid_pipeline ), bindless_manager );
 			auto extent = depth_resolved_image.texture.get_extent();
@@ -1363,15 +1364,14 @@ int main()
 			}
 		}
 
+		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_UI );
 		command_buffer->begin_rendering( draw_image_extent, renderer::RenderAttachment { .target = draw_resolved_image_view } );
 
 		{
 			OPTICK_GPU_EVENT( "Draw UI" );
-			command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_UI );
 			ImGui::Render();
 			ImGui_ImplVulkan_RenderDrawData( ImGui::GetDrawData(), command_buffer->get_impl() );
 		}
-
 		command_buffer->end_rendering();
 
 		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::BLIT );
