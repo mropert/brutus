@@ -26,9 +26,15 @@ void main()
 {
     vec3 world_position = vec3(gl_WorkGroupID) - (vec3(gl_NumWorkGroups / 2));
     world_position.y = 0;
-    vec4 view_position = PushConstants.scene_constants.view_matrix * vec4(world_position, 1);
+    const vec3 mesh_center = meshes[PushConstants.mesh].bounding_sphere.xyz + world_position;
+    const float mesh_radius = meshes[PushConstants.mesh].bounding_sphere.w;
+    bool visible = true;
+    for ( int i = 0; i < 6; ++i )
+    {
+        visible = visible && dot( PushConstants.scene_constants.frustum[i], vec4( mesh_center, 1 ) ) > -mesh_radius;
+    }
 
-    if ( view_position.z < 0.1f )
+    if ( visible )
     {
         payload.position = world_position;
         const float dist = distance(PushConstants.scene_constants.camera_position, world_position);

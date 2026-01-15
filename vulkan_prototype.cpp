@@ -94,6 +94,7 @@ struct model
 {
 	std::vector<mesh> meshes;
 	std::vector<material> materials;
+	glm::vec4 bounding_sphere;
 };
 
 struct push_constants
@@ -759,8 +760,22 @@ public:
 	model finalize()
 	{
 		OPTICK_EVENT();
+		std::vector<glm::vec4> bounding_spheres;
+		bounding_spheres.reserve( _meshes.size() );
+		for ( const auto& mesh : _meshes )
+		{
+			bounding_spheres.push_back( mesh.gpu_data.bounding_sphere );
+		}
+		const auto bounds = meshopt_computeSphereBounds( &bounding_spheres[ 0 ].x,
+														 bounding_spheres.size(),
+														 sizeof( glm::vec4 ),
+														 &bounding_spheres[ 0 ].w,
+														 sizeof( glm::vec4 ) );
+
 		gpu_upload_job::wait_all_done( { &_mesh_upload, &_texture_upload } );
-		return model { std::move( _meshes ), std::move( _materials ) };
+		return model { std::move( _meshes ),
+					   std::move( _materials ),
+					   glm::vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ) };
 	}
 
 	std::size_t get_texture_count() const { return _textures.size(); }
@@ -867,9 +882,15 @@ struct scene_constants
 	glm::mat4 view_projection_matrix;
 	glm::mat4 view_matrix;
 	glm::mat4 inverse_view_matrix;
+	std::array<glm::aligned_vec4, 6> frustum;
 	glm::aligned_vec3 camera_position;
-	glm::vec4 main_light;
+	glm::aligned_vec4 main_light;
 };
+
+glm::vec4 normalize_plane( const glm::vec4& plane )
+{
+	return plane / glm::length( glm::vec3( plane ) );
+}
 
 scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D extent, float light_time )
 {
@@ -884,11 +905,23 @@ scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D 
 								2.f,
 								10.f * std::sinf( light_time * std::numbers::pi * 2.f ),
 								2.5f );
-	return scene_constants { .view_projection_matrix = projection * view,
-							 .view_matrix = view,
-							 .inverse_view_matrix = glm::inverse( view ),
-							 .camera_position = camera.position,
-							 .main_light = main_light };
+	scene_constants constants { .view_projection_matrix = projection * view,
+								.view_matrix = view,
+								.inverse_view_matrix = glm::inverse( view ),
+								.camera_position = camera.position,
+								.main_light = main_light };
+
+	// Math from https://github.com/zeux/niagara
+	const float draw_distance = 500.f;
+	const auto transposed_vp = glm::transpose( constants.view_projection_matrix );
+	constants.frustum[ 0 ] = normalize_plane( transposed_vp[ 3 ] + transposed_vp[ 0 ] ); // x + w < 0
+	constants.frustum[ 1 ] = normalize_plane( transposed_vp[ 3 ] - transposed_vp[ 0 ] ); // x - w > 0
+	constants.frustum[ 2 ] = normalize_plane( transposed_vp[ 3 ] + transposed_vp[ 1 ] ); // y + w < 0
+	constants.frustum[ 3 ] = normalize_plane( transposed_vp[ 3 ] - transposed_vp[ 1 ] ); // y - w > 0
+	constants.frustum[ 4 ] = normalize_plane( transposed_vp[ 3 ] - transposed_vp[ 2 ] ); // z - w > 0 -- reverse z
+	constants.frustum[ 5 ] = glm::vec4( 0, 0, -1, draw_distance ); // reverse z, infinite far plane
+
+	return constants;
 }
 
 struct ui_data
@@ -1232,13 +1265,22 @@ int main()
 				for ( int x = 0; x < ui_state.x_miku; ++x )
 				{
 					const auto pos = glm::vec3( x - ( ui_state.x_miku / 2 ), 0, z - ( ui_state.z_miku / 2 ) );
-					const auto distance = glm::distance( camera.position, pos );
-					int lod = instances_per_lod.size() - 1;
-					while ( distance < ui_state.lod_cutoff * lod )
+					const auto visible = std::all_of(
+						begin( constants.frustum ),
+						end( constants.frustum ),
+						[ radius = model.bounding_sphere.w, center = glm::vec3( model.bounding_sphere ) + pos ]( const glm::vec4& plane )
+						{ return glm::dot( plane, glm::vec4( center, 1.f ) ) > -radius; } );
+
+					if ( visible )
 					{
-						--lod;
+						const auto distance = glm::distance( camera.position, pos );
+						int lod = instances_per_lod.size() - 1;
+						while ( distance < ui_state.lod_cutoff * lod )
+						{
+							--lod;
+						}
+						instances_per_lod[ lod ].push_back( glm::translate( glm::identity<glm::mat4>(), pos ) );
 					}
-					instances_per_lod[ lod ].push_back( glm::translate( glm::identity<glm::mat4>(), pos ) );
 				}
 			}
 		}
