@@ -11,18 +11,17 @@ layout (location = 1) in vec3 inFragPos;
 layout (location = 2) in vec3 inNormal;
 layout (location = 3) in vec3 inTangent;
 layout (location = 4) in vec3 inBitangent;
+layout (location = 5) in flat uint inMaterial;
 layout (location = 0) out vec4 outFragColor;
 
 layout(set = 0, binding = 0) uniform texture2D textures[1024];
 layout(set = 0, binding = 2) uniform sampler samplers[8];
 layout(std430, set = 1, binding = 1) readonly buffer ssbo2 { Material materials[]; };
 
-layout( push_constant, std430 ) uniform constants
+layout( push_constant, std430 ) uniform block
 {
-    uint mesh;
-    uint material;
     SceneConstants scene_constants;
-} PushConstants;
+};
 
 const float PI = 3.14159265359;
 
@@ -67,15 +66,15 @@ float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness)
 
 void main_flat()
 {
-    const vec3 albedo = texture(sampler2D(textures[materials[PushConstants.material].albedo_index], samplers[0]), inUV).xyz * materials[PushConstants.material].baseColor.xyz;
+    const vec3 albedo = texture(sampler2D(textures[materials[inMaterial].albedo_index], samplers[0]), inUV).xyz * materials[inMaterial].baseColor.xyz;
     outFragColor = vec4(albedo, 1.0);
 }
 
 void main_basic_diffuse()
 {
-    vec3 albedo = texture(sampler2D(textures[materials[PushConstants.material].albedo_index], samplers[0]), inUV).xyz * materials[PushConstants.material].baseColor.xyz;
+    vec3 albedo = texture(sampler2D(textures[materials[inMaterial].albedo_index], samplers[0]), inUV).xyz * materials[inMaterial].baseColor.xyz;
     const vec3 N = normalize(inNormal);
-    const vec3 L = normalize(PushConstants.scene_constants.main_light.xyz);
+    const vec3 L = normalize(scene_constants.main_light.xyz);
     const float NdotL = max(dot(N, -L), 0.0);
 
     albedo = albedo * (NdotL + 0.1);
@@ -84,29 +83,29 @@ void main_basic_diffuse()
 
 void main()
 {
-    const vec3 albedo = texture(sampler2D(textures[materials[PushConstants.material].albedo_index], samplers[0]), inUV).xyz * materials[PushConstants.material].baseColor.xyz;
+    const vec3 albedo = texture(sampler2D(textures[materials[inMaterial].albedo_index], samplers[0]), inUV).xyz * materials[inMaterial].baseColor.xyz;
     vec3 F0 = vec3(0.04);
-    F0 = mix(F0, albedo, materials[PushConstants.material].metalness);
+    F0 = mix(F0, albedo, materials[inMaterial].metalness);
 
-    const vec3 normalDisplacement = (texture(sampler2D(textures[materials[PushConstants.material].normal_index], samplers[0]), inUV).xyz * 2.0) - 1.0;
+    const vec3 normalDisplacement = (texture(sampler2D(textures[materials[inMaterial].normal_index], samplers[0]), inUV).xyz * 2.0) - 1.0;
     const mat3 TBN = mat3(normalize(inTangent), normalize(inBitangent), normalize(inNormal));
     const vec3 N = normalize(TBN * normalDisplacement);
 
-    const vec3 V = normalize(PushConstants.scene_constants.camera_position - inFragPos);
+    const vec3 V = normalize(scene_constants.camera_position - inFragPos);
 
-    const vec3 L = normalize(-PushConstants.scene_constants.main_light.xyz);
+    const vec3 L = normalize(-scene_constants.main_light.xyz);
     const vec3 H = normalize(V + L);
-    const float attenuation = PushConstants.scene_constants.main_light.w;
+    const float attenuation = scene_constants.main_light.w;
     const vec3 radiance     = vec3(1.0, 1.0, 1.0) * attenuation;
 
     // cook-torrance brdf
-    const float NDF = DistributionGGX(N, H, materials[PushConstants.material].roughness);
-    const float G   = GeometrySmith(N, V, L, materials[PushConstants.material].roughness);
+    const float NDF = DistributionGGX(N, H, materials[inMaterial].roughness);
+    const float G   = GeometrySmith(N, V, L, materials[inMaterial].roughness);
     const vec3 F    = fresnelSchlick(max(dot(H, V), 0.0), F0);
 
     const vec3 kS = F;
     vec3 kD = vec3(1.0) - kS;
-    kD *= 1.0 - materials[PushConstants.material].metalness;
+    kD *= 1.0 - materials[inMaterial].metalness;
 
     const vec3 numerator    = NDF * G * F;
     const float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;

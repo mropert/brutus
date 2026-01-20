@@ -1,0 +1,62 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_8bit_storage: require
+#extension GL_GOOGLE_include_directive : require
+
+#include "constants.glsl"
+#include "mesh.glsl"
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 1, binding = 0) readonly buffer ssbo1 { Mesh meshes[]; };
+
+layout(buffer_reference, std430) writeonly buffer DrawCommandsBuffer { MeshDrawCommand commands[]; };
+layout(buffer_reference, std430) buffer DrawCommandsCountBuffer { uint commands_count; };
+
+layout( push_constant ) uniform block
+{
+    MeshDrawBuffer draws_buffer;
+    DrawCommandsBuffer commands_buffer;
+    DrawCommandsCountBuffer commmands_count_buffer;
+    SceneConstants scene_constants;
+    uint draws_count;
+    float lod_cutoff;
+};
+
+void main()
+{
+    const uint draw_id = gl_GlobalInvocationID.x;
+    if ( draw_id >= draws_count )
+        return;
+
+    const uint mesh_id = draws_buffer.mesh_draws[draw_id].mesh;
+    const vec3 mesh_center = meshes[mesh_id].bounding_sphere.xyz +  draws_buffer.mesh_draws[draw_id].position;
+    const float mesh_radius = meshes[mesh_id].bounding_sphere.w;
+    bool visible = true;
+    for ( int i = 0; i < 6; ++i )
+    {
+        visible = visible && dot( scene_constants.frustum[i], vec4( mesh_center, 1 ) ) > -mesh_radius;
+    }
+
+    if ( visible )
+    {
+        const float dist = distance(scene_constants.camera_position, mesh_center);
+        int lod = 3;
+        while ( dist < lod * lod_cutoff )
+        {
+            --lod;
+        }
+
+        const uint command_id = atomicAdd( commmands_count_buffer.commands_count, 1 );
+        commands_buffer.commands[command_id].draw_id = draw_id;
+        commands_buffer.commands[command_id].lod = lod;
+        commands_buffer.commands[command_id].index_count = meshes[mesh_id].lods[lod].indices_count;
+        commands_buffer.commands[command_id].instance_count = 1;
+        commands_buffer.commands[command_id].first_index = meshes[mesh_id].lods[lod].indices_offset;
+        commands_buffer.commands[command_id].vertex_offset = 0;
+        commands_buffer.commands[command_id].first_instance = 0;
+        commands_buffer.commands[command_id].group_count_x = 1;
+        commands_buffer.commands[command_id].group_count_y = 1;
+        commands_buffer.commands[command_id].group_count_z = 1;
+    }
+}

@@ -17,39 +17,47 @@ layout (location = 1) out vec3 outWorldPos[];
 layout (location = 2) out vec3 outNormal[];
 layout (location = 3) out vec3 outTangent[];
 layout (location = 4) out vec3 outBitangent[];
+layout (location = 5) out flat uint outMaterial[];
 
-layout( push_constant, std430 ) uniform constants
+layout(buffer_reference, std430) readonly buffer DrawCommandsBuffer { MeshDrawCommand commands[]; };
+
+layout( push_constant, std430 ) uniform block
 {
-    uint mesh;
-    uint material;
     SceneConstants scene_constants;
-} PushConstants;
+    MeshDrawBuffer draws_buffer;
+    DrawCommandsBuffer commands_buffer;
+};
 
-taskPayloadSharedEXT MeshletTaskPayload payload;
+taskPayloadSharedEXT uint payload;
 
 void main()
 {
-    Meshlet meshlet = meshes[PushConstants.mesh].mb.meshlets[gl_WorkGroupID.x + meshes[PushConstants.mesh].lods[payload.lod].meshlets_offset];
+    const uint draw_id = commands_buffer.commands[payload].draw_id;
+    const uint lod = commands_buffer.commands[payload].lod;
+    const uint mesh_id = draws_buffer.mesh_draws[draw_id].mesh;
+
+    Meshlet meshlet = meshes[mesh_id].mb.meshlets[gl_WorkGroupID.x + meshes[mesh_id].lods[lod].meshlets_offset];
     SetMeshOutputsEXT(meshlet.vertex_count, meshlet.triangle_count);
 
     for (uint i = gl_LocalInvocationIndex; i < meshlet.vertex_count; i += gl_WorkGroupSize.x) {
-        const uint index = meshes[PushConstants.mesh].mvb.meshlet_vertices[meshlet.vertex_offset + i];
-        const Vertex v =meshes[PushConstants.mesh].vb.vertices[index];
-        const vec3 pos = v.position + payload.position;
-        gl_MeshVerticesEXT[i].gl_Position = PushConstants.scene_constants.view_projection_matrix * vec4(pos, 1);
+        const uint index = meshes[mesh_id].mvb.meshlet_vertices[meshlet.vertex_offset + i];
+        const Vertex v = meshes[mesh_id].vb.vertices[index];
+        const vec3 pos = v.position + draws_buffer.mesh_draws[draw_id].position;
+        gl_MeshVerticesEXT[i].gl_Position = scene_constants.view_projection_matrix * vec4(pos, 1);
         outUV[i].x = v.uv_x;
         outUV[i].y = v.uv_y;
         outNormal[i] = v.normal;
         outWorldPos[i] = pos;
         outTangent[i] = v.tangent.xyz;
         outBitangent[i] = cross(outNormal[i], outTangent[i]) * v.tangent.w;
+        outMaterial[i] = draws_buffer.mesh_draws[draw_id].material;
     }
 
     for (uint i = gl_LocalInvocationIndex; i < meshlet.triangle_count; i += gl_WorkGroupSize.x) {
         const uint offset = meshlet.triangle_offset + i * 3;
         gl_PrimitiveTriangleIndicesEXT[i] = uvec3(
-            meshes[PushConstants.mesh].mtb.meshlet_triangles[offset],
-            meshes[PushConstants.mesh].mtb.meshlet_triangles[offset + 1],
-            meshes[PushConstants.mesh].mtb.meshlet_triangles[offset + 2]);
+            meshes[mesh_id].mtb.meshlet_triangles[offset],
+            meshes[mesh_id].mtb.meshlet_triangles[offset + 1],
+            meshes[mesh_id].mtb.meshlet_triangles[offset + 2]);
     }
 }

@@ -110,13 +110,27 @@ struct model
 	glm::vec4 bounding_sphere;
 };
 
-struct push_constants
+struct gpu_mesh_draw
 {
+	glm::aligned_vec3 position;
 	mesh_handle mesh;
 	material_handle material;
+};
+
+// Not used on CPU side, only there for buffer sizing
+struct gpu_draw_command
+{
+	uint32_t draw_id;
+	uint32_t lod;
+	VkDrawIndexedIndirectCommand draw_cmd;
+	VkDrawMeshTasksIndirectCommandEXT mesh_cmd;
+};
+
+struct push_constants
+{
 	renderer::BufferHandle scene_constants;
-	renderer::BufferHandle instance_buffer;
-	float lod_cutoff = 10.;
+	renderer::BufferHandle draws_buffer;
+	renderer::BufferHandle commands_buffer;
 };
 
 using BindlessManager = renderer::BindlessManager<gpu_mesh, gpu_material>;
@@ -948,8 +962,9 @@ namespace Timestamps
 	enum : uint32_t
 	{
 		FRAME_START = 0,
+		COMPUTE_DRAWS,
 		DRAW_MESHES,
-		DRAW_GRID = DRAW_MESHES + 64,
+		DRAW_GRID,
 		DEPTH_PYRAMID,
 		DRAW_UI,
 		BLIT,
@@ -988,7 +1003,9 @@ void draw_ui( ui_data& data,
 		std::array<float, 4> per_lod_gpu_time {};
 		const auto gpu_time = ( gpu_timestamps[ Timestamps::FRAME_END ] - gpu_timestamps[ Timestamps::FRAME_START ] ) * gpu_timestamp_period
 			* 1e-6f;
-		const auto meshes_time = ( gpu_timestamps[ Timestamps::DRAW_GRID ] - gpu_timestamps[ Timestamps::DRAW_MESHES ] )
+		const auto compute_draws_time = ( gpu_timestamps[ Timestamps::COMPUTE_DRAWS + 1 ] - gpu_timestamps[ Timestamps::COMPUTE_DRAWS ] )
+			* gpu_timestamp_period * 1e-6f;
+		const auto meshes_time = ( gpu_timestamps[ Timestamps::DRAW_MESHES + 1 ] - gpu_timestamps[ Timestamps::DRAW_MESHES ] )
 			* gpu_timestamp_period * 1e-6f;
 		const auto depth_pyramid_time = ( gpu_timestamps[ Timestamps::DEPTH_PYRAMID + 1 ] - gpu_timestamps[ Timestamps::DEPTH_PYRAMID ] )
 			* gpu_timestamp_period * 1e-6f;
@@ -997,6 +1014,7 @@ void draw_ui( ui_data& data,
 
 		ImGui::SeparatorText( "Stats" );
 		ImGui::Text( "GPU time (ms): %.2f", gpu_time );
+		ImGui::BulletText( "Compute draws: %.2f", compute_draws_time );
 		ImGui::BulletText( "Meshes: %.2f", meshes_time );
 		ImGui::BulletText( "Depth pyramid: %.2f", depth_pyramid_time );
 		ImGui::BulletText( "UI: %.2f", ui_time );
@@ -1038,6 +1056,16 @@ struct depth_pyramid_constants
 	uint32_t depth_in;
 	uint32_t depth_out;
 	glm::aligned_vec2 size;
+};
+
+struct compute_draws_constants
+{
+	renderer::BufferHandle draws_buffer;
+	renderer::BufferHandle commands_buffer;
+	renderer::BufferHandle commmands_count_buffer;
+	renderer::BufferHandle scene_constants;
+	uint32_t draws_count;
+	float lod_cutoff;
 };
 
 uint32_t calc_group_count( uint32_t count )
@@ -1136,6 +1164,7 @@ int main()
 
 	renderer::PipelineHandle mesh_pipeline;
 	renderer::PipelineHandle mesh_pipeline_meshlet;
+	renderer::PipelineHandle compute_draws_pipeline;
 	renderer::PipelineHandle depth_pyramid_pipeline;
 	renderer::PipelineHandle grid_pipeline;
 	model model;
@@ -1161,6 +1190,12 @@ int main()
 			},
 			[ & ]
 			{
+				compute_draws_pipeline = pipelines.add(
+					renderer::Pipeline::Desc { .push_constants_size = sizeof( compute_draws_constants ) },
+					{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE } } );
+			},
+			[ & ]
+			{
 				depth_pyramid_pipeline = pipelines.add(
 					renderer::Pipeline::Desc { .push_constants_size = sizeof( depth_pyramid_constants ) },
 					{ { "depth_pyramid.comp", renderer::ShaderStage::COMPUTE } } );
@@ -1182,12 +1217,22 @@ int main()
 												  true );
 	const auto constant_buffers_ptr = static_cast<scene_constants*>( constant_buffers.get_mapped_address() );
 
-	static const uint32_t max_instances = 128 * 128;
-	using Instances = std::array<glm::mat4, max_instances>;
-	auto instance_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-												  sizeof( Instances ) * renderer::MAX_FRAMES_IN_FLIGHT,
-												  true );
-	const auto instance_buffers_ptr = static_cast<Instances*>( instance_buffers.get_mapped_address() );
+	static const uint32_t max_draws = 1024 * 1024;
+	using Draws = std::array<gpu_mesh_draw, max_draws>;
+	auto draw_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+											  sizeof( Draws ) * renderer::MAX_FRAMES_IN_FLIGHT,
+											  true );
+	const auto draw_buffers_ptr = static_cast<Draws*>( draw_buffers.get_mapped_address() );
+
+	struct DrawCommands
+	{
+		uint32_t count;
+		std::array<gpu_draw_command, max_draws> commands;
+	};
+	auto draw_commands_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::INDIRECT_BUFFER
+														   | renderer::Buffer::Usage::TRANSFER_DST
+														   | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+													   sizeof( DrawCommands ) * renderer::MAX_FRAMES_IN_FLIGHT );
 
 	const auto timestamp_period = device.get_timestamp_period();
 	std::array<renderer::raii::QueryPool, renderer::MAX_FRAMES_IN_FLIGHT> query_pools { device.create_query_pool( Timestamps::COUNT ),
@@ -1216,8 +1261,6 @@ int main()
 
 	bool relative_mouse = false;
 	ui_data ui_state { .vsync = vsync, .mesh_shading = props.mesh_shader_support };
-
-	std::array<std::vector<glm::mat4>, 4> instances_per_lod;
 
 	while ( !quit )
 	{
@@ -1259,41 +1302,7 @@ int main()
 		}
 		camera.update( delta_time );
 
-		const auto constants = build_scene_constants( camera, draw_image_extent, time_of_day / day_period );
-
 		const bool mesh_shading = ui_state.mesh_shading;
-
-		if ( !mesh_shading )
-		{
-			for ( auto& instances : instances_per_lod )
-			{
-				instances.clear();
-			}
-
-			for ( int z = 0; z < ui_state.z_miku; ++z )
-			{
-				for ( int x = 0; x < ui_state.x_miku; ++x )
-				{
-					const auto pos = glm::vec3( x - ( ui_state.x_miku / 2 ), 0, z - ( ui_state.z_miku / 2 ) );
-					const auto visible = std::all_of(
-						begin( constants.frustum ),
-						end( constants.frustum ),
-						[ radius = model.bounding_sphere.w, center = glm::vec3( model.bounding_sphere ) + pos ]( const glm::vec4& plane )
-						{ return glm::dot( plane, glm::vec4( center, 1.f ) ) > -radius; } );
-
-					if ( visible )
-					{
-						const auto distance = glm::distance( camera.position, pos );
-						int lod = instances_per_lod.size() - 1;
-						while ( distance < ui_state.lod_cutoff * lod )
-						{
-							--lod;
-						}
-						instances_per_lod[ lod ].push_back( glm::translate( glm::identity<glm::mat4>(), pos ) );
-					}
-				}
-			}
-		}
 
 		auto [ image_index, swapchain_image, swapchain_image_view ] = swapchain.acquire();
 
@@ -1304,19 +1313,32 @@ int main()
 			device.get_query_pool_results( query_pools[ image_index ], 0, timestamps );
 		}
 
-		memcpy( constant_buffers_ptr + image_index, &constants, sizeof( constants ) );
-		const auto constants_address = constant_buffers.get_device_address() + ( image_index * sizeof( constants ) );
-
-		auto instance_buffer = ( instance_buffers_ptr + image_index )->data();
-		for ( const auto& instances : instances_per_lod )
 		{
-			if ( !instances.empty() )
+			const auto constants = build_scene_constants( camera, draw_image_extent, time_of_day / day_period );
+			memcpy( constant_buffers_ptr + image_index, &constants, sizeof( constants ) );
+		}
+		const auto constants_address = constant_buffers.get_device_address() + ( image_index * sizeof( scene_constants ) );
+
+		auto draw_buffer = ( draw_buffers_ptr + image_index )->data();
+		uint32_t draw_count = 0;
+		for ( int z = 0; z < ui_state.z_miku; ++z )
+		{
+			for ( int x = 0; x < ui_state.x_miku; ++x )
 			{
-				memcpy( instance_buffer, instances.data(), instances.size() * sizeof( glm::mat4 ) );
-				instance_buffer += instances.size();
+				const auto pos = glm::vec3( x - ( ui_state.x_miku / 2 ), 0, z - ( ui_state.z_miku / 2 ) );
+				for ( int i = 0; i < model.meshes.size(); ++i )
+				{
+					draw_buffer[ draw_count ].position = pos;
+					draw_buffer[ draw_count ].mesh = model.meshes[ i ].handle;
+					draw_buffer[ draw_count ].material = model.materials[ i ].handle;
+					++draw_count;
+				}
 			}
 		}
-		const auto instances_address = instance_buffers.get_device_address() + ( image_index * sizeof( Instances ) );
+		const auto draw_buffer_address = draw_buffers.get_device_address() + ( image_index * sizeof( Draws ) );
+		const auto draw_commands_count_buffer_address = draw_commands_buffers.get_device_address()
+			+ ( image_index * sizeof( DrawCommands ) );
+		const auto draw_commands_buffer_address = draw_commands_count_buffer_address + sizeof( uint32_t );
 
 		pipelines.update();
 
@@ -1332,6 +1354,26 @@ int main()
 
 		command_buffer->reset_query_pool( query_pools[ image_index ], 0, Timestamps::COUNT );
 		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::FRAME_START );
+
+		{
+			command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::COMPUTE_DRAWS );
+			OPTICK_GPU_EVENT( "Compute Draws" );
+			command_buffer->fill_buffer( draw_commands_buffers,
+										 draw_commands_count_buffer_address - draw_commands_buffers.get_device_address(),
+										 sizeof( uint32_t ),
+										 0 );
+			command_buffer->buffer_barrier( draw_commands_buffers );
+			command_buffer->bind_pipeline( pipelines.get( compute_draws_pipeline ), bindless_manager );
+			const compute_draws_constants constants { .draws_buffer = draw_buffer_address,
+													  .commands_buffer = draw_commands_buffer_address,
+													  .commmands_count_buffer = draw_commands_count_buffer_address,
+													  .scene_constants = constants_address,
+													  .draws_count = draw_count,
+													  .lod_cutoff = ui_state.lod_cutoff };
+			command_buffer->push_constants( pipelines.get( compute_draws_pipeline ), constants );
+			command_buffer->dispatch( calc_group_count( draw_count ), 1, 1 );
+			command_buffer->buffer_barrier( draw_commands_buffers );
+		}
 
 		command_buffer->transition_texture( draw_image,
 											renderer::Texture::Layout::UNDEFINED,
@@ -1356,60 +1398,43 @@ int main()
 		command_buffer->set_viewport( draw_image_extent );
 		command_buffer->set_scissor( draw_image_extent );
 
-		int mesh_draws = 0;
-
 		if ( mesh_shading )
 		{
+			command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES );
+			OPTICK_GPU_EVENT( "Draw Meshlets" );
 			command_buffer->bind_pipeline( pipelines.get( mesh_pipeline_meshlet ), bindless_manager );
-			for ( int i = 0; i < model.meshes.size(); ++i )
-			{
-				OPTICK_GPU_EVENT( "Draw Meshlet" );
-				const push_constants constants { .mesh = model.meshes[ i ].handle,
-												 .material = model.materials[ i ].handle,
-												 .scene_constants = constants_address,
-												 .instance_buffer = instances_address,
-												 .lod_cutoff = ui_state.lod_cutoff };
-				command_buffer->push_constants( pipelines.get( mesh_pipeline_meshlet ), constants );
-				command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES + mesh_draws );
-				command_buffer->draw_mesh_task( ui_state.x_miku, 1, ui_state.z_miku );
-				++mesh_draws;
-				for ( int lod = 1; lod < 4; ++lod )
-				{
-					command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES + mesh_draws );
-					++mesh_draws;
-				}
-			}
+			const push_constants constants { .scene_constants = constants_address,
+											 .draws_buffer = draw_buffer_address,
+											 .commands_buffer = draw_commands_buffer_address };
+			command_buffer->push_constants( pipelines.get( mesh_pipeline_meshlet ), constants );
+			command_buffer->draw_mesh_tasks_indirect( draw_commands_buffers,
+													  draw_commands_buffer_address - draw_commands_buffers.get_device_address()
+														  + offsetof( gpu_draw_command, mesh_cmd ),
+													  draw_commands_buffers,
+													  draw_commands_count_buffer_address - draw_commands_buffers.get_device_address(),
+													  max_draws,
+													  sizeof( gpu_draw_command ) );
 		}
 		else
 		{
+			command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES );
+			OPTICK_GPU_EVENT( "Draw Meshes" );
 			command_buffer->bind_pipeline( pipelines.get( mesh_pipeline ), bindless_manager );
 			command_buffer->bind_index_buffer( indices.buffer );
-			for ( int i = 0; i < model.meshes.size(); ++i )
-			{
-				OPTICK_GPU_EVENT( "Draw Mesh" );
-				const push_constants constants { .mesh = model.meshes[ i ].handle,
-												 .material = model.materials[ i ].handle,
-												 .scene_constants = constants_address,
-												 .instance_buffer = instances_address };
+			const push_constants constants { .scene_constants = constants_address,
+											 .draws_buffer = draw_buffer_address,
+											 .commands_buffer = draw_commands_buffer_address };
 
-				command_buffer->push_constants( pipelines.get( mesh_pipeline ), constants );
-				uint32_t base_instance = 0;
-				for ( int lod = 0; lod < instances_per_lod.size(); ++lod )
-				{
-					command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES + mesh_draws );
-					if ( !instances_per_lod[ lod ].empty() )
-					{
-						command_buffer->draw_indexed( model.meshes[ i ].gpu_data.lods[ lod ].indices_count,
-													  instances_per_lod[ lod ].size(),
-													  model.meshes[ i ].gpu_data.lods[ lod ].indices_offset,
-													  base_instance );
-						base_instance += instances_per_lod[ lod ].size();
-					}
-					++mesh_draws;
-				}
-			}
+			command_buffer->push_constants( pipelines.get( mesh_pipeline ), constants );
+			command_buffer->draw_indexed_indirect( draw_commands_buffers,
+												   draw_commands_buffer_address - draw_commands_buffers.get_device_address()
+													   + offsetof( gpu_draw_command, draw_cmd ),
+												   draw_commands_buffers,
+												   draw_commands_count_buffer_address - draw_commands_buffers.get_device_address(),
+												   max_draws,
+												   sizeof( gpu_draw_command ) );
 		}
-		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES + mesh_draws );
+
 
 		{
 			OPTICK_GPU_EVENT( "Draw Grid" );
