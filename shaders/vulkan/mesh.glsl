@@ -13,6 +13,7 @@ struct Material
     float roughness;
     uint albedo_index;
     uint normal_index;
+    uint metallic_roughness_index;
 };
 
 struct MeshLOD

@@ -41,7 +41,9 @@ struct gpu_material
 {
 	pbr_data pbr_data;
 	uint32_t albedo_texture_index;
-	uint32_t normal_texture_index;
+	uint32_t normal_texture_index = -1;
+	uint32_t metallic_roughness_texture_index = -1;
+	uint32_t padding[ 3 ];
 };
 
 struct gpu_mesh_lod
@@ -81,7 +83,7 @@ struct index_buffer
 	}
 
 	renderer::raii::Buffer buffer;
-	uint32_t size = 0;
+	std::atomic<uint32_t> size = 0;
 	uint32_t capacity;
 };
 
@@ -243,7 +245,11 @@ public:
 	void queue( const void* data, uint32_t size, renderer::Buffer& buffer, const uint32_t offset = 0 )
 	{
 		assert( _state == state::UPLOADING );
-		assert( _offset + size < _size );
+		assert( size < _size );
+		if ( size + _offset > _size )
+		{
+			flush_full();
+		}
 		const auto ptr = static_cast<std::byte*>( _upload_buffer.get_mapped_address() );
 		memcpy( ptr + _offset, data, size );
 		_cmd_buffer->copy_buffer( _upload_buffer, _offset, size, buffer, offset );
@@ -269,14 +275,22 @@ public:
 		const auto ptr = static_cast<std::byte*>( _upload_buffer.get_mapped_address() );
 		const auto gpu_format = sdl_gpu_format( surface.format );
 		const auto pitch = surface.w * get_format_size( sdl_to_vulkan_format( gpu_format ) );
-		assert( _offset + pitch * surface.h < _size );
-		SDL_ConvertPixels( surface.w, surface.h, surface.format, surface.pixels, surface.pitch, gpu_format, ptr + _offset, pitch );
+		const auto size = pitch * surface.h;
+		assert( size < _size );
+		if ( size + _offset > _size )
+		{
+			flush_full();
+		}
+		if ( !SDL_ConvertPixels( surface.w, surface.h, surface.format, surface.pixels, surface.pitch, gpu_format, ptr + _offset, pitch ) )
+		{
+			throw renderer::Error( SDL_GetError() );
+		}
 		_cmd_buffer->transition_texture( texture, renderer::Texture::Layout::UNDEFINED, renderer::Texture::Layout::TRANSFER_DST_OPTIMAL );
 		_cmd_buffer->copy_buffer_to_texture( _upload_buffer, _offset, texture );
 		_cmd_buffer->transition_texture( texture,
 										 renderer::Texture::Layout::TRANSFER_DST_OPTIMAL,
 										 renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
-		_offset += pitch * surface.h;
+		_offset += size;
 	}
 
 	void submit()
@@ -289,7 +303,7 @@ public:
 
 	void wait_done()
 	{
-		assert( _state == state::UPLOADING );
+		assert( _state == state::SUBMITTED );
 		_device.wait_for_fences( { _upload_fence }, 9999999999 );
 		_state = state::DONE;
 	}
@@ -311,6 +325,18 @@ public:
 	}
 
 private:
+	void flush_full()
+	{
+		submit();
+		// XXX: Could use 2 alternating buffers instead of one to avoid sync waiting
+		wait_done();
+		_device.reset_fences( { _upload_fence } );
+		_offset = 0;
+		_state = state::UPLOADING;
+		_cmd_buffer->reset();
+		_cmd_buffer->begin();
+	}
+
 	uint32_t _size;
 	renderer::Device& _device;
 	renderer::raii::CommandBuffer _cmd_buffer;
@@ -347,6 +373,7 @@ class mesh_load_job
 		mesh_attribute indices;
 		int albedo_idx = -1;
 		int normal_idx = -1;
+		int metallic_roughness_index = -1;
 		pbr_data pbr_data;
 	};
 
@@ -464,6 +491,11 @@ public:
 				{
 					_textures.push_back( make_texture( _asset, material.normalTexture->textureIndex ) );
 					m.normal_idx = _textures.size() - 1;
+				}
+				if ( material.pbrData.metallicRoughnessTexture )
+				{
+					_textures.push_back( make_texture( _asset, material.pbrData.metallicRoughnessTexture->textureIndex ) );
+					m.metallic_roughness_index = _textures.size() - 1;
 				}
 				m.pbr_data.base_color.x = material.pbrData.baseColorFactor.x();
 				m.pbr_data.base_color.y = material.pbrData.baseColorFactor.y();
@@ -656,22 +688,22 @@ public:
 			mesh.gpu_data.bounding_sphere.w = bounds.radius;
 
 			// Index buffer
+			uint32_t index_offset = _index_buffer.size.fetch_add( parsed_mesh.indices.length );
 			_mesh_upload.queue( gltf_buffer.data() + parsed_mesh.indices.offset,
 								parsed_mesh.indices.length * sizeof( uint32_t ),
 								_index_buffer.buffer,
-								_index_buffer.size * sizeof( uint32_t ) );
-			mesh.gpu_data.lods[ 0 ].indices_offset = _index_buffer.size;
+								index_offset * sizeof( uint32_t ) );
+			mesh.gpu_data.lods[ 0 ].indices_offset = index_offset;
 			mesh.gpu_data.lods[ 0 ].indices_count = parsed_mesh.indices.length;
-			_index_buffer.size += parsed_mesh.indices.length;
 
-			_mesh_upload.queue( simplified_indices[ i ].indices, _index_buffer.buffer, _index_buffer.size * sizeof( uint32_t ) );
+			index_offset = _index_buffer.size.fetch_add( simplified_indices[ i ].indices.size() );
+			_mesh_upload.queue( simplified_indices[ i ].indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
 			for ( int lod = 1; lod < mesh.gpu_data.lods.size(); ++lod )
 			{
 				mesh.gpu_data.lods[ lod ].indices_offset = mesh.gpu_data.lods[ lod - 1 ].indices_offset
 					+ mesh.gpu_data.lods[ lod - 1 ].indices_count;
 				mesh.gpu_data.lods[ lod ].indices_count = simplified_indices[ i ].indices_per_lod[ lod - 1 ];
 			}
-			_index_buffer.size += simplified_indices[ i ].indices.size();
 
 			// Data buffer (vertices + meshlets)
 			auto data_buffer_size = vertex_data[ i ].size() * sizeof( mesh_vertex );
@@ -744,6 +776,15 @@ public:
 				OPTICK_EVENT( "decompress_tex" );
 				_textures[ index ].image.reset(
 					IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + _textures[ index ].offset, _textures[ index ].size ), true ) );
+				if ( _textures[ index ].image && _textures[ index ].image->format == SDL_PIXELFORMAT_INDEX8 )
+				{
+					sdl::raii::Surface converted_image( SDL_ConvertSurface( _textures[ index ].image.get(), SDL_PIXELFORMAT_RGBA32 ) );
+					if ( !converted_image )
+					{
+						throw renderer::Error( SDL_GetError() );
+					}
+					_textures[ index ].image = std::move( converted_image );
+				}
 			} );
 	}
 
@@ -767,9 +808,20 @@ public:
 			_texture_upload.queue( *_textures[ parsed_mesh.albedo_idx ].image, tex );
 			material.gpu_data.albedo_texture_index = _bindless_manager.add_texture( std::move( tex ) ).handles.texture_index;
 
-			tex = make_image_from_surface( _device, *_textures[ parsed_mesh.normal_idx ].image, false );
-			_texture_upload.queue( *_textures[ parsed_mesh.normal_idx ].image, tex );
-			material.gpu_data.normal_texture_index = _bindless_manager.add_texture( std::move( tex ) ).handles.texture_index;
+			if ( parsed_mesh.normal_idx != -1 )
+			{
+				tex = make_image_from_surface( _device, *_textures[ parsed_mesh.normal_idx ].image, false );
+				_texture_upload.queue( *_textures[ parsed_mesh.normal_idx ].image, tex );
+				material.gpu_data.normal_texture_index = _bindless_manager.add_texture( std::move( tex ) ).handles.texture_index;
+			}
+
+			if ( parsed_mesh.metallic_roughness_index != -1 )
+			{
+				tex = make_image_from_surface( _device, *_textures[ parsed_mesh.metallic_roughness_index ].image, false );
+				_texture_upload.queue( *_textures[ parsed_mesh.metallic_roughness_index ].image, tex );
+				material.gpu_data.metallic_roughness_texture_index = _bindless_manager.add_texture( std::move( tex ) )
+																		 .handles.texture_index;
+			}
 
 			material.gpu_data.pbr_data = parsed_mesh.pbr_data;
 
@@ -816,10 +868,10 @@ private:
 	std::vector<material> _materials;
 };
 
-model load_model( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& index_buffer )
+model load_model( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& index_buffer, std::filesystem::path path )
 {
 	OPTICK_EVENT();
-	mesh_load_job job( device, bindless_manager, index_buffer, "../assets/player.glb" );
+	mesh_load_job job( device, bindless_manager, index_buffer, std::move( path ) );
 	job.parse();
 	tbb::parallel_invoke( [ & ]() { job.upload_mesh(); },
 						  [ & ]
@@ -977,7 +1029,7 @@ void draw_ui( ui_data& data,
 			  const renderer::Device::Properties& props,
 			  const BindlessManager& bindless_manager,
 			  const index_buffer& index_buffer,
-			  std::span<const mesh> meshes,
+			  std::span<const model> models,
 			  std::span<const uint64_t> gpu_timestamps,
 			  float gpu_timestamp_period )
 {
@@ -993,9 +1045,12 @@ void draw_ui( ui_data& data,
 		ImGui::SeparatorText( "VRAM usage" );
 		ImGui::Text( "Textures (MB): %zu", bindless_manager.get_texture_memory_usage() >> 20 );
 		size_t meshes_bytes = 0;
-		for ( const auto& mesh : meshes )
+		for ( const auto& model : models )
 		{
-			meshes_bytes += mesh.data_buffer.get_size();
+			for ( const auto& mesh : model.meshes )
+			{
+				meshes_bytes += mesh.data_buffer.get_size();
+			}
 		}
 		ImGui::Text( "Meshes (MB): %zu", meshes_bytes >> 20 );
 		ImGui::Text( "Indices (MB): %zu", ( index_buffer.size * sizeof( uint32_t ) ) >> 20 );
@@ -1018,14 +1073,18 @@ void draw_ui( ui_data& data,
 		ImGui::BulletText( "Meshes: %.2f", meshes_time );
 		ImGui::BulletText( "Depth pyramid: %.2f", depth_pyramid_time );
 		ImGui::BulletText( "UI: %.2f", ui_time );
-		for ( int i = 0; i < meshes.size(); ++i )
+		for ( int i = 0; i < models.size(); ++i )
 		{
-			ImGui::Text( "Mesh #%d: %d / %d / %d / %d triangles",
-						 i,
-						 meshes[ i ].gpu_data.lods[ 0 ].indices_count,
-						 meshes[ i ].gpu_data.lods[ 1 ].indices_count,
-						 meshes[ i ].gpu_data.lods[ 2 ].indices_count,
-						 meshes[ i ].gpu_data.lods[ 3 ].indices_count );
+			for ( int j = 0; j < models[ i ].meshes.size(); ++j )
+			{
+				ImGui::Text( "Model #%d Mesh #%d: %d / %d / %d / %d triangles",
+							 i,
+							 j,
+							 models[ i ].meshes[ j ].gpu_data.lods[ 0 ].indices_count,
+							 models[ i ].meshes[ j ].gpu_data.lods[ 1 ].indices_count,
+							 models[ i ].meshes[ j ].gpu_data.lods[ 2 ].indices_count,
+							 models[ i ].meshes[ j ].gpu_data.lods[ 3 ].indices_count );
+			}
 		}
 
 		ImGui::SeparatorText( "Settings" );
@@ -1167,7 +1226,7 @@ int main()
 	renderer::PipelineHandle compute_draws_pipeline;
 	renderer::PipelineHandle depth_pyramid_pipeline;
 	renderer::PipelineHandle grid_pipeline;
-	model model;
+	std::array<model, 2> models;
 	{
 		renderer::ShaderCompiler compiler( "../shaders/vulkan" );
 		tbb::parallel_invoke(
@@ -1209,8 +1268,9 @@ int main()
 											   .push_constants_size = sizeof( grid_constants ) },
 					{ { "grid.vert", renderer::ShaderStage::VERTEX }, { "grid.frag", renderer::ShaderStage::FRAGMENT } } );
 			},
-			[ & ] { model = load_model( device, bindless_manager, indices ); } );
+			[ & ] { models[ 0 ] = load_model( device, bindless_manager, indices, "../assets/player.glb" ); } );
 	}
+	models[ 1 ] = load_model( device, bindless_manager, indices, "../assets/sabrina.glb" );
 
 	auto constant_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 												  sizeof( std::array<scene_constants, renderer::MAX_FRAMES_IN_FLIGHT> ),
@@ -1321,16 +1381,20 @@ int main()
 
 		auto draw_buffer = ( draw_buffers_ptr + image_index )->data();
 		uint32_t draw_count = 0;
+		std::minstd_rand rand;
+		std::uniform_int_distribution gen( 0, 1 );
+
 		for ( int z = 0; z < ui_state.z_miku; ++z )
 		{
 			for ( int x = 0; x < ui_state.x_miku; ++x )
 			{
 				const auto pos = glm::vec3( x - ( ui_state.x_miku / 2 ), 0, z - ( ui_state.z_miku / 2 ) );
-				for ( int i = 0; i < model.meshes.size(); ++i )
+				const auto model = gen( rand );
+				for ( int i = 0; i < models[ model ].meshes.size(); ++i )
 				{
 					draw_buffer[ draw_count ].position = pos;
-					draw_buffer[ draw_count ].mesh = model.meshes[ i ].handle;
-					draw_buffer[ draw_count ].material = model.materials[ i ].handle;
+					draw_buffer[ draw_count ].mesh = models[ model ].meshes[ i ].handle;
+					draw_buffer[ draw_count ].material = models[ model ].materials[ i ].handle;
 					++draw_count;
 				}
 			}
@@ -1346,7 +1410,7 @@ int main()
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
-		draw_ui( ui_state, props, bindless_manager, indices, model.meshes, timestamps, timestamp_period );
+		draw_ui( ui_state, props, bindless_manager, indices, models, timestamps, timestamp_period );
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();

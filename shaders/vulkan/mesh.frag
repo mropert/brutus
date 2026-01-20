@@ -84,12 +84,17 @@ void main_basic_diffuse()
 void main()
 {
     const vec3 albedo = texture(sampler2D(textures[materials[inMaterial].albedo_index], samplers[0]), inUV).xyz * materials[inMaterial].baseColor.xyz;
-    vec3 F0 = vec3(0.04);
-    F0 = mix(F0, albedo, materials[inMaterial].metalness);
-
-    const vec3 normalDisplacement = (texture(sampler2D(textures[materials[inMaterial].normal_index], samplers[0]), inUV).xyz * 2.0) - 1.0;
-    const mat3 TBN = mat3(normalize(inTangent), normalize(inBitangent), normalize(inNormal));
-    const vec3 N = normalize(TBN * normalDisplacement);
+    vec3 N;
+    if ( materials[inMaterial].normal_index != -1 )
+    {
+        const vec3 normalDisplacement = (texture(sampler2D(textures[materials[inMaterial].normal_index], samplers[0]), inUV).xyz * 2.0) - 1.0;
+        const mat3 TBN = mat3(normalize(inTangent), normalize(inBitangent), normalize(inNormal));
+        N = normalize(TBN * normalDisplacement);
+    }
+    else
+    {
+        N = normalize(inNormal);
+    }
 
     const vec3 V = normalize(scene_constants.camera_position - inFragPos);
 
@@ -99,13 +104,23 @@ void main()
     const vec3 radiance     = vec3(1.0, 1.0, 1.0) * attenuation;
 
     // cook-torrance brdf
-    const float NDF = DistributionGGX(N, H, materials[inMaterial].roughness);
-    const float G   = GeometrySmith(N, V, L, materials[inMaterial].roughness);
+    float roughness = materials[inMaterial].roughness;
+    float metalness = materials[inMaterial].metalness;
+    if ( materials[inMaterial].metallic_roughness_index != -1 )
+    {
+        const vec3 metallic_roughness = texture(sampler2D(textures[materials[inMaterial].metallic_roughness_index], samplers[0]), inUV).rgb;
+        metalness *= metallic_roughness.b;
+        roughness *= metallic_roughness.g;
+    }
+    const float NDF = DistributionGGX(N, H, roughness);
+    const float G   = GeometrySmith(N, V, L, roughness);
+    vec3 F0 = vec3(0.04);
+    F0 = mix(F0, albedo, metalness);
     const vec3 F    = fresnelSchlick(max(dot(H, V), 0.0), F0);
 
     const vec3 kS = F;
     vec3 kD = vec3(1.0) - kS;
-    kD *= 1.0 - materials[inMaterial].metalness;
+    kD *= 1.0 - metalness;
 
     const vec3 numerator    = NDF * G * F;
     const float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
