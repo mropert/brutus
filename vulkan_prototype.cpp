@@ -71,13 +71,26 @@ struct gpu_mesh
 	renderer::BufferHandle meshlet_triangles;
 };
 
+struct index_buffer
+{
+	index_buffer( renderer::Device& device, uint32_t max_size )
+		: buffer( device.create_buffer( renderer::Buffer::Usage::INDEX_BUFFER | renderer::Buffer::Usage::TRANSFER_DST,
+										max_size * sizeof( uint32_t ) ) )
+		, capacity( max_size )
+	{
+	}
+
+	renderer::raii::Buffer buffer;
+	uint32_t size = 0;
+	uint32_t capacity;
+};
+
 using mesh_handle = renderer::BindlessHandle<gpu_mesh>;
 using material_handle = renderer::BindlessHandle<gpu_material>;
 
 struct mesh
 {
 	renderer::raii::Buffer data_buffer; // vertex + meshlets
-	renderer::raii::Buffer index_buffer; // only used by traditional pipeline
 	mesh_handle handle;
 	// Data below is only for debugging purposes, a CPU side copy of the GPU-side descriptor
 	gpu_mesh gpu_data;
@@ -325,9 +338,10 @@ class mesh_load_job
 
 
 public:
-	mesh_load_job( renderer::Device& device, BindlessManager& bindless_manager, std::filesystem::path path )
+	mesh_load_job( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& index_buffer, std::filesystem::path path )
 		: _device( device )
 		, _bindless_manager( bindless_manager )
+		, _index_buffer( index_buffer )
 		, _path( std::move( path ) )
 		, _mesh_upload( device, 32 * 1024 * 1024 )
 		, _texture_upload( device, 128 * 1024 * 1024 )
@@ -628,28 +642,22 @@ public:
 			mesh.gpu_data.bounding_sphere.w = bounds.radius;
 
 			// Index buffer
-			const auto indices_count = std::accumulate( begin( simplified_indices[ i ].indices_per_lod ),
-														end( simplified_indices[ i ].indices_per_lod ),
-														parsed_mesh.indices.length );
-			mesh.index_buffer = _device.create_buffer( renderer::Buffer::Usage::INDEX_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
-														   | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-													   indices_count * sizeof( uint32_t ) );
-
 			_mesh_upload.queue( gltf_buffer.data() + parsed_mesh.indices.offset,
-								sizeof( uint32_t ) * parsed_mesh.indices.length,
-								mesh.index_buffer );
-			mesh.gpu_data.lods[ 0 ].indices_offset = 0;
+								parsed_mesh.indices.length * sizeof( uint32_t ),
+								_index_buffer.buffer,
+								_index_buffer.size * sizeof( uint32_t ) );
+			mesh.gpu_data.lods[ 0 ].indices_offset = _index_buffer.size;
 			mesh.gpu_data.lods[ 0 ].indices_count = parsed_mesh.indices.length;
+			_index_buffer.size += parsed_mesh.indices.length;
 
-			_mesh_upload.queue( simplified_indices[ i ].indices,
-								mesh.index_buffer,
-								mesh.gpu_data.lods[ 0 ].indices_count * sizeof( uint32_t ) );
+			_mesh_upload.queue( simplified_indices[ i ].indices, _index_buffer.buffer, _index_buffer.size * sizeof( uint32_t ) );
 			for ( int lod = 1; lod < mesh.gpu_data.lods.size(); ++lod )
 			{
 				mesh.gpu_data.lods[ lod ].indices_offset = mesh.gpu_data.lods[ lod - 1 ].indices_offset
 					+ mesh.gpu_data.lods[ lod - 1 ].indices_count;
 				mesh.gpu_data.lods[ lod ].indices_count = simplified_indices[ i ].indices_per_lod[ lod - 1 ];
 			}
+			_index_buffer.size += simplified_indices[ i ].indices.size();
 
 			// Data buffer (vertices + meshlets)
 			auto data_buffer_size = vertex_data[ i ].size() * sizeof( mesh_vertex );
@@ -783,6 +791,7 @@ public:
 private:
 	renderer::Device& _device;
 	BindlessManager& _bindless_manager;
+	index_buffer& _index_buffer;
 	std::filesystem::path _path;
 	gpu_upload_job _mesh_upload;
 	gpu_upload_job _texture_upload;
@@ -793,10 +802,10 @@ private:
 	std::vector<material> _materials;
 };
 
-model load_model( renderer::Device& device, BindlessManager& bindless_manager )
+model load_model( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& index_buffer )
 {
 	OPTICK_EVENT();
-	mesh_load_job job( device, bindless_manager, "../assets/player.glb" );
+	mesh_load_job job( device, bindless_manager, index_buffer, "../assets/player.glb" );
 	job.parse();
 	tbb::parallel_invoke( [ & ]() { job.upload_mesh(); },
 						  [ & ]
@@ -952,6 +961,7 @@ namespace Timestamps
 void draw_ui( ui_data& data,
 			  const renderer::Device::Properties& props,
 			  const BindlessManager& bindless_manager,
+			  const index_buffer& index_buffer,
 			  std::span<const mesh> meshes,
 			  std::span<const uint64_t> gpu_timestamps,
 			  float gpu_timestamp_period )
@@ -968,14 +978,12 @@ void draw_ui( ui_data& data,
 		ImGui::SeparatorText( "VRAM usage" );
 		ImGui::Text( "Textures (MB): %zu", bindless_manager.get_texture_memory_usage() >> 20 );
 		size_t meshes_bytes = 0;
-		size_t indices_bytes = 0;
 		for ( const auto& mesh : meshes )
 		{
 			meshes_bytes += mesh.data_buffer.get_size();
-			indices_bytes += mesh.index_buffer.get_size();
 		}
 		ImGui::Text( "Meshes (MB): %zu", meshes_bytes >> 20 );
-		ImGui::Text( "Indices (MB): %zu", indices_bytes >> 20 );
+		ImGui::Text( "Indices (MB): %zu", ( index_buffer.size * sizeof( uint32_t ) ) >> 20 );
 
 		std::array<float, 4> per_lod_gpu_time {};
 		const auto gpu_time = ( gpu_timestamps[ Timestamps::FRAME_END ] - gpu_timestamps[ Timestamps::FRAME_START ] ) * gpu_timestamp_period
@@ -1122,6 +1130,8 @@ int main()
 									  .mips = 8 } ),
 		true );
 
+	index_buffer indices( device, 1024 * 1024 );
+
 	renderer::PipelineManager pipelines( device, "../shaders/vulkan", bindless_manager );
 
 	renderer::PipelineHandle mesh_pipeline;
@@ -1164,7 +1174,7 @@ int main()
 											   .push_constants_size = sizeof( grid_constants ) },
 					{ { "grid.vert", renderer::ShaderStage::VERTEX }, { "grid.frag", renderer::ShaderStage::FRAGMENT } } );
 			},
-			[ & ] { model = load_model( device, bindless_manager ); } );
+			[ & ] { model = load_model( device, bindless_manager, indices ); } );
 	}
 
 	auto constant_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
@@ -1314,7 +1324,7 @@ int main()
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
-		draw_ui( ui_state, props, bindless_manager, model.meshes, timestamps, timestamp_period );
+		draw_ui( ui_state, props, bindless_manager, indices, model.meshes, timestamps, timestamp_period );
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
@@ -1373,10 +1383,10 @@ int main()
 		else
 		{
 			command_buffer->bind_pipeline( pipelines.get( mesh_pipeline ), bindless_manager );
+			command_buffer->bind_index_buffer( indices.buffer );
 			for ( int i = 0; i < model.meshes.size(); ++i )
 			{
 				OPTICK_GPU_EVENT( "Draw Mesh" );
-				command_buffer->bind_index_buffer( model.meshes[ i ].index_buffer );
 				const push_constants constants { .mesh = model.meshes[ i ].handle,
 												 .material = model.materials[ i ].handle,
 												 .scene_constants = constants_address,
