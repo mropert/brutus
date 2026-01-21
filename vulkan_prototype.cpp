@@ -776,7 +776,11 @@ public:
 				OPTICK_EVENT( "decompress_tex" );
 				_textures[ index ].image.reset(
 					IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + _textures[ index ].offset, _textures[ index ].size ), true ) );
-				if ( _textures[ index ].image && _textures[ index ].image->format == SDL_PIXELFORMAT_INDEX8 )
+				if ( !_textures[ index ].image )
+				{
+					throw renderer::Error( SDL_GetError() );
+				}
+				else if ( _textures[ index ].image->format == SDL_PIXELFORMAT_INDEX8 )
 				{
 					sdl::raii::Surface converted_image( SDL_ConvertSurface( _textures[ index ].image.get(), SDL_PIXELFORMAT_RGBA32 ) );
 					if ( !converted_image )
@@ -1229,7 +1233,7 @@ int main()
 	renderer::PipelineHandle compute_draws_pipeline;
 	renderer::PipelineHandle depth_pyramid_pipeline;
 	renderer::PipelineHandle grid_pipeline;
-	std::array<model, 2> models;
+	std::vector<model> models;
 	{
 		renderer::ShaderCompiler compiler( "../shaders/vulkan" );
 		tbb::parallel_invoke(
@@ -1271,9 +1275,9 @@ int main()
 											   .push_constants_size = sizeof( grid_constants ) },
 					{ { "grid.vert", renderer::ShaderStage::VERTEX }, { "grid.frag", renderer::ShaderStage::FRAGMENT } } );
 			},
-			[ & ] { models[ 0 ] = load_model( device, bindless_manager, indices, "../assets/player.glb" ); } );
+			[ & ] { models.push_back( load_model( device, bindless_manager, indices, "../assets/player.glb" ) ); } );
 	}
-	models[ 1 ] = load_model( device, bindless_manager, indices, "../assets/sabrina.glb" );
+	models.push_back( load_model( device, bindless_manager, indices, "../assets/sabrina.glb" ) );
 
 	auto constant_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 												  sizeof( std::array<scene_constants, renderer::MAX_FRAMES_IN_FLIGHT> ),
@@ -1386,7 +1390,7 @@ int main()
 		auto draw_buffer = ( draw_buffers_ptr + image_index )->data();
 		uint32_t draw_count = 0;
 		std::minstd_rand rand;
-		std::uniform_int_distribution gen( 0, 1 );
+		std::uniform_int_distribution gen( 0zu, models.size() - 1 );
 
 		for ( int z = 0; z < ui_state.z_miku; ++z )
 		{
