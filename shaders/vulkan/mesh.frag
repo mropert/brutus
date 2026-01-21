@@ -105,6 +105,8 @@ void main()
     {
         const vec3 V = normalize(scene_constants.camera_position - inFragPos);
         const vec3 H = normalize(V + L);
+        const float  NdotV = max(dot(N, V), 1e-4);
+        const float  HdotV = max(dot(H, V), 1e-4);
         const float attenuation = scene_constants.main_light.w;
         const vec3 radiance     = vec3(1.0, 1.0, 1.0) * attenuation;
 
@@ -119,19 +121,15 @@ void main()
         }
         const float NDF = DistributionGGX(N, H, roughness);
         const float G   = GeometrySmith(N, V, L, roughness);
-        vec3 F0 = vec3(0.04);
-        F0 = mix(F0, albedo, metalness);
-        const vec3 F    = fresnelSchlick(max(dot(H, V), 0.0), F0);
-
-        const vec3 kS = F;
-        vec3 kD = vec3(1.0) - kS;
-        kD *= 1.0 - metalness;
+        const vec3 F0 = mix(vec3(0.04), albedo, metalness);
+        const vec3 F = fresnelSchlick(HdotV, F0);
 
         const vec3 numerator    = NDF * G * F;
-        const float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
+        const float denominator = max(4.0 * NdotV * HdotV + 1e-4, 1e-4);
         const vec3 specular     = numerator / denominator;
 
         // add to outgoing radiance Lo
+        const vec3 kD = (1 - F) * (1 - metalness);
         const vec3 Lo = (kD * albedo / PI + specular) * radiance * NdotL;
 
         const vec3 ambient = ambient_factor * albedo;// * ao;

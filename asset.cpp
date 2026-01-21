@@ -606,10 +606,8 @@ public:
 	void decompress_textures()
 	{
 		OPTICK_EVENT();
-
-		0uz;
-
 		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
+
 		tbb::parallel_for(
 			0uz,
 			_textures.size(),
