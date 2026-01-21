@@ -8,7 +8,7 @@
 #include <optick.h>
 #include <renderer/command_buffer.h>
 #include <renderer/texture.h>
-#include <tbb/tbb.h>
+#include <renderer/third_party/tbb.h>
 
 SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
 {
@@ -88,6 +88,70 @@ renderer::raii::Texture make_image_from_surface( renderer::Device& device, const
 	return device.create_texture( renderer::Texture::Desc { static_cast<renderer::Texture::Format>( format ),
 															TexUsage::TRANSFER_DST | TexUsage::SAMPLED,
 															renderer::Extent2D( surface.w, surface.h ) } );
+}
+
+namespace MikkTSpace
+{
+	struct UserData
+	{
+		std::span<const glm::vec3> positions;
+		std::span<const glm::vec3> normals;
+		std::span<const glm::vec2> uvs;
+		std::span<glm::vec4> tangents;
+		std::span<const uint32_t> indices;
+	};
+
+	int get_num_faces( const SMikkTSpaceContext* context )
+	{
+		return static_cast<UserData*>( context->m_pUserData )->indices.size() / 3;
+	}
+
+	int get_num_vertices_of_face( const SMikkTSpaceContext*, const int )
+	{
+		// We only do triangles
+		return 3;
+	}
+
+	void get_position( const SMikkTSpaceContext* context, float* pos_out, const int face, const int vert )
+	{
+		const auto data = static_cast<UserData*>( context->m_pUserData );
+		const auto index = data->indices[ face * 3 + vert ];
+		pos_out[ 0 ] = data->positions[ index ].x;
+		pos_out[ 1 ] = data->positions[ index ].y;
+		pos_out[ 2 ] = data->positions[ index ].z;
+	}
+	void get_normal( const SMikkTSpaceContext* context, float* normal_out, const int face, const int vert )
+	{
+		const auto data = static_cast<UserData*>( context->m_pUserData );
+		const auto index = data->indices[ face * 3 + vert ];
+		normal_out[ 0 ] = data->normals[ index ].x;
+		normal_out[ 1 ] = data->normals[ index ].y;
+		normal_out[ 2 ] = data->normals[ index ].z;
+	}
+	void get_texcoord( const SMikkTSpaceContext* context, float* uv_out, const int face, const int vert )
+	{
+		const auto data = static_cast<UserData*>( context->m_pUserData );
+		const auto index = data->indices[ face * 3 + vert ];
+		uv_out[ 0 ] = data->uvs[ index ].x;
+		uv_out[ 1 ] = data->uvs[ index ].y;
+	}
+
+	void set_tangent( const SMikkTSpaceContext* context, const float* tangent, const float sign, const int face, const int vert )
+	{
+		const auto data = static_cast<UserData*>( context->m_pUserData );
+		const auto index = data->indices[ face * 3 + vert ];
+		data->tangents[ index ].x = tangent[ 0 ];
+		data->tangents[ index ].y = tangent[ 1 ];
+		data->tangents[ index ].z = tangent[ 2 ];
+		data->tangents[ index ].w = sign;
+	}
+
+	static const SMikkTSpaceInterface interface { .m_getNumFaces = get_num_faces,
+												  .m_getNumVerticesOfFace = get_num_vertices_of_face,
+												  .m_getPosition = get_position,
+												  .m_getNormal = get_normal,
+												  .m_getTexCoord = get_texcoord,
+												  .m_setTSpaceBasic = set_tangent };
 }
 
 class gpu_upload_job
@@ -420,23 +484,50 @@ public:
 		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
 		const auto& parsed_mesh = _parsed_meshes[ mesh_index ];
 
+		std::vector<glm::vec4> generated_tangents;
+		if ( !parsed_mesh.tangents.length )
+		{
+			OPTICK_EVENT( "generate_tangents" );
+			generated_tangents.resize( parsed_mesh.positions.length );
+			MikkTSpace::UserData user_data {
+				.positions = { reinterpret_cast<const glm::vec3*>( gltf_buffer.data() + parsed_mesh.positions.offset ),
+							   parsed_mesh.positions.length },
+				.normals = { reinterpret_cast<const glm::vec3*>( gltf_buffer.data() + parsed_mesh.normals.offset ),
+							 parsed_mesh.positions.length },
+				.uvs = { reinterpret_cast<const glm::vec2*>( gltf_buffer.data() + parsed_mesh.uvs.offset ), parsed_mesh.positions.length },
+				.tangents = generated_tangents,
+				.indices = { reinterpret_cast<const uint32_t*>( gltf_buffer.data() + parsed_mesh.indices.offset ),
+							 parsed_mesh.indices.length }
+			};
+			const SMikkTSpaceContext context { const_cast<SMikkTSpaceInterface*>( &MikkTSpace::interface ), &user_data };
+			if ( !genTangSpaceDefault( &context ) )
+			{
+				throw renderer::Error( "Failed to generate tangets" );
+			}
+		}
+
 		std::vector<mesh_vertex> vertex_data;
 		{
 			OPTICK_EVENT( "repack_vertices" );
 			vertex_data.reserve( parsed_mesh.positions.length );
 
-			const auto positions = reinterpret_cast<const float*>( gltf_buffer.data() + parsed_mesh.positions.offset );
-			const auto normals = reinterpret_cast<const float*>( gltf_buffer.data() + parsed_mesh.normals.offset );
-			const auto tangents = reinterpret_cast<const float*>( gltf_buffer.data() + parsed_mesh.tangents.offset );
-			const auto uvs = reinterpret_cast<const float*>( gltf_buffer.data() + parsed_mesh.uvs.offset );
+			const std::span positions( reinterpret_cast<const glm::vec3*>( gltf_buffer.data() + parsed_mesh.positions.offset ),
+									   parsed_mesh.positions.length );
+
+			const std::span normals( reinterpret_cast<const glm::vec3*>( gltf_buffer.data() + parsed_mesh.normals.offset ),
+									 parsed_mesh.normals.length );
+
+			const std::span uvs( reinterpret_cast<const glm::vec2*>( gltf_buffer.data() + parsed_mesh.uvs.offset ),
+								 parsed_mesh.uvs.length );
+
+			const auto tangents = parsed_mesh.tangents.length
+				? std::span( reinterpret_cast<const glm::vec4*>( gltf_buffer.data() + parsed_mesh.tangents.offset ),
+							 parsed_mesh.tangents.length )
+				: generated_tangents;
+
 			for ( int v = 0; v < parsed_mesh.positions.length; ++v )
 			{
-				vertex_data.emplace_back(
-					glm::vec3( positions[ v * 3 ], positions[ v * 3 + 1 ], positions[ v * 3 + 2 ] ),
-					uvs[ v * 2 ],
-					glm::vec3( normals[ v * 3 ], normals[ v * 3 + 1 ], normals[ v * 3 + 2 ] ),
-					uvs[ v * 2 + 1 ],
-					glm::vec4( tangents[ v * 4 ], tangents[ v * 4 + 1 ], tangents[ v * 4 + 2 ], tangents[ v * 4 + 3 ] ) );
+				vertex_data.emplace_back( positions[ v ], uvs[ v ].x, normals[ v ], uvs[ v ].y, tangents[ v ] );
 			}
 		}
 
