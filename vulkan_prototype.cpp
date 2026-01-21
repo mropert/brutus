@@ -958,7 +958,8 @@ struct scene_constants
 	glm::mat4 view_matrix;
 	glm::mat4 inverse_view_matrix;
 	std::array<glm::aligned_vec4, 6> frustum;
-	glm::aligned_vec3 camera_position;
+	glm::vec3 camera_position;
+	uint32_t pbr;
 	glm::aligned_vec4 main_light;
 };
 
@@ -1007,6 +1008,7 @@ struct ui_data
 	bool paused = false;
 	bool vsync;
 	bool mesh_shading;
+	bool pbr = true;
 };
 
 namespace Timestamps
@@ -1094,6 +1096,7 @@ void draw_ui( ui_data& data,
 		}
 		ImGui::Checkbox( "V-Sync", &data.vsync );
 		ImGui::Checkbox( "Mesh shading", &data.mesh_shading );
+		ImGui::Checkbox( "PBR", &data.pbr );
 		ImGui::Text( "Instance count" );
 		ImGui::SliderInt( "x", &data.x_miku, 1, 100 );
 		ImGui::SliderInt( "z", &data.z_miku, 1, 100 );
@@ -1374,7 +1377,8 @@ int main()
 		}
 
 		{
-			const auto constants = build_scene_constants( camera, draw_image_extent, time_of_day / day_period );
+			auto constants = build_scene_constants( camera, draw_image_extent, time_of_day / day_period );
+			constants.pbr = ui_state.pbr ? 1 : 0;
 			memcpy( constant_buffers_ptr + image_index, &constants, sizeof( constants ) );
 		}
 		const auto constants_address = constant_buffers.get_device_address() + ( image_index * sizeof( scene_constants ) );

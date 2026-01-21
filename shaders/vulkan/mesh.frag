@@ -96,45 +96,54 @@ void main()
         N = normalize(inNormal);
     }
 
-    const vec3 V = normalize(scene_constants.camera_position - inFragPos);
-
     const vec3 L = normalize(-scene_constants.main_light.xyz);
-    const vec3 H = normalize(V + L);
-    const float attenuation = scene_constants.main_light.w;
-    const vec3 radiance     = vec3(1.0, 1.0, 1.0) * attenuation;
-
-    // cook-torrance brdf
-    float roughness = materials[inMaterial].roughness;
-    float metalness = materials[inMaterial].metalness;
-    if ( materials[inMaterial].metallic_roughness_index != -1 )
-    {
-        const vec3 metallic_roughness = texture(sampler2D(textures[materials[inMaterial].metallic_roughness_index], samplers[0]), inUV).rgb;
-        metalness *= metallic_roughness.b;
-        roughness *= metallic_roughness.g;
-    }
-    const float NDF = DistributionGGX(N, H, roughness);
-    const float G   = GeometrySmith(N, V, L, roughness);
-    vec3 F0 = vec3(0.04);
-    F0 = mix(F0, albedo, metalness);
-    const vec3 F    = fresnelSchlick(max(dot(H, V), 0.0), F0);
-
-    const vec3 kS = F;
-    vec3 kD = vec3(1.0) - kS;
-    kD *= 1.0 - metalness;
-
-    const vec3 numerator    = NDF * G * F;
-    const float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
-    const vec3 specular     = numerator / denominator;
-
-    // add to outgoing radiance Lo
     const float NdotL = max(dot(N, L), 0.0);
-    const vec3 Lo = (kD * albedo / PI + specular) * radiance * NdotL;
+    const float ambient_factor = 0.03;
+    vec3 color;
 
-    const vec3 ambient = vec3(0.03) * albedo;// * ao;
-    const vec3 color = ambient + Lo;
+    if ( scene_constants.pbr == 1 )
+    {
+        const vec3 V = normalize(scene_constants.camera_position - inFragPos);
+        const vec3 H = normalize(V + L);
+        const float attenuation = scene_constants.main_light.w;
+        const vec3 radiance     = vec3(1.0, 1.0, 1.0) * attenuation;
 
-    //color = color / (color + vec3(1.0));
-    //color = pow(color, vec3(1.0/2.2));
+        // cook-torrance brdf
+        float roughness = materials[inMaterial].roughness;
+        float metalness = materials[inMaterial].metalness;
+        if ( materials[inMaterial].metallic_roughness_index != -1 )
+        {
+            const vec3 metallic_roughness = texture(sampler2D(textures[materials[inMaterial].metallic_roughness_index], samplers[0]), inUV).rgb;
+            metalness *= metallic_roughness.b;
+            roughness *= metallic_roughness.g;
+        }
+        const float NDF = DistributionGGX(N, H, roughness);
+        const float G   = GeometrySmith(N, V, L, roughness);
+        vec3 F0 = vec3(0.04);
+        F0 = mix(F0, albedo, metalness);
+        const vec3 F    = fresnelSchlick(max(dot(H, V), 0.0), F0);
+
+        const vec3 kS = F;
+        vec3 kD = vec3(1.0) - kS;
+        kD *= 1.0 - metalness;
+
+        const vec3 numerator    = NDF * G * F;
+        const float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
+        const vec3 specular     = numerator / denominator;
+
+        // add to outgoing radiance Lo
+        const vec3 Lo = (kD * albedo / PI + specular) * radiance * NdotL;
+
+        const vec3 ambient = ambient_factor * albedo;// * ao;
+        color = ambient + Lo;
+
+        //color = color / (color + vec3(1.0));
+        //color = pow(color, vec3(1.0/2.2));
+    }
+    else
+    {
+        color = albedo * (NdotL + ambient_factor);
+    }
 
     outFragColor = vec4(color, 1.0);
 }
