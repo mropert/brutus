@@ -3,6 +3,7 @@
 #include <SDL3_image/SDL_image.h>
 #include <fastgltf/core.hpp>
 #include <meshoptimizer.h>
+#include <mikktspace.h>
 #include <numeric>
 #include <optick.h>
 #include <renderer/command_buffer.h>
@@ -404,30 +405,33 @@ public:
 		_materials.resize( _parsed_meshes.size() );
 	}
 
-	struct lod_indices
+	void upload_meshes()
 	{
-		std::vector<uint32_t> indices;
-		std::array<uint32_t, 3> indices_per_lod;
-	};
+		for ( int i = 0; i < _parsed_meshes.size(); ++i )
+		{
+			upload_mesh( i );
+		}
+		_mesh_upload.submit();
+	}
 
-	void upload_mesh()
+	void upload_mesh( int mesh_index )
 	{
 		OPTICK_EVENT();
 		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
+		const auto& parsed_mesh = _parsed_meshes[ mesh_index ];
 
-		std::vector<std::vector<mesh_vertex>> vertex_data( _meshes.size() );
-		for ( int i = 0; i < _meshes.size(); ++i )
+		std::vector<mesh_vertex> vertex_data;
 		{
 			OPTICK_EVENT( "repack_vertices" );
-			vertex_data[ i ].reserve( _parsed_meshes[ i ].positions.length );
+			vertex_data.reserve( parsed_mesh.positions.length );
 
-			const auto positions = reinterpret_cast<const float*>( gltf_buffer.data() + _parsed_meshes[ i ].positions.offset );
-			const auto normals = reinterpret_cast<const float*>( gltf_buffer.data() + _parsed_meshes[ i ].normals.offset );
-			const auto tangents = reinterpret_cast<const float*>( gltf_buffer.data() + _parsed_meshes[ i ].tangents.offset );
-			const auto uvs = reinterpret_cast<const float*>( gltf_buffer.data() + _parsed_meshes[ i ].uvs.offset );
-			for ( int v = 0; v < _parsed_meshes[ i ].positions.length; ++v )
+			const auto positions = reinterpret_cast<const float*>( gltf_buffer.data() + parsed_mesh.positions.offset );
+			const auto normals = reinterpret_cast<const float*>( gltf_buffer.data() + parsed_mesh.normals.offset );
+			const auto tangents = reinterpret_cast<const float*>( gltf_buffer.data() + parsed_mesh.tangents.offset );
+			const auto uvs = reinterpret_cast<const float*>( gltf_buffer.data() + parsed_mesh.uvs.offset );
+			for ( int v = 0; v < parsed_mesh.positions.length; ++v )
 			{
-				vertex_data[ i ].emplace_back(
+				vertex_data.emplace_back(
 					glm::vec3( positions[ v * 3 ], positions[ v * 3 + 1 ], positions[ v * 3 + 2 ] ),
 					uvs[ v * 2 ],
 					glm::vec3( normals[ v * 3 ], normals[ v * 3 + 1 ], normals[ v * 3 + 2 ] ),
@@ -436,199 +440,167 @@ public:
 			}
 		}
 
-		std::vector<lod_indices> simplified_indices( _meshes.size() );
-
+		std::vector<uint32_t> lod_indices;
+		std::array<uint32_t, 3> indices_per_lod;
 		{
 			OPTICK_EVENT( "lod_generation" );
 			constexpr std::array<float, 3> lod_indices_factor { { 0.2, 0.05, 0.01 } };
 			constexpr std::array<float, 3> lod_error_factor { { 0.01, 0.04, 0.1 } };
-			std::vector<uint32_t> buffer;
-			for ( int i = 0; i < _meshes.size(); ++i )
+			std::vector<uint32_t> buffer( parsed_mesh.indices.length );
+			buffer.resize( parsed_mesh.indices.length );
+			const auto indices = reinterpret_cast<const uint32_t*>( gltf_buffer.data() + parsed_mesh.indices.offset );
+			for ( int lod = 0; lod < indices_per_lod.size(); ++lod )
 			{
-				buffer.resize( _parsed_meshes[ i ].indices.length );
-				const auto indices = reinterpret_cast<const uint32_t*>( gltf_buffer.data() + _parsed_meshes[ i ].indices.offset );
-				for ( int lod = 0; lod < simplified_indices[ i ].indices_per_lod.size(); ++lod )
-				{
-					const float attr_weights[ 3 ] = { 0.5f, 0.5f, 0.5f };
-					const uint32_t size = meshopt_simplifyWithAttributes( buffer.data(),
-																		  indices,
-																		  _parsed_meshes[ i ].indices.length,
-																		  &vertex_data[ i ].front().position.x,
-																		  vertex_data[ i ].size(),
-																		  sizeof( mesh_vertex ),
-																		  &vertex_data[ i ].front().normal.x,
-																		  sizeof( mesh_vertex ),
-																		  attr_weights,
-																		  3,
-																		  nullptr,
-																		  _parsed_meshes[ i ].indices.length * lod_indices_factor[ lod ],
-																		  lod_error_factor[ lod ],
-																		  0,
-																		  nullptr );
+				const float attr_weights[ 3 ] = { 0.5f, 0.5f, 0.5f };
+				const uint32_t size = meshopt_simplifyWithAttributes( buffer.data(),
+																	  indices,
+																	  parsed_mesh.indices.length,
+																	  &vertex_data.front().position.x,
+																	  vertex_data.size(),
+																	  sizeof( mesh_vertex ),
+																	  &vertex_data.front().normal.x,
+																	  sizeof( mesh_vertex ),
+																	  attr_weights,
+																	  3,
+																	  nullptr,
+																	  parsed_mesh.indices.length * lod_indices_factor[ lod ],
+																	  lod_error_factor[ lod ],
+																	  0,
+																	  nullptr );
 
-					meshopt_optimizeVertexCache( buffer.data(), buffer.data(), size, vertex_data[ i ].size() );
-					simplified_indices[ i ].indices_per_lod[ lod ] = size;
-					simplified_indices[ i ].indices.insert( end( simplified_indices[ i ].indices ), buffer.data(), buffer.data() + size );
-				}
+				meshopt_optimizeVertexCache( buffer.data(), buffer.data(), size, vertex_data.size() );
+				indices_per_lod[ lod ] = size;
+				lod_indices.insert( end( lod_indices ), buffer.data(), buffer.data() + size );
 			}
 		}
 
-		std::vector<std::vector<gpu_meshlet>> all_meshlets;
-		std::vector<std::vector<uint32_t>> all_meshlet_vertices;
-		std::vector<std::vector<uint8_t>> all_meshlet_triangles;
+		std::vector<gpu_meshlet> meshlets;
+		std::vector<uint32_t> meshlet_vertices;
+		std::vector<uint8_t> meshlet_triangles;
+		std::vector<uint32_t> meshlets_per_lod;
 		{
 			OPTICK_EVENT( "meshlet_generation" );
 			std::vector<meshopt_Meshlet> meshlet_buffer;
-			for ( int i = 0; i < _meshes.size(); ++i )
+			uint32_t index_offset = 0;
+			for ( int lod = 0; lod < 4; ++lod )
 			{
-				uint32_t index_offset = 0;
-				uint32_t meshlet_vertices_offset = 0;
-				uint32_t meshlet_triangles_offset = 0;
-				for ( int lod = 0; lod < 4; ++lod )
+				const auto indices = lod == 0 ? reinterpret_cast<const uint32_t*>( gltf_buffer.data() + parsed_mesh.indices.offset )
+											  : lod_indices.data() + index_offset;
+				const auto indices_count = lod == 0 ? parsed_mesh.indices.length : indices_per_lod[ lod - 1 ];
+				index_offset += lod == 0 ? 0 : indices_count;
+
+				auto max_meshlets = meshopt_buildMeshletsBound( indices_count, 64, 96 );
+				meshlet_buffer.resize( max_meshlets );
+				const auto vertices_offset = meshlet_vertices.size();
+				meshlet_vertices.resize( meshlet_vertices.size() + indices_count );
+				const auto triangles_offset = meshlet_triangles.size();
+				meshlet_triangles.resize( meshlet_triangles.size() + indices_count + max_meshlets * 3 );
+
+				const auto meshlet_count = meshopt_buildMeshlets( meshlet_buffer.data(),
+																  meshlet_vertices.data() + vertices_offset,
+																  meshlet_triangles.data() + triangles_offset,
+																  indices,
+																  indices_count,
+																  &vertex_data.front().position.x,
+																  vertex_data.size(),
+																  sizeof( mesh_vertex ),
+																  64,
+																  96,
+																  0.f );
+
+				meshlets_per_lod.push_back( meshlet_count );
+				const auto& last = meshlet_buffer[ meshlet_count - 1 ];
+
+				meshlet_vertices.resize( vertices_offset + last.vertex_offset + last.vertex_count );
+				meshlet_triangles.resize( triangles_offset + last.triangle_offset + last.triangle_count * 3 );
+
+				for ( const auto& meshlet : std::span( meshlet_buffer.data(), meshlet_count ) )
 				{
-					const auto indices = lod == 0
-						? reinterpret_cast<const uint32_t*>( gltf_buffer.data() + _parsed_meshes[ i ].indices.offset )
-						: simplified_indices[ i ].indices.data() + index_offset;
-					const auto indices_count = lod == 0 ? _parsed_meshes[ i ].indices.length
-														: simplified_indices[ i ].indices_per_lod[ lod - 1 ];
-					index_offset += lod == 0 ? 0 : indices_count;
+					const uint32_t vertex_index = meshlet.vertex_offset + vertices_offset;
+					const uint32_t triangle_index = meshlet.triangle_offset + triangles_offset;
+					const auto bounds = meshopt_computeMeshletBounds( meshlet_vertices.data() + vertex_index,
+																	  meshlet_triangles.data() + triangle_index,
+																	  meshlet.triangle_count,
+																	  &vertex_data.front().position.x,
+																	  vertex_data.size(),
+																	  sizeof( mesh_vertex ) );
 
-					auto max_meshlets = meshopt_buildMeshletsBound( indices_count, 64, 96 );
-					meshlet_buffer.resize( max_meshlets );
-					auto& meshlet_vertices = all_meshlet_vertices.emplace_back( indices_count );
-					auto& meshlet_triangles = all_meshlet_triangles.emplace_back( indices_count + max_meshlets * 3 );
-
-					const auto meshlet_count = meshopt_buildMeshlets( meshlet_buffer.data(),
-																	  meshlet_vertices.data(),
-																	  meshlet_triangles.data(),
-																	  indices,
-																	  indices_count,
-																	  &vertex_data[ i ].front().position.x,
-																	  vertex_data[ i ].size(),
-																	  sizeof( mesh_vertex ),
-																	  64,
-																	  96,
-																	  0.f );
-
-					const auto& last = meshlet_buffer[ meshlet_count - 1 ];
-
-					meshlet_vertices.resize( last.vertex_offset + last.vertex_count );
-					meshlet_triangles.resize( last.triangle_offset + last.triangle_count * 3 );
-
-					auto& meshlets = all_meshlets.emplace_back();
-					meshlets.reserve( meshlet_count );
-
-					for ( const auto& meshlet : std::span( meshlet_buffer.data(), meshlet_count ) )
-					{
-						const auto bounds = meshopt_computeMeshletBounds( meshlet_vertices.data() + meshlet.vertex_offset,
-																		  meshlet_triangles.data() + meshlet.triangle_offset,
-																		  meshlet.triangle_count,
-																		  &vertex_data[ i ].front().position.x,
-																		  vertex_data[ i ].size(),
-																		  sizeof( mesh_vertex ) );
-
-						// Meshes store meshlets vertices and triangles for all LODs together in one array so we need to fixup the base offset
-						// We could also store the base offset in each LOD definition but that wouldn't save us any space
-						meshlets.emplace_back(
-							meshlet.vertex_offset + meshlet_vertices_offset,
-							meshlet.triangle_offset + meshlet_triangles_offset,
-							meshlet.vertex_count,
-							meshlet.triangle_count,
-							glm::aligned_vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ) );
-					}
-					meshlet_vertices_offset += meshlet_vertices.size();
-					meshlet_triangles_offset += meshlet_triangles.size();
+					meshlets.emplace_back( vertex_index,
+										   triangle_index,
+										   meshlet.vertex_count,
+										   meshlet.triangle_count,
+										   glm::aligned_vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ) );
 				}
 			}
 		}
 
-		for ( int i = 0; i < _parsed_meshes.size(); ++i )
+		auto& mesh = _meshes[ mesh_index ];
+
+		const auto bounds = meshopt_computeSphereBounds( &vertex_data[ 0 ].position.x,
+														 vertex_data.size(),
+														 sizeof( mesh_vertex ),
+														 nullptr,
+														 0 );
+		mesh.gpu_data.bounding_sphere.x = bounds.center[ 0 ];
+		mesh.gpu_data.bounding_sphere.y = bounds.center[ 1 ];
+		mesh.gpu_data.bounding_sphere.z = bounds.center[ 2 ];
+		mesh.gpu_data.bounding_sphere.w = bounds.radius;
+
+		// Index buffer
+		uint32_t index_offset = _index_buffer.size.fetch_add( parsed_mesh.indices.length );
+		_mesh_upload.queue( gltf_buffer.data() + parsed_mesh.indices.offset,
+							parsed_mesh.indices.length * sizeof( uint32_t ),
+							_index_buffer.buffer,
+							index_offset * sizeof( uint32_t ) );
+		mesh.gpu_data.lods[ 0 ].indices_offset = index_offset;
+		mesh.gpu_data.lods[ 0 ].indices_count = parsed_mesh.indices.length;
+
+		index_offset = _index_buffer.size.fetch_add( lod_indices.size() );
+		_mesh_upload.queue( lod_indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
+		for ( int lod = 1; lod < mesh.gpu_data.lods.size(); ++lod )
 		{
-			const auto& parsed_mesh = _parsed_meshes[ i ];
-			auto& mesh = _meshes[ i ];
-
-			const auto bounds = meshopt_computeSphereBounds( &vertex_data[ i ][ 0 ].position.x,
-															 vertex_data[ i ].size(),
-															 sizeof( mesh_vertex ),
-															 nullptr,
-															 0 );
-			mesh.gpu_data.bounding_sphere.x = bounds.center[ 0 ];
-			mesh.gpu_data.bounding_sphere.y = bounds.center[ 1 ];
-			mesh.gpu_data.bounding_sphere.z = bounds.center[ 2 ];
-			mesh.gpu_data.bounding_sphere.w = bounds.radius;
-
-			// Index buffer
-			uint32_t index_offset = _index_buffer.size.fetch_add( parsed_mesh.indices.length );
-			_mesh_upload.queue( gltf_buffer.data() + parsed_mesh.indices.offset,
-								parsed_mesh.indices.length * sizeof( uint32_t ),
-								_index_buffer.buffer,
-								index_offset * sizeof( uint32_t ) );
-			mesh.gpu_data.lods[ 0 ].indices_offset = index_offset;
-			mesh.gpu_data.lods[ 0 ].indices_count = parsed_mesh.indices.length;
-
-			index_offset = _index_buffer.size.fetch_add( simplified_indices[ i ].indices.size() );
-			_mesh_upload.queue( simplified_indices[ i ].indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
-			for ( int lod = 1; lod < mesh.gpu_data.lods.size(); ++lod )
-			{
-				mesh.gpu_data.lods[ lod ].indices_offset = mesh.gpu_data.lods[ lod - 1 ].indices_offset
-					+ mesh.gpu_data.lods[ lod - 1 ].indices_count;
-				mesh.gpu_data.lods[ lod ].indices_count = simplified_indices[ i ].indices_per_lod[ lod - 1 ];
-			}
-
-			// Data buffer (vertices + meshlets)
-			auto data_buffer_size = vertex_data[ i ].size() * sizeof( mesh_vertex );
-			for ( const auto& meshlets : std::span( all_meshlets.data() + ( i * 4 ), 4 ) )
-			{
-				data_buffer_size += meshlets.size() * sizeof( gpu_meshlet );
-			}
-			for ( const auto& meshlet_vertices : std::span( all_meshlet_vertices.data() + ( i * 4 ), 4 ) )
-			{
-				data_buffer_size += meshlet_vertices.size() * sizeof( uint32_t );
-			}
-			for ( const auto& meshlet_triangles : std::span( all_meshlet_triangles.data() + ( i * 4 ), 4 ) )
-			{
-				data_buffer_size += meshlet_triangles.size() * sizeof( uint8_t );
-			}
-
-			mesh.data_buffer = _device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
-														  | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-													  data_buffer_size );
-
-			mesh.gpu_data.vertices = mesh.data_buffer.get_device_address();
-			_mesh_upload.queue( vertex_data[ i ], mesh.data_buffer );
-			auto offset = vertex_data[ i ].size() * sizeof( mesh_vertex );
-
-			mesh.gpu_data.meshlets = mesh.data_buffer.get_device_address() + offset;
-			for ( int lod = 0; lod < 4; ++lod )
-			{
-				_mesh_upload.queue( all_meshlets[ i * 4 + lod ], mesh.data_buffer, offset );
-				offset += all_meshlets[ i * 4 + lod ].size() * sizeof( gpu_meshlet );
-				mesh.gpu_data.lods[ lod ].meshlets_count = all_meshlets[ i * 4 + lod ].size();
-				if ( lod > 0 )
-				{
-					mesh.gpu_data.lods[ lod ].meshlets_offset = mesh.gpu_data.lods[ lod - 1 ].meshlets_offset
-						+ mesh.gpu_data.lods[ lod - 1 ].meshlets_count;
-				}
-			}
-
-			mesh.gpu_data.meshlet_vertices = mesh.data_buffer.get_device_address() + offset;
-			for ( int lod = 0; lod < 4; ++lod )
-			{
-				_mesh_upload.queue( all_meshlet_vertices[ i * 4 + lod ], mesh.data_buffer, offset );
-				offset += all_meshlet_vertices[ i * 4 + lod ].size() * sizeof( uint32_t );
-			}
-
-			mesh.gpu_data.meshlet_triangles = mesh.data_buffer.get_device_address() + offset;
-			for ( int lod = 0; lod < 4; ++lod )
-			{
-				_mesh_upload.queue( all_meshlet_triangles[ i * 4 + lod ], mesh.data_buffer, offset );
-				offset += all_meshlet_triangles[ i * 4 + lod ].size() * sizeof( uint8_t );
-			}
-
-			mesh.handle = _bindless_manager.add_buffer_entry( mesh.gpu_data );
+			mesh.gpu_data.lods[ lod ].indices_offset = mesh.gpu_data.lods[ lod - 1 ].indices_offset
+				+ mesh.gpu_data.lods[ lod - 1 ].indices_count;
+			mesh.gpu_data.lods[ lod ].indices_count = indices_per_lod[ lod - 1 ];
 		}
 
-		_mesh_upload.submit();
+		// Data buffer (vertices + meshlets)
+		auto data_buffer_size = vertex_data.size() * sizeof( mesh_vertex );
+		data_buffer_size += meshlets.size() * sizeof( gpu_meshlet );
+		data_buffer_size += meshlet_vertices.size() * sizeof( uint32_t );
+		data_buffer_size += meshlet_triangles.size() * sizeof( uint8_t );
+
+		mesh.data_buffer = _device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
+													  | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+												  data_buffer_size );
+
+		mesh.gpu_data.vertices = mesh.data_buffer.get_device_address();
+		_mesh_upload.queue( vertex_data, mesh.data_buffer );
+		auto offset = vertex_data.size() * sizeof( mesh_vertex );
+
+		mesh.gpu_data.meshlets = mesh.data_buffer.get_device_address() + offset;
+		_mesh_upload.queue( meshlets, mesh.data_buffer, offset );
+		offset += meshlets.size() * sizeof( gpu_meshlet );
+
+		for ( int lod = 0; lod < 4; ++lod )
+		{
+			mesh.gpu_data.lods[ lod ].meshlets_count = meshlets_per_lod[ lod ];
+			if ( lod > 0 )
+			{
+				mesh.gpu_data.lods[ lod ].meshlets_offset = mesh.gpu_data.lods[ lod - 1 ].meshlets_offset
+					+ mesh.gpu_data.lods[ lod - 1 ].meshlets_count;
+			}
+		}
+
+		mesh.gpu_data.meshlet_vertices = mesh.data_buffer.get_device_address() + offset;
+		_mesh_upload.queue( meshlet_vertices, mesh.data_buffer, offset );
+		offset += meshlet_vertices.size() * sizeof( uint32_t );
+
+		mesh.gpu_data.meshlet_triangles = mesh.data_buffer.get_device_address() + offset;
+		_mesh_upload.queue( meshlet_triangles, mesh.data_buffer, offset );
+		offset += meshlet_triangles.size() * sizeof( uint8_t );
+
+		mesh.handle = _bindless_manager.add_buffer_entry( mesh.gpu_data );
 	}
 
 	void decompress_textures()
@@ -747,7 +719,7 @@ asset load_asset( renderer::Device& device, BindlessManager& bindless_manager, i
 	OPTICK_EVENT();
 	asset_load_job job( device, bindless_manager, index_buffer, std::move( path ) );
 	job.parse();
-	tbb::parallel_invoke( [ & ]() { job.upload_mesh(); },
+	tbb::parallel_invoke( [ & ]() { job.upload_meshes(); },
 						  [ & ]
 						  {
 							  job.decompress_textures();
