@@ -404,7 +404,18 @@ public:
 					}
 					break;
 				}
+				case fastgltf::ComponentType::UnsignedShort:
+				{
+					switch ( accessor.type )
+					{
+						case fastgltf::AccessorType::Scalar:
+							format = VK_FORMAT_R16_UINT;
+							break;
+					}
+					break;
+				}
 			}
+
 			return mesh_attribute { .offset = accessor.byteOffset + view.byteOffset,
 									.stride = view.byteStride.value_or( 0 ),
 									.length = accessor.count,
@@ -445,23 +456,43 @@ public:
 				if ( attribute.name == "POSITION" )
 				{
 					m.positions = make_attribute( _asset, attribute.accessorIndex );
+					if ( m.positions.format != VK_FORMAT_R32G32B32_SFLOAT )
+					{
+						throw renderer::Error( "Unsupported format for mesh positions" );
+					}
 				}
 				else if ( attribute.name == "NORMAL" )
 				{
 					m.normals = make_attribute( _asset, attribute.accessorIndex );
+					if ( m.normals.format != VK_FORMAT_R32G32B32_SFLOAT )
+					{
+						throw renderer::Error( "Unsupported format for mesh normals" );
+					}
 				}
 				else if ( attribute.name == "TANGENT" )
 				{
 					m.tangents = make_attribute( _asset, attribute.accessorIndex );
+					if ( m.tangents.format != VK_FORMAT_R32G32B32A32_SFLOAT )
+					{
+						throw renderer::Error( "Unsupported format for mesh tangents" );
+					}
 				}
 				else if ( attribute.name == "TEXCOORD_0" )
 				{
 					m.uvs = make_attribute( _asset, attribute.accessorIndex );
+					if ( m.uvs.format != VK_FORMAT_R32G32_SFLOAT )
+					{
+						throw renderer::Error( "Unsupported format for mesh texcoords" );
+					}
 				}
 			}
 			if ( mesh.primitives[ 0 ].indicesAccessor )
 			{
 				m.indices = make_attribute( _asset, *mesh.primitives[ 0 ].indicesAccessor );
+				if ( m.indices.format != VK_FORMAT_R16_UINT && m.indices.format != VK_FORMAT_R32_UINT )
+				{
+					throw renderer::Error( "Unsupported format for mesh texcoords" );
+				}
 			}
 		}
 
@@ -484,21 +515,36 @@ public:
 		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
 		const auto& parsed_mesh = _parsed_meshes[ mesh_index ];
 
+		// Some models pack indices in u16 but we use u32 everywhere for now so we'll just convert them
+		// It's only an issue for legacy rendering, meshlets do not care either way
+		std::vector<uint32_t> expanded_indices;
+		if ( parsed_mesh.indices.format == VK_FORMAT_R16_UINT )
+		{
+			expanded_indices.reserve( parsed_mesh.indices.length );
+			const std::span indices( reinterpret_cast<const uint16_t*>( gltf_buffer.data() + parsed_mesh.indices.offset ),
+									 parsed_mesh.indices.length );
+			std::copy( begin( indices ), end( indices ), std::back_inserter( expanded_indices ) );
+		}
+		const std::span indices = expanded_indices.empty()
+			? std::span( reinterpret_cast<const uint32_t*>( gltf_buffer.data() + parsed_mesh.indices.offset ), parsed_mesh.indices.length )
+			: expanded_indices;
+
+		const std::span positions( reinterpret_cast<const glm::vec3*>( gltf_buffer.data() + parsed_mesh.positions.offset ),
+								   parsed_mesh.positions.length );
+		const std::span normals( reinterpret_cast<const glm::vec3*>( gltf_buffer.data() + parsed_mesh.normals.offset ),
+								 parsed_mesh.normals.length );
+		const std::span uvs( reinterpret_cast<const glm::vec2*>( gltf_buffer.data() + parsed_mesh.uvs.offset ), parsed_mesh.uvs.length );
+
 		std::vector<glm::vec4> generated_tangents;
 		if ( !parsed_mesh.tangents.length )
 		{
 			OPTICK_EVENT( "generate_tangents" );
-			generated_tangents.resize( parsed_mesh.positions.length );
-			MikkTSpace::UserData user_data {
-				.positions = { reinterpret_cast<const glm::vec3*>( gltf_buffer.data() + parsed_mesh.positions.offset ),
-							   parsed_mesh.positions.length },
-				.normals = { reinterpret_cast<const glm::vec3*>( gltf_buffer.data() + parsed_mesh.normals.offset ),
-							 parsed_mesh.positions.length },
-				.uvs = { reinterpret_cast<const glm::vec2*>( gltf_buffer.data() + parsed_mesh.uvs.offset ), parsed_mesh.positions.length },
-				.tangents = generated_tangents,
-				.indices = { reinterpret_cast<const uint32_t*>( gltf_buffer.data() + parsed_mesh.indices.offset ),
-							 parsed_mesh.indices.length }
-			};
+			generated_tangents.resize( positions.size() );
+			MikkTSpace::UserData user_data { .positions = positions,
+											 .normals = normals,
+											 .uvs = uvs,
+											 .tangents = generated_tangents,
+											 .indices = indices };
 			const SMikkTSpaceContext context { const_cast<SMikkTSpaceInterface*>( &MikkTSpace::interface ), &user_data };
 			if ( !genTangSpaceDefault( &context ) )
 			{
@@ -506,24 +552,15 @@ public:
 			}
 		}
 
+		const auto tangents = parsed_mesh.tangents.length
+			? std::span( reinterpret_cast<const glm::vec4*>( gltf_buffer.data() + parsed_mesh.tangents.offset ),
+						 parsed_mesh.tangents.length )
+			: generated_tangents;
+
 		std::vector<mesh_vertex> vertex_data;
 		{
 			OPTICK_EVENT( "repack_vertices" );
 			vertex_data.reserve( parsed_mesh.positions.length );
-
-			const std::span positions( reinterpret_cast<const glm::vec3*>( gltf_buffer.data() + parsed_mesh.positions.offset ),
-									   parsed_mesh.positions.length );
-
-			const std::span normals( reinterpret_cast<const glm::vec3*>( gltf_buffer.data() + parsed_mesh.normals.offset ),
-									 parsed_mesh.normals.length );
-
-			const std::span uvs( reinterpret_cast<const glm::vec2*>( gltf_buffer.data() + parsed_mesh.uvs.offset ),
-								 parsed_mesh.uvs.length );
-
-			const auto tangents = parsed_mesh.tangents.length
-				? std::span( reinterpret_cast<const glm::vec4*>( gltf_buffer.data() + parsed_mesh.tangents.offset ),
-							 parsed_mesh.tangents.length )
-				: generated_tangents;
 
 			for ( int v = 0; v < parsed_mesh.positions.length; ++v )
 			{
@@ -537,15 +574,13 @@ public:
 			OPTICK_EVENT( "lod_generation" );
 			constexpr std::array<float, 3> lod_indices_factor { { 0.2, 0.05, 0.01 } };
 			constexpr std::array<float, 3> lod_error_factor { { 0.01, 0.04, 0.1 } };
-			std::vector<uint32_t> buffer( parsed_mesh.indices.length );
-			buffer.resize( parsed_mesh.indices.length );
-			const auto indices = reinterpret_cast<const uint32_t*>( gltf_buffer.data() + parsed_mesh.indices.offset );
+			std::vector<uint32_t> buffer( indices.size() );
 			for ( int lod = 0; lod < indices_per_lod.size(); ++lod )
 			{
 				const float attr_weights[ 3 ] = { 0.5f, 0.5f, 0.5f };
 				const uint32_t size = meshopt_simplifyWithAttributes( buffer.data(),
-																	  indices,
-																	  parsed_mesh.indices.length,
+																	  indices.data(),
+																	  indices.size(),
 																	  &vertex_data.front().position.x,
 																	  vertex_data.size(),
 																	  sizeof( mesh_vertex ),
@@ -575,9 +610,8 @@ public:
 			uint32_t index_offset = 0;
 			for ( int lod = 0; lod < 4; ++lod )
 			{
-				const auto indices = lod == 0 ? reinterpret_cast<const uint32_t*>( gltf_buffer.data() + parsed_mesh.indices.offset )
-											  : lod_indices.data() + index_offset;
-				const auto indices_count = lod == 0 ? parsed_mesh.indices.length : indices_per_lod[ lod - 1 ];
+				const auto indices_ptr = lod == 0 ? indices.data() : lod_indices.data() + index_offset;
+				const auto indices_count = lod == 0 ? indices.size() : indices_per_lod[ lod - 1 ];
 				index_offset += lod == 0 ? 0 : indices_count;
 
 				auto max_meshlets = meshopt_buildMeshletsBound( indices_count, 64, 96 );
@@ -590,7 +624,7 @@ public:
 				const auto meshlet_count = meshopt_buildMeshlets( meshlet_buffer.data(),
 																  meshlet_vertices.data() + vertices_offset,
 																  meshlet_triangles.data() + triangles_offset,
-																  indices,
+																  indices_ptr,
 																  indices_count,
 																  &vertex_data.front().position.x,
 																  vertex_data.size(),
@@ -638,11 +672,8 @@ public:
 		mesh.gpu_data.bounding_sphere.w = bounds.radius;
 
 		// Index buffer
-		uint32_t index_offset = _index_buffer.size.fetch_add( parsed_mesh.indices.length );
-		_mesh_upload.queue( gltf_buffer.data() + parsed_mesh.indices.offset,
-							parsed_mesh.indices.length * sizeof( uint32_t ),
-							_index_buffer.buffer,
-							index_offset * sizeof( uint32_t ) );
+		uint32_t index_offset = _index_buffer.size.fetch_add( indices.size() );
+		_mesh_upload.queue( indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
 		mesh.gpu_data.lods[ 0 ].indices_offset = index_offset;
 		mesh.gpu_data.lods[ 0 ].indices_count = parsed_mesh.indices.length;
 
