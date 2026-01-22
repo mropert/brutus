@@ -207,7 +207,8 @@ void draw_ui( ui_data& data,
 			  const index_buffer& index_buffer,
 			  std::span<const asset> assets,
 			  std::span<const uint64_t> gpu_timestamps,
-			  float gpu_timestamp_period )
+			  float gpu_timestamp_period,
+			  const renderer::Statistics& stats )
 {
 	OPTICK_EVENT();
 	ImGui::Begin( "Vulkan renderer" );
@@ -249,6 +250,8 @@ void draw_ui( ui_data& data,
 		ImGui::BulletText( "Meshes: %.2f", meshes_time );
 		ImGui::BulletText( "Depth pyramid: %.2f", depth_pyramid_time );
 		ImGui::BulletText( "UI: %.2f", ui_time );
+		ImGui::BulletText( "Triangles (millions): %.2f", static_cast<float>( stats.clipping_invocations / 1000 ) / 1000 );
+		ImGui::SeparatorText( "Assets" );
 		for ( int i = 0; i < assets.size(); ++i )
 		{
 			for ( int j = 0; j < assets[ i ].meshes.size(); ++j )
@@ -472,8 +475,12 @@ int main()
 													   sizeof( DrawCommands ) * renderer::MAX_FRAMES_IN_FLIGHT );
 
 	const auto timestamp_period = device.get_timestamp_period();
-	std::array<renderer::raii::QueryPool, renderer::MAX_FRAMES_IN_FLIGHT> query_pools { device.create_query_pool( Timestamps::COUNT ),
-																						device.create_query_pool( Timestamps::COUNT ) };
+	std::array<renderer::raii::TimestampQuery, renderer::MAX_FRAMES_IN_FLIGHT> timestamp_queries {
+		device.create_timestamp_query( Timestamps::COUNT ),
+		device.create_timestamp_query( Timestamps::COUNT )
+	};
+	std::array<renderer::raii::StatisticsQuery, renderer::MAX_FRAMES_IN_FLIGHT> statistics_queries { device.create_statistics_query(),
+																									 device.create_statistics_query() };
 
 	OPTICK_POP();
 
@@ -545,9 +552,11 @@ int main()
 
 		const uint32_t query_pool_offset = image_index * Timestamps::COUNT;
 		std::array<uint64_t, Timestamps::COUNT> timestamps;
+		renderer::Statistics stats;
 		if ( frame_count > renderer::MAX_FRAMES_IN_FLIGHT )
 		{
-			device.get_query_pool_results( query_pools[ image_index ], 0, timestamps );
+			device.get_query_results( timestamp_queries[ image_index ], 0, timestamps );
+			stats = device.get_query_results( statistics_queries[ image_index ] );
 		}
 
 		{
@@ -588,17 +597,20 @@ int main()
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
-		draw_ui( ui_state, props, bindless_manager, indices, assets, timestamps, timestamp_period );
+		draw_ui( ui_state, props, bindless_manager, indices, assets, timestamps, timestamp_period, stats );
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
 		command_buffer->begin();
 
-		command_buffer->reset_query_pool( query_pools[ image_index ], 0, Timestamps::COUNT );
-		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::FRAME_START );
+		command_buffer->reset_query( timestamp_queries[ image_index ], 0, Timestamps::COUNT );
+		command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::FRAME_START );
+
+		command_buffer->reset_query( statistics_queries[ image_index ] );
+		command_buffer->begin_query( statistics_queries[ image_index ] );
 
 		{
-			command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::COMPUTE_DRAWS );
+			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::COMPUTE_DRAWS );
 			OPTICK_GPU_EVENT( "Compute Draws" );
 			command_buffer->fill_buffer( draw_commands_buffers,
 										 draw_commands_count_buffer_address - draw_commands_buffers.get_device_address(),
@@ -642,7 +654,7 @@ int main()
 
 		if ( mesh_shading )
 		{
-			command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES );
+			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_MESHES );
 			OPTICK_GPU_EVENT( "Draw Meshlets" );
 			command_buffer->bind_pipeline( pipelines.get( mesh_pipeline_meshlet ), bindless_manager );
 			const push_constants constants { .scene_constants = constants_address,
@@ -659,7 +671,7 @@ int main()
 		}
 		else
 		{
-			command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_MESHES );
+			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_MESHES );
 			OPTICK_GPU_EVENT( "Draw Meshes" );
 			command_buffer->bind_pipeline( pipelines.get( mesh_pipeline ), bindless_manager );
 			command_buffer->bind_index_buffer( indices.buffer );
@@ -680,7 +692,7 @@ int main()
 
 		{
 			OPTICK_GPU_EVENT( "Draw Grid" );
-			command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_GRID );
+			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_GRID );
 			command_buffer->bind_pipeline( pipelines.get( grid_pipeline ), bindless_manager );
 			command_buffer->push_constants( pipelines.get( grid_pipeline ), grid_constants { .scene_constants = constants_address } );
 			command_buffer->draw( 4 );
@@ -692,7 +704,7 @@ int main()
 											renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
 
 		{
-			command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DEPTH_PYRAMID );
+			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DEPTH_PYRAMID );
 			OPTICK_GPU_EVENT( "Depth Pyramid" );
 			command_buffer->bind_pipeline( pipelines.get( depth_pyramid_pipeline ), bindless_manager );
 			auto extent = depth_resolved_image.texture.get_extent();
@@ -718,7 +730,7 @@ int main()
 			}
 		}
 
-		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::DRAW_UI );
+		command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_UI );
 		command_buffer->begin_rendering( draw_image_extent, renderer::RenderAttachment { .target = draw_resolved_image_view } );
 
 		{
@@ -728,7 +740,7 @@ int main()
 		}
 		command_buffer->end_rendering();
 
-		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::BLIT );
+		command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::BLIT );
 
 		command_buffer->transition_texture( draw_resolved_image,
 											renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL,
@@ -743,7 +755,8 @@ int main()
 											renderer::Texture::Layout::TRANSFER_DST_OPTIMAL,
 											renderer::Texture::Layout::PRESENT_SRC );
 
-		command_buffer->write_timestamp( query_pools[ image_index ], Timestamps::FRAME_END );
+		command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::FRAME_END );
+		command_buffer->end_query( statistics_queries[ image_index ] );
 
 		command_buffer->end();
 
