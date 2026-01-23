@@ -30,6 +30,7 @@ struct Meshlet {
     uint vertex_count;
     uint triangle_count;
     vec4 bounding_sphere;
+    vec4 cone;
 };
 
 struct MeshDraw
@@ -59,8 +60,8 @@ struct Mesh
 
 struct MeshletTaskPayload
 {
-    vec3 position;
-    uint lod;
+    uint meshlets[32];
+    uint draw_id;
 };
 
 struct MeshDrawCommand

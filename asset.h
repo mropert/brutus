@@ -39,7 +39,8 @@ struct gpu_meshlet
 	uint32_t triangle_offset;
 	uint32_t vertex_count;
 	uint32_t triangle_count;
-	glm::aligned_vec4 bounding_sphere; // z is radius
+	glm::aligned_vec4 bounding_sphere; // w is radius
+	glm::aligned_vec4 cone; // xyz is axis, w is cutoff
 };
 
 struct gpu_mesh

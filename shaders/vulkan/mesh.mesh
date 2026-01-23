@@ -28,15 +28,15 @@ layout( push_constant, std430 ) uniform block
     DrawCommandsBuffer commands_buffer;
 };
 
-taskPayloadSharedEXT uint payload;
+taskPayloadSharedEXT MeshletTaskPayload payload;
 
 void main()
 {
-    const uint draw_id = commands_buffer.commands[payload].draw_id;
-    const uint lod = commands_buffer.commands[payload].lod;
+    const uint draw_id = payload.draw_id;
     const uint mesh_id = draws_buffer.mesh_draws[draw_id].mesh;
 
-    Meshlet meshlet = meshes[mesh_id].mb.meshlets[gl_WorkGroupID.x + meshes[mesh_id].lods[lod].meshlets_offset];
+    const uint meshlet_id = payload.meshlets[gl_WorkGroupID.x];
+    Meshlet meshlet = meshes[mesh_id].mb.meshlets[meshlet_id];
     SetMeshOutputsEXT(meshlet.vertex_count, meshlet.triangle_count);
 
     for (uint i = gl_LocalInvocationIndex; i < meshlet.vertex_count; i += gl_WorkGroupSize.x) {

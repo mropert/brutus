@@ -650,11 +650,13 @@ public:
 																	  vertex_data.size(),
 																	  sizeof( mesh_vertex ) );
 
-					meshlets.emplace_back( vertex_index,
-										   triangle_index,
-										   meshlet.vertex_count,
-										   meshlet.triangle_count,
-										   glm::aligned_vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ) );
+					meshlets.emplace_back(
+						vertex_index,
+						triangle_index,
+						meshlet.vertex_count,
+						meshlet.triangle_count,
+						glm::vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ),
+						glm::vec4( bounds.cone_axis[ 0 ], bounds.cone_axis[ 1 ], bounds.cone_axis[ 2 ], bounds.cone_cutoff ) );
 				}
 			}
 		}

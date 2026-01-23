@@ -8,7 +8,7 @@
 #include "constants.glsl"
 #include "mesh.glsl"
 
-layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 
 layout(std430, set = 1, binding = 0) readonly buffer ssbo1 { Mesh meshes[]; };
 
@@ -21,13 +21,43 @@ layout( push_constant, std430 ) uniform block
     DrawCommandsBuffer commands_buffer;
 };
 
-taskPayloadSharedEXT uint payload;
+shared uint meshlets_count;
+
+taskPayloadSharedEXT MeshletTaskPayload payload;
+
+bool coneCull(vec3 center, float radius, vec3 cone_axis, float cone_cutoff, vec3 camera_position)
+{
+	return dot(center - camera_position, cone_axis) >= cone_cutoff * length(center - camera_position) + radius;
+}
 
 void main()
-{
+{   
+    meshlets_count = 0;
+    groupMemoryBarrier();
+
     const uint draw_id = commands_buffer.commands[gl_DrawIDARB].draw_id;
     const uint lod = commands_buffer.commands[gl_DrawIDARB].lod;
     const uint mesh_id = draws_buffer.mesh_draws[draw_id].mesh;
-    payload = gl_DrawIDARB;
-    EmitMeshTasksEXT(meshes[mesh_id].lods[lod].meshlets_count, 1, 1);
+
+    if ( gl_GlobalInvocationID.x >= meshes[mesh_id].lods[lod].meshlets_count )
+    {
+        return;
+    }
+
+    const uint meshlet_id = gl_GlobalInvocationID.x + meshes[mesh_id].lods[lod].meshlets_offset;
+    const Meshlet meshlet = meshes[mesh_id].mb.meshlets[meshlet_id];
+
+    if ( !coneCull(meshlet.bounding_sphere.xyz, meshlet.bounding_sphere.w, meshlet.cone.xyz, meshlet.cone.w, scene_constants.camera_position) )
+    {
+        const uint index = atomicAdd( meshlets_count, 1 );
+        payload.meshlets[index] = meshlet_id;
+    }
+
+    groupMemoryBarrier();
+
+    if ( gl_LocalInvocationIndex == 0 )
+    {
+        payload.draw_id = draw_id;
+        EmitMeshTasksEXT(meshlets_count, 1, 1);
+    }
 }
