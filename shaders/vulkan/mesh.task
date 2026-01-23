@@ -47,7 +47,13 @@ void main()
     const uint meshlet_id = gl_GlobalInvocationID.x + meshes[mesh_id].lods[lod].meshlets_offset;
     const Meshlet meshlet = meshes[mesh_id].mb.meshlets[meshlet_id];
 
-    if ( !coneCull(meshlet.bounding_sphere.xyz, meshlet.bounding_sphere.w, meshlet.cone.xyz, meshlet.cone.w, scene_constants.camera_position) )
+    bool visible = !coneCull( meshlet.bounding_sphere.xyz, meshlet.bounding_sphere.w, meshlet.cone.xyz, meshlet.cone.w, scene_constants.camera_position );
+    const vec3 meshlet_center = meshlet.bounding_sphere.xyz + draws_buffer.mesh_draws[draw_id].position;
+    for ( int i = 0; i < 6; ++i )
+    {
+        visible = visible && dot( scene_constants.frustum[i], vec4( meshlet_center, 1 ) ) > -meshlet.bounding_sphere.w;
+    }
+    if ( visible )
     {
         const uint index = atomicAdd( meshlets_count, 1 );
         payload.meshlets[index] = meshlet_id;
