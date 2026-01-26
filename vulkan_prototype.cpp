@@ -529,15 +529,19 @@ int main()
 											  true );
 	const auto draw_buffers_ptr = static_cast<Draws*>( draw_buffers.get_mapped_address() );
 
+	using DrawVisibility = std::array<uint8_t, max_draws>;
+	auto draw_visibility_buffer = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
+															| renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+														sizeof( DrawVisibility ) );
 	struct DrawCommands
 	{
 		uint32_t count;
 		std::array<gpu_draw_command, max_draws> commands;
 	};
-	auto draw_commands_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::INDIRECT_BUFFER
-														   | renderer::Buffer::Usage::TRANSFER_DST
-														   | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-													   sizeof( DrawCommands ) * renderer::MAX_FRAMES_IN_FLIGHT );
+	auto draw_commands_buffer = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::INDIRECT_BUFFER
+														  | renderer::Buffer::Usage::TRANSFER_DST
+														  | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+													  sizeof( DrawCommands ) );
 
 	std::array<renderer::raii::TimestampQuery, renderer::MAX_FRAMES_IN_FLIGHT> timestamp_queries {
 		device.create_timestamp_query( Timestamps::COUNT ),
@@ -545,6 +549,20 @@ int main()
 	};
 	std::array<renderer::raii::StatisticsQuery, renderer::MAX_FRAMES_IN_FLIGHT> statistics_queries { device.create_statistics_query(),
 																									 device.create_statistics_query() };
+	{
+		// 1 time inits
+		auto tmp_fence = device.create_fence();
+		auto command_buffer = device.grab_command_buffer();
+		command_buffer->reset();
+		command_buffer->begin();
+
+		command_buffer->fill_buffer( draw_visibility_buffer, 0, draw_visibility_buffer.get_size(), 0 );
+
+		command_buffer->end();
+		device.submit( *command_buffer, tmp_fence );
+		device.wait_for_fences( { tmp_fence }, 9999999 );
+	}
+
 
 	OPTICK_POP();
 
@@ -653,9 +671,6 @@ int main()
 			}
 		}
 		const auto draw_buffer_address = draw_buffers.get_device_address() + ( image_index * sizeof( Draws ) );
-		const auto draw_commands_count_buffer_address = draw_commands_buffers.get_device_address()
-			+ ( image_index * sizeof( DrawCommands ) );
-		const auto draw_commands_buffer_address = draw_commands_count_buffer_address + sizeof( uint32_t );
 
 		pipelines.update();
 
@@ -678,21 +693,19 @@ int main()
 		{
 			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::COMPUTE_DRAWS );
 			OPTICK_GPU_EVENT( "Compute Draws" );
-			command_buffer->fill_buffer( draw_commands_buffers,
-										 draw_commands_count_buffer_address - draw_commands_buffers.get_device_address(),
-										 sizeof( uint32_t ),
-										 0 );
-			command_buffer->buffer_barrier( draw_commands_buffers );
+			command_buffer->buffer_barrier( draw_commands_buffer );
+			command_buffer->fill_buffer( draw_commands_buffer, 0, sizeof( uint32_t ), 0 );
+			command_buffer->buffer_barrier( draw_commands_buffer );
 			command_buffer->bind_pipeline( pipelines.get( compute_draws_pipeline ), bindless_manager );
 			const compute_draws_constants constants { .draws_buffer = draw_buffer_address,
-													  .commands_buffer = draw_commands_buffer_address,
-													  .commmands_count_buffer = draw_commands_count_buffer_address,
+													  .commands_buffer = draw_commands_buffer.get_device_address() + sizeof( uint32_t ),
+													  .commmands_count_buffer = draw_commands_buffer.get_device_address(),
 													  .scene_constants = constants_address,
 													  .draws_count = draw_count,
 													  .lod_cutoff = ui_state.lod_cutoff };
 			command_buffer->push_constants( pipelines.get( compute_draws_pipeline ), constants );
 			command_buffer->dispatch( calc_group_count( draw_count ), 1, 1 );
-			command_buffer->buffer_barrier( draw_commands_buffers );
+			command_buffer->buffer_barrier( draw_commands_buffer );
 		}
 
 		command_buffer->transition_texture( draw_image,
@@ -725,13 +738,12 @@ int main()
 			command_buffer->bind_pipeline( pipelines.get( mesh_pipeline_meshlet ), bindless_manager );
 			const push_constants constants { .scene_constants = constants_address,
 											 .draws_buffer = draw_buffer_address,
-											 .commands_buffer = draw_commands_buffer_address };
+											 .commands_buffer = draw_commands_buffer.get_device_address() + sizeof( uint32_t ) };
 			command_buffer->push_constants( pipelines.get( mesh_pipeline_meshlet ), constants );
-			command_buffer->draw_mesh_tasks_indirect( draw_commands_buffers,
-													  draw_commands_buffer_address - draw_commands_buffers.get_device_address()
-														  + offsetof( gpu_draw_command, mesh_cmd ),
-													  draw_commands_buffers,
-													  draw_commands_count_buffer_address - draw_commands_buffers.get_device_address(),
+			command_buffer->draw_mesh_tasks_indirect( draw_commands_buffer,
+													  sizeof( uint32_t ) + offsetof( gpu_draw_command, mesh_cmd ),
+													  draw_commands_buffer,
+													  0,
 													  max_draws,
 													  sizeof( gpu_draw_command ) );
 		}
@@ -743,14 +755,13 @@ int main()
 			command_buffer->bind_index_buffer( indices.buffer );
 			const push_constants constants { .scene_constants = constants_address,
 											 .draws_buffer = draw_buffer_address,
-											 .commands_buffer = draw_commands_buffer_address };
+											 .commands_buffer = draw_commands_buffer.get_device_address() + sizeof( uint32_t ) };
 
 			command_buffer->push_constants( pipelines.get( mesh_pipeline ), constants );
-			command_buffer->draw_indexed_indirect( draw_commands_buffers,
-												   draw_commands_buffer_address - draw_commands_buffers.get_device_address()
-													   + offsetof( gpu_draw_command, draw_cmd ),
-												   draw_commands_buffers,
-												   draw_commands_count_buffer_address - draw_commands_buffers.get_device_address(),
+			command_buffer->draw_indexed_indirect( draw_commands_buffer,
+												   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+												   draw_commands_buffer,
+												   0,
 												   max_draws,
 												   sizeof( gpu_draw_command ) );
 		}
