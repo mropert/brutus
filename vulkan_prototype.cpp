@@ -11,12 +11,13 @@
 #include <imgui_impl_vulkan.h>
 #include <memory>
 #include <numbers>
+#include <numeric>
 #include <optick.h>
 #include <renderer/third_party/tbb.h>
 #include <span>
 
 //
-
+#include <D3d12.h>
 #include <renderer/bindless.h>
 #include <renderer/buffer.h>
 #include <renderer/command_buffer.h>
@@ -29,6 +30,53 @@
 //
 
 #include "asset.h"
+
+//
+#ifdef _WIN32
+#include <d3d12.h>
+#include <dxgi1_4.h>
+#include <wrl/client.h>
+#pragma comment( lib, "DXGI.lib" )
+#pragma comment( lib, "D3D12.lib" )
+#endif
+
+struct set_power_stable
+{
+#ifdef _WIN32
+	set_power_stable()
+	{
+		HRESULT hr = CreateDXGIFactory1( IID_PPV_ARGS( factory.GetAddressOf() ) );
+		if ( FAILED( hr ) )
+		{
+			throw renderer::Error( "CreateDXGIFactory1 failed" );
+		}
+
+		hr = factory->EnumAdapters( 0, adapter.GetAddressOf() );
+		if ( FAILED( hr ) )
+		{
+			throw renderer::Error( "EnumAdapters failed with Adapter=0" );
+		}
+
+		hr = D3D12CreateDevice( adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS( device.GetAddressOf() ) );
+		if ( FAILED( hr ) )
+		{
+			throw renderer::Error( "D3D12CreateDevice failed" );
+		}
+
+		hr = device->SetStablePowerState( TRUE );
+		if ( FAILED( hr ) )
+		{
+			throw renderer::Error( "SetStablePowerState failed. Do you have the Win10 SDK installed?" );
+		}
+	}
+
+	Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+	Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+	Microsoft::WRL::ComPtr<ID3D12Device> device;
+
+
+#endif
+};
 
 struct gpu_mesh_draw
 {
@@ -201,13 +249,39 @@ namespace Timestamps
 	};
 }
 
+struct Timings
+{
+	explicit Timings( float gpu_timestamp_period )
+		: period( gpu_timestamp_period )
+	{
+	}
+
+	void add( std::span<const uint64_t, Timestamps::COUNT> values, int frame_index )
+	{
+		using namespace Timestamps;
+		const int index = frame_index % last_values[ 0 ].size();
+		last_values[ 0 ][ index ] = ( values[ FRAME_END ] - values[ FRAME_START ] ) * period;
+		for ( int i = 1; i < last_values.size(); ++i )
+		{
+			last_values[ i ][ index ] = ( values[ i + 1 ] - values[ i ] ) * period;
+		}
+		for ( int i = 0; i < last_values.size(); ++i )
+		{
+			averages[ i ] = std::accumulate( begin( last_values[ i ] ), end( last_values[ i ] ), 0.f ) / last_values[ i ].size();
+		}
+	}
+
+	std::array<std::array<float, 60>, Timestamps::FRAME_END> last_values;
+	std::array<float, Timestamps::FRAME_END> averages;
+	float period;
+};
+
 void draw_ui( ui_data& data,
 			  const renderer::Device::Properties& props,
 			  const BindlessManager& bindless_manager,
 			  const index_buffer& index_buffer,
 			  std::span<const asset> assets,
-			  std::span<const uint64_t> gpu_timestamps,
-			  float gpu_timestamp_period,
+			  std::span<const float> gpu_timings,
 			  const renderer::Statistics& stats )
 {
 	OPTICK_EVENT();
@@ -233,23 +307,12 @@ void draw_ui( ui_data& data,
 		ImGui::Text( "Indices (MB): %zu", ( index_buffer.size * sizeof( uint32_t ) ) >> 20 );
 
 		std::array<float, 4> per_lod_gpu_time {};
-		const auto gpu_time = ( gpu_timestamps[ Timestamps::FRAME_END ] - gpu_timestamps[ Timestamps::FRAME_START ] ) * gpu_timestamp_period
-			* 1e-6f;
-		const auto compute_draws_time = ( gpu_timestamps[ Timestamps::COMPUTE_DRAWS + 1 ] - gpu_timestamps[ Timestamps::COMPUTE_DRAWS ] )
-			* gpu_timestamp_period * 1e-6f;
-		const auto meshes_time = ( gpu_timestamps[ Timestamps::DRAW_MESHES + 1 ] - gpu_timestamps[ Timestamps::DRAW_MESHES ] )
-			* gpu_timestamp_period * 1e-6f;
-		const auto depth_pyramid_time = ( gpu_timestamps[ Timestamps::DEPTH_PYRAMID + 1 ] - gpu_timestamps[ Timestamps::DEPTH_PYRAMID ] )
-			* gpu_timestamp_period * 1e-6f;
-		const auto ui_time = ( gpu_timestamps[ Timestamps::DRAW_UI + 1 ] - gpu_timestamps[ Timestamps::DRAW_UI ] ) * gpu_timestamp_period
-			* 1e-6f;
-
 		ImGui::SeparatorText( "Stats" );
-		ImGui::Text( "GPU time (ms): %.2f", gpu_time );
-		ImGui::BulletText( "Compute draws: %.2f", compute_draws_time );
-		ImGui::BulletText( "Meshes: %.2f", meshes_time );
-		ImGui::BulletText( "Depth pyramid: %.2f", depth_pyramid_time );
-		ImGui::BulletText( "UI: %.2f", ui_time );
+		ImGui::Text( "GPU times (ms): %.2f", gpu_timings[ 0 ] * 1e-6f );
+		ImGui::BulletText( "Compute draws: %.2f", gpu_timings[ Timestamps::COMPUTE_DRAWS ] * 1e-6f );
+		ImGui::BulletText( "Meshes: %.2f", gpu_timings[ Timestamps::DRAW_MESHES ] * 1e-6f );
+		ImGui::BulletText( "Depth pyramid: %.2f", gpu_timings[ Timestamps::DEPTH_PYRAMID ] * 1e-6f );
+		ImGui::BulletText( "UI: %.2f", gpu_timings[ Timestamps::DRAW_UI ] * 1e-6f );
 		ImGui::BulletText( "Triangles (millions): %.2f", static_cast<float>( stats.clipping_invocations / 1000 ) / 1000 );
 		ImGui::SeparatorText( "Assets" );
 		for ( int i = 0; i < assets.size(); ++i )
@@ -325,6 +388,8 @@ int main()
 
 	tbb_observer observer {};
 	observer.observe();
+
+	const set_power_stable fixup_nvidia;
 
 	OPTICK_PUSH( "create_device" );
 	renderer::Device device( "Brutus-NG [Vulkan]" );
@@ -474,7 +539,6 @@ int main()
 														   | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 													   sizeof( DrawCommands ) * renderer::MAX_FRAMES_IN_FLIGHT );
 
-	const auto timestamp_period = device.get_timestamp_period();
 	std::array<renderer::raii::TimestampQuery, renderer::MAX_FRAMES_IN_FLIGHT> timestamp_queries {
 		device.create_timestamp_query( Timestamps::COUNT ),
 		device.create_timestamp_query( Timestamps::COUNT )
@@ -485,6 +549,7 @@ int main()
 	OPTICK_POP();
 
 	Camera camera { .position = glm::vec3( 0, 1.f, 2.f ) };
+	Timings gpu_timings( device.get_timestamp_period() );
 
 	if ( profile_startup )
 	{
@@ -551,11 +616,12 @@ int main()
 		auto [ image_index, swapchain_image, swapchain_image_view ] = swapchain.acquire();
 
 		const uint32_t query_pool_offset = image_index * Timestamps::COUNT;
-		std::array<uint64_t, Timestamps::COUNT> timestamps;
 		renderer::Statistics stats;
 		if ( frame_count > renderer::MAX_FRAMES_IN_FLIGHT )
 		{
+			std::array<uint64_t, Timestamps::COUNT> timestamps;
 			device.get_query_results( timestamp_queries[ image_index ], 0, timestamps );
+			gpu_timings.add( timestamps, frame_count );
 			stats = device.get_query_results( statistics_queries[ image_index ] );
 		}
 
@@ -597,7 +663,7 @@ int main()
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
-		draw_ui( ui_state, props, bindless_manager, indices, assets, timestamps, timestamp_period, stats );
+		draw_ui( ui_state, props, bindless_manager, indices, assets, gpu_timings.averages, stats );
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
