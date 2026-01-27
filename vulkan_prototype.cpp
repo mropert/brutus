@@ -17,7 +17,7 @@
 #include <span>
 
 //
-#include <D3d12.h>
+#include <gpu_stable_power/gpu_stable_power.h>
 #include <renderer/bindless.h>
 #include <renderer/buffer.h>
 #include <renderer/command_buffer.h>
@@ -30,53 +30,6 @@
 //
 
 #include "asset.h"
-
-//
-#ifdef _WIN32
-#include <d3d12.h>
-#include <dxgi1_4.h>
-#include <wrl/client.h>
-#pragma comment( lib, "DXGI.lib" )
-#pragma comment( lib, "D3D12.lib" )
-#endif
-
-struct set_power_stable
-{
-#ifdef _WIN32
-	set_power_stable()
-	{
-		HRESULT hr = CreateDXGIFactory1( IID_PPV_ARGS( factory.GetAddressOf() ) );
-		if ( FAILED( hr ) )
-		{
-			throw renderer::Error( "CreateDXGIFactory1 failed" );
-		}
-
-		hr = factory->EnumAdapters( 0, adapter.GetAddressOf() );
-		if ( FAILED( hr ) )
-		{
-			throw renderer::Error( "EnumAdapters failed with Adapter=0" );
-		}
-
-		hr = D3D12CreateDevice( adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS( device.GetAddressOf() ) );
-		if ( FAILED( hr ) )
-		{
-			throw renderer::Error( "D3D12CreateDevice failed" );
-		}
-
-		hr = device->SetStablePowerState( TRUE );
-		if ( FAILED( hr ) )
-		{
-			throw renderer::Error( "SetStablePowerState failed. Do you have the Win10 SDK installed?" );
-		}
-	}
-
-	Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
-	Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
-	Microsoft::WRL::ComPtr<ID3D12Device> device;
-
-
-#endif
-};
 
 struct gpu_mesh_draw
 {
@@ -229,6 +182,7 @@ struct ui_data
 	float lod_cutoff = 10.f;
 	bool paused = false;
 	bool vsync;
+	bool stable_power;
 	bool mesh_shading;
 	bool pbr = true;
 };
@@ -335,6 +289,7 @@ void draw_ui( ui_data& data,
 			data.paused = !data.paused;
 		}
 		ImGui::Checkbox( "V-Sync", &data.vsync );
+		ImGui::Checkbox( "Stable power", &data.stable_power );
 		ImGui::Checkbox( "Mesh shading", &data.mesh_shading );
 		ImGui::Checkbox( "PBR", &data.pbr );
 		ImGui::Text( "Instance count" );
@@ -389,7 +344,7 @@ int main()
 	tbb_observer observer {};
 	observer.observe();
 
-	const set_power_stable fixup_nvidia;
+	gpu_stable_power::Context stable_power;
 
 	OPTICK_PUSH( "create_device" );
 	renderer::Device device( "Brutus-NG [Vulkan]" );
@@ -549,20 +504,6 @@ int main()
 	};
 	std::array<renderer::raii::StatisticsQuery, renderer::MAX_FRAMES_IN_FLIGHT> statistics_queries { device.create_statistics_query(),
 																									 device.create_statistics_query() };
-	{
-		// 1 time inits
-		auto tmp_fence = device.create_fence();
-		auto command_buffer = device.grab_command_buffer();
-		command_buffer->reset();
-		command_buffer->begin();
-
-		command_buffer->fill_buffer( draw_visibility_buffer, 0, draw_visibility_buffer.get_size(), 0 );
-
-		command_buffer->end();
-		device.submit( *command_buffer, tmp_fence );
-		device.wait_for_fences( { tmp_fence }, 9999999 );
-	}
-
 
 	OPTICK_POP();
 
@@ -587,7 +528,8 @@ int main()
 	float time_of_day = 0.f;
 
 	bool relative_mouse = false;
-	ui_data ui_state { .vsync = vsync, .mesh_shading = props.mesh_shader_support };
+	ui_data ui_state { .vsync = vsync, .stable_power = stable_power.is_enabled(), .mesh_shading = props.mesh_shader_support };
+	uint64_t last_scene_hash = 0;
 
 	while ( !quit )
 	{
@@ -670,6 +612,7 @@ int main()
 				}
 			}
 		}
+		const uint64_t scene_hash = static_cast<uint64_t>( ui_state.z_miku ) << 32 | ui_state.x_miku;
 		const auto draw_buffer_address = draw_buffers.get_device_address() + ( image_index * sizeof( Draws ) );
 
 		pipelines.update();
@@ -689,6 +632,13 @@ int main()
 
 		command_buffer->reset_query( statistics_queries[ image_index ] );
 		command_buffer->begin_query( statistics_queries[ image_index ] );
+
+		if ( last_scene_hash != scene_hash )
+		{
+			// Can't reuse visibility buffer if the scene has changed
+			command_buffer->fill_buffer( draw_visibility_buffer, 0, draw_visibility_buffer.get_size(), 0 );
+			last_scene_hash = scene_hash;
+		}
 
 		{
 			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::COMPUTE_DRAWS );
@@ -848,6 +798,7 @@ int main()
 			swapchain.recreate( swapchain_image_format, vsync );
 			ImGui_ImplVulkan_SetMinImageCount( swapchain.get_image_count() );
 		}
+		ui_state.stable_power = stable_power.set_enabled( ui_state.stable_power );
 	}
 
 	// Wait for the GPU to finish before we roll all the destructors

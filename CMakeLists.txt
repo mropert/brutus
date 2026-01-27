@@ -56,6 +56,7 @@ if(USE_OPTICK)
 endif()
 
 add_subdirectory(submodules/vk-renderer)
+add_subdirectory(submodules/gpu_stable_power)
 
 find_package(fastgltf CONFIG REQUIRED)
 find_package(SDL3_image CONFIG REQUIRED)
@@ -70,7 +71,7 @@ target_sources(brutus-vulkan PRIVATE vulkan_prototype.cpp asset.cpp)
 target_compile_definitions(brutus-vulkan PRIVATE GLM_FORCE_INTRINSICS GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_link_libraries(brutus-vulkan PRIVATE SDL3::SDL3 fastgltf::fastgltf glm::glm-header-only)
 target_link_libraries(brutus-vulkan PRIVATE $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image-shared>,SDL3_image::SDL3_image-shared,SDL3_image::SDL3_image-static>)
-target_link_libraries(brutus-vulkan PRIVATE renderer Optick TBB::tbb imgui::imgui meshoptimizer::meshoptimizer mikktspace::mikktspace)
+target_link_libraries(brutus-vulkan PRIVATE renderer gpu_stable_power Optick TBB::tbb imgui::imgui meshoptimizer::meshoptimizer mikktspace::mikktspace)
 
 enable_testing()
 
