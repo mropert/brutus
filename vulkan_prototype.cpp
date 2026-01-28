@@ -47,7 +47,7 @@ struct gpu_draw_command
 	VkDrawMeshTasksIndirectCommandEXT mesh_cmd;
 };
 
-struct push_constants
+struct draw_meshes_constants
 {
 	renderer::BufferHandle scene_constants;
 	renderer::BufferHandle draws_buffer;
@@ -130,6 +130,7 @@ struct tbb_observer final : public tbb::task_scheduler_observer
 struct scene_constants
 {
 	glm::mat4 view_projection_matrix;
+	glm::mat4 projection_matrix;
 	glm::mat4 view_matrix;
 	glm::mat4 inverse_view_matrix;
 	std::array<glm::aligned_vec4, 6> frustum;
@@ -157,6 +158,7 @@ scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D 
 								10.f * std::sinf( light_time * std::numbers::pi * 2.f ),
 								2.5f );
 	scene_constants constants { .view_projection_matrix = projection * view,
+								.projection_matrix = projection,
 								.view_matrix = view,
 								.inverse_view_matrix = glm::inverse( view ),
 								.camera_position = camera.position,
@@ -184,6 +186,7 @@ struct ui_data
 	bool vsync;
 	bool stable_power;
 	bool mesh_shading;
+	bool occlusion_culling = true;
 	bool pbr = true;
 };
 
@@ -192,10 +195,12 @@ namespace Timestamps
 	enum : uint32_t
 	{
 		FRAME_START = 0,
-		COMPUTE_DRAWS,
-		DRAW_MESHES,
-		DRAW_GRID,
+		COMPUTE_DRAWS_EARLY,
+		DRAW_MESHES_EARLY,
 		DEPTH_PYRAMID,
+		COMPUTE_DRAWS_LATE,
+		DRAW_MESHES_LATE,
+		DRAW_GRID,
 		DRAW_UI,
 		BLIT,
 		FRAME_END,
@@ -263,8 +268,12 @@ void draw_ui( ui_data& data,
 		std::array<float, 4> per_lod_gpu_time {};
 		ImGui::SeparatorText( "Stats" );
 		ImGui::Text( "GPU times (ms): %.2f", gpu_timings[ 0 ] * 1e-6f );
-		ImGui::BulletText( "Compute draws: %.2f", gpu_timings[ Timestamps::COMPUTE_DRAWS ] * 1e-6f );
-		ImGui::BulletText( "Meshes: %.2f", gpu_timings[ Timestamps::DRAW_MESHES ] * 1e-6f );
+		ImGui::BulletText( "Early meshes draw: %.2f / %.2f",
+						   gpu_timings[ Timestamps::COMPUTE_DRAWS_EARLY ] * 1e-6f,
+						   gpu_timings[ Timestamps::DRAW_MESHES_EARLY ] * 1e-6f );
+		ImGui::BulletText( "Late meshes draw: %.2f / %.2f",
+						   gpu_timings[ Timestamps::COMPUTE_DRAWS_LATE ] * 1e-6f,
+						   gpu_timings[ Timestamps::DRAW_MESHES_LATE ] * 1e-6f );
 		ImGui::BulletText( "Depth pyramid: %.2f", gpu_timings[ Timestamps::DEPTH_PYRAMID ] * 1e-6f );
 		ImGui::BulletText( "UI: %.2f", gpu_timings[ Timestamps::DRAW_UI ] * 1e-6f );
 		ImGui::BulletText( "Triangles (millions): %.2f", static_cast<float>( stats.clipping_invocations / 1000 ) / 1000 );
@@ -291,6 +300,7 @@ void draw_ui( ui_data& data,
 		ImGui::Checkbox( "V-Sync", &data.vsync );
 		ImGui::Checkbox( "Stable power", &data.stable_power );
 		ImGui::Checkbox( "Mesh shading", &data.mesh_shading );
+		ImGui::Checkbox( "Occlusion culling", &data.occlusion_culling );
 		ImGui::Checkbox( "PBR", &data.pbr );
 		ImGui::Text( "Instance count" );
 		ImGui::SliderInt( "x", &data.x_miku, 1, 100 );
@@ -320,14 +330,40 @@ struct compute_draws_constants
 	renderer::BufferHandle draws_buffer;
 	renderer::BufferHandle commands_buffer;
 	renderer::BufferHandle commmands_count_buffer;
+	renderer::BufferHandle visibility_buffer;
 	renderer::BufferHandle scene_constants;
 	uint32_t draws_count;
 	float lod_cutoff;
+	uint32_t depth_pyramid;
 };
 
 uint32_t calc_group_count( uint32_t count )
 {
 	return ( count + 32 - 1 ) / 32;
+}
+
+uint32_t round_pow2( uint32_t v )
+{
+	uint32_t r = 1;
+
+	while ( r * 2 < v )
+		r *= 2;
+
+	return r;
+}
+
+int calc_mip_levels( renderer::Extent2D extent )
+{
+	int mips = 1;
+
+	while ( extent.width > 1 || extent.height > 1 )
+	{
+		++mips;
+		extent.width /= 2;
+		extent.height /= 2;
+	}
+
+	return mips;
 }
 
 int main()
@@ -409,12 +445,12 @@ int main()
 														 .usage = usage::DEPTH_STENCIL_ATTACHMENT | usage::SAMPLED,
 														 .extent = draw_image_extent } ) );
 
+	const renderer::Extent2D depth_pyramid_extent { round_pow2( draw_image_extent.width ), round_pow2( draw_image_extent.height ) };
 	const auto depth_pyramid = bindless_manager.add_texture(
-		device.create_texture(
-			renderer::Texture::Desc { .format = renderer::Texture::Format::R32_SFLOAT,
-									  .usage = usage::SAMPLED | usage::STORAGE,
-									  .extent = { .width = draw_image_extent.width / 2, .height = draw_image_extent.height / 2 },
-									  .mips = 8 } ),
+		device.create_texture( renderer::Texture::Desc { .format = renderer::Texture::Format::R32_SFLOAT,
+														 .usage = usage::SAMPLED | usage::STORAGE,
+														 .extent = depth_pyramid_extent,
+														 .mips = calc_mip_levels( depth_pyramid_extent ) } ),
 		true );
 
 	index_buffer indices( device, 1024 * 1024 );
@@ -424,19 +460,23 @@ int main()
 	const auto mesh_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .color_format = draw_image_format,
 								   .depth_format = depth_image.get_format(),
-								   .push_constants_size = sizeof( push_constants ) },
+								   .push_constants_size = sizeof( draw_meshes_constants ) },
 		{ { "mesh.vert", renderer::ShaderStage::VERTEX }, { "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
 
 	const auto mesh_pipeline_meshlet = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
 																				 .depth_format = depth_image.get_format(),
-																				 .push_constants_size = sizeof( push_constants ) },
+																				 .push_constants_size = sizeof( draw_meshes_constants ) },
 													  { { "mesh.task", renderer::ShaderStage::TASK },
 														{ "mesh.mesh", renderer::ShaderStage::MESH },
 														{ "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
 
 	const auto compute_draws_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .push_constants_size = sizeof( compute_draws_constants ) },
-		{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE } } );
+		{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE, { { "LATE", "0" } } } } );
+
+	const auto compute_draws_late_pipeline = pipelines.add(
+		renderer::Pipeline::Desc { .push_constants_size = sizeof( compute_draws_constants ) },
+		{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE, { { "LATE", "1" } } } } );
 
 	const auto depth_pyramid_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .push_constants_size = sizeof( depth_pyramid_constants ) },
@@ -555,6 +595,7 @@ int main()
 		camera.update( delta_time );
 
 		const bool mesh_shading = ui_state.mesh_shading;
+		const bool occlusion_culling = ui_state.occlusion_culling;
 
 		auto [ image_index, swapchain_image, swapchain_image_view ] = swapchain.acquire();
 
@@ -616,29 +657,12 @@ int main()
 		command_buffer->reset_query( statistics_queries[ image_index ] );
 		command_buffer->begin_query( statistics_queries[ image_index ] );
 
-		if ( last_scene_hash != scene_hash )
+		if ( last_scene_hash != scene_hash || !occlusion_culling )
 		{
 			// Can't reuse visibility buffer if the scene has changed
 			command_buffer->fill_buffer( draw_visibility_buffer, 0, draw_visibility_buffer.get_size(), 0 );
+			command_buffer->buffer_barrier( draw_visibility_buffer );
 			last_scene_hash = scene_hash;
-		}
-
-		{
-			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::COMPUTE_DRAWS );
-			OPTICK_GPU_EVENT( "Compute Draws" );
-			command_buffer->buffer_barrier( draw_commands_buffer );
-			command_buffer->fill_buffer( draw_commands_buffer, 0, sizeof( uint32_t ), 0 );
-			command_buffer->buffer_barrier( draw_commands_buffer );
-			command_buffer->bind_pipeline( pipelines.get( compute_draws_pipeline ), bindless_manager );
-			const compute_draws_constants constants { .draws_buffer = draw_buffer_address,
-													  .commands_buffer = draw_commands_buffer.get_device_address() + sizeof( uint32_t ),
-													  .commmands_count_buffer = draw_commands_buffer.get_device_address(),
-													  .scene_constants = constants_address,
-													  .draws_count = draw_count,
-													  .lod_cutoff = ui_state.lod_cutoff };
-			command_buffer->push_constants( pipelines.get( compute_draws_pipeline ), constants );
-			command_buffer->dispatch( calc_group_count( draw_count ), 1, 1 );
-			command_buffer->buffer_barrier( draw_commands_buffer );
 		}
 
 		command_buffer->transition_texture( draw_image,
@@ -654,61 +678,87 @@ int main()
 											renderer::Texture::Layout::UNDEFINED,
 											renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL );
 
-		command_buffer->begin_rendering(
-			draw_image_extent,
-			renderer::RenderAttachment { .target = draw_image_view,
-										 .resolve_target = draw_resolved_image_view,
-										 .clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } } },
-			renderer::RenderAttachment { .target = depth_image_view, .resolve_target = depth_resolved_image.handles.view } );
-
-		command_buffer->set_viewport( draw_image_extent );
-		command_buffer->set_scissor( draw_image_extent );
-
-		if ( mesh_shading )
+		const auto draw_meshes = [ & ]( bool early )
 		{
-			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_MESHES );
-			OPTICK_GPU_EVENT( "Draw Meshlets" );
-			command_buffer->bind_pipeline( pipelines.get( mesh_pipeline_meshlet ), bindless_manager );
-			const push_constants constants { .scene_constants = constants_address,
-											 .draws_buffer = draw_buffer_address,
-											 .commands_buffer = draw_commands_buffer.get_device_address() + sizeof( uint32_t ) };
-			command_buffer->push_constants( pipelines.get( mesh_pipeline_meshlet ), constants );
-			command_buffer->draw_mesh_tasks_indirect( draw_commands_buffer,
-													  sizeof( uint32_t ) + offsetof( gpu_draw_command, mesh_cmd ),
-													  draw_commands_buffer,
-													  0,
-													  max_draws,
-													  sizeof( gpu_draw_command ) );
-		}
-		else
-		{
-			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_MESHES );
-			OPTICK_GPU_EVENT( "Draw Meshes" );
-			command_buffer->bind_pipeline( pipelines.get( mesh_pipeline ), bindless_manager );
-			command_buffer->bind_index_buffer( indices.buffer );
-			const push_constants constants { .scene_constants = constants_address,
-											 .draws_buffer = draw_buffer_address,
-											 .commands_buffer = draw_commands_buffer.get_device_address() + sizeof( uint32_t ) };
+			command_buffer->write_timestamp( timestamp_queries[ image_index ],
+											 early ? Timestamps::COMPUTE_DRAWS_EARLY : Timestamps::COMPUTE_DRAWS_LATE );
+			{
+				OPTICK_GPU_EVENT( "Compute Draws" );
+				command_buffer->buffer_barrier( draw_commands_buffer );
+				command_buffer->fill_buffer( draw_commands_buffer, 0, sizeof( uint32_t ), 0 );
+				command_buffer->buffer_barrier( draw_commands_buffer );
+				const auto pipeline = early ? pipelines.get( compute_draws_pipeline ) : pipelines.get( compute_draws_late_pipeline );
+				command_buffer->bind_pipeline( pipeline, bindless_manager );
+				const compute_draws_constants constants { .draws_buffer = draw_buffer_address,
+														  .commands_buffer = draw_commands_buffer.get_device_address() + sizeof( uint32_t ),
+														  .commmands_count_buffer = draw_commands_buffer.get_device_address(),
+														  .visibility_buffer = draw_visibility_buffer.get_device_address(),
+														  .scene_constants = constants_address,
+														  .draws_count = draw_count,
+														  .lod_cutoff = ui_state.lod_cutoff,
+														  .depth_pyramid = depth_pyramid.handles.texture_index };
+				command_buffer->push_constants( pipeline, constants );
+				command_buffer->dispatch( calc_group_count( draw_count ), 1, 1 );
+				command_buffer->buffer_barrier( draw_commands_buffer );
+				command_buffer->buffer_barrier( draw_visibility_buffer );
+			}
 
-			command_buffer->push_constants( pipelines.get( mesh_pipeline ), constants );
-			command_buffer->draw_indexed_indirect( draw_commands_buffer,
-												   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
-												   draw_commands_buffer,
-												   0,
-												   max_draws,
-												   sizeof( gpu_draw_command ) );
-		}
+			renderer::RenderAttachment color_attachment { .target = draw_image_view };
+			if ( early )
+			{
+				color_attachment.clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } };
+			}
+			renderer::RenderAttachment depth_attachment { .target = depth_image_view };
+			if ( early )
+			{
+				depth_attachment.clear_value = { { 0.f } };
+				depth_attachment.resolve_target = depth_resolved_image.handles.view;
+			}
 
+			command_buffer->begin_rendering( draw_image_extent, color_attachment, depth_attachment );
 
-		{
-			OPTICK_GPU_EVENT( "Draw Grid" );
-			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_GRID );
-			command_buffer->bind_pipeline( pipelines.get( grid_pipeline ), bindless_manager );
-			command_buffer->push_constants( pipelines.get( grid_pipeline ), grid_constants { .scene_constants = constants_address } );
-			command_buffer->draw( 4 );
-		}
+			command_buffer->set_viewport( draw_image_extent );
+			command_buffer->set_scissor( draw_image_extent );
 
-		command_buffer->end_rendering();
+			command_buffer->write_timestamp( timestamp_queries[ image_index ],
+											 early ? Timestamps::DRAW_MESHES_EARLY : Timestamps::DRAW_MESHES_LATE );
+			if ( mesh_shading )
+			{
+				OPTICK_GPU_EVENT( "Draw Meshlets" );
+				command_buffer->bind_pipeline( pipelines.get( mesh_pipeline_meshlet ), bindless_manager );
+				const draw_meshes_constants constants { .scene_constants = constants_address,
+														.draws_buffer = draw_buffer_address,
+														.commands_buffer = draw_commands_buffer.get_device_address() + sizeof( uint32_t ) };
+				command_buffer->push_constants( pipelines.get( mesh_pipeline_meshlet ), constants );
+				command_buffer->draw_mesh_tasks_indirect( draw_commands_buffer,
+														  sizeof( uint32_t ) + offsetof( gpu_draw_command, mesh_cmd ),
+														  draw_commands_buffer,
+														  0,
+														  max_draws,
+														  sizeof( gpu_draw_command ) );
+			}
+			else
+			{
+				OPTICK_GPU_EVENT( "Draw Meshes" );
+				command_buffer->bind_pipeline( pipelines.get( mesh_pipeline ), bindless_manager );
+				command_buffer->bind_index_buffer( indices.buffer );
+				const draw_meshes_constants constants { .scene_constants = constants_address,
+														.draws_buffer = draw_buffer_address,
+														.commands_buffer = draw_commands_buffer.get_device_address() + sizeof( uint32_t ) };
+
+				command_buffer->push_constants( pipelines.get( mesh_pipeline ), constants );
+				command_buffer->draw_indexed_indirect( draw_commands_buffer,
+													   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+													   draw_commands_buffer,
+													   0,
+													   max_draws,
+													   sizeof( gpu_draw_command ) );
+			}
+			command_buffer->end_rendering();
+		};
+
+		draw_meshes( true );
+
 		command_buffer->transition_texture( depth_resolved_image.texture,
 											renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL,
 											renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
@@ -717,15 +767,14 @@ int main()
 			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DEPTH_PYRAMID );
 			OPTICK_GPU_EVENT( "Depth Pyramid" );
 			command_buffer->bind_pipeline( pipelines.get( depth_pyramid_pipeline ), bindless_manager );
-			auto extent = depth_resolved_image.texture.get_extent();
+			auto extent = depth_pyramid_extent;
 			for ( int mip = 0; mip < depth_pyramid.mips.size(); ++mip )
 			{
 				command_buffer->transition_texture( depth_pyramid.texture,
 													renderer::Texture::Layout::UNDEFINED,
 													renderer::Texture::Layout::GENERAL,
 													mip );
-				extent.width /= 2;
-				extent.height /= 2;
+
 				const depth_pyramid_constants constants { .depth_in = mip == 0 ? depth_resolved_image.handles.texture_index
 																			   : depth_pyramid.mips[ mip - 1 ].texture_index,
 														  .depth_out = depth_pyramid.mips[ mip ].storage_index,
@@ -737,7 +786,28 @@ int main()
 													renderer::Texture::Layout::GENERAL,
 													renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL,
 													mip );
+
+				extent.width = std::max( extent.width / 2, 1u );
+				extent.height = std::max( extent.height / 2, 1u );
 			}
+		}
+
+		draw_meshes( false );
+
+		{
+			OPTICK_GPU_EVENT( "Draw Grid" );
+			command_buffer->begin_rendering(
+				draw_image_extent,
+				renderer::RenderAttachment { .target = draw_image_view, .resolve_target = draw_resolved_image_view },
+				renderer::RenderAttachment { .target = depth_image_view } );
+
+			command_buffer->set_viewport( draw_image_extent );
+			command_buffer->set_scissor( draw_image_extent );
+			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_GRID );
+			command_buffer->bind_pipeline( pipelines.get( grid_pipeline ), bindless_manager );
+			command_buffer->push_constants( pipelines.get( grid_pipeline ), grid_constants { .scene_constants = constants_address } );
+			command_buffer->draw( 4 );
+			command_buffer->end_rendering();
 		}
 
 		command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_UI );
