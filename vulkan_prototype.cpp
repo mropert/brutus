@@ -421,55 +421,36 @@ int main()
 
 	renderer::PipelineManager pipelines( device, "../shaders/vulkan", bindless_manager );
 
-	renderer::PipelineHandle mesh_pipeline;
-	renderer::PipelineHandle mesh_pipeline_meshlet;
-	renderer::PipelineHandle compute_draws_pipeline;
-	renderer::PipelineHandle depth_pyramid_pipeline;
-	renderer::PipelineHandle grid_pipeline;
+	const auto mesh_pipeline = pipelines.add(
+		renderer::Pipeline::Desc { .color_format = draw_image_format,
+								   .depth_format = depth_image.get_format(),
+								   .push_constants_size = sizeof( push_constants ) },
+		{ { "mesh.vert", renderer::ShaderStage::VERTEX }, { "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
+
+	const auto mesh_pipeline_meshlet = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
+																				 .depth_format = depth_image.get_format(),
+																				 .push_constants_size = sizeof( push_constants ) },
+													  { { "mesh.task", renderer::ShaderStage::TASK },
+														{ "mesh.mesh", renderer::ShaderStage::MESH },
+														{ "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
+
+	const auto compute_draws_pipeline = pipelines.add(
+		renderer::Pipeline::Desc { .push_constants_size = sizeof( compute_draws_constants ) },
+		{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE } } );
+
+	const auto depth_pyramid_pipeline = pipelines.add(
+		renderer::Pipeline::Desc { .push_constants_size = sizeof( depth_pyramid_constants ) },
+		{ { "depth_pyramid.comp", renderer::ShaderStage::COMPUTE } } );
+
+	const auto grid_pipeline = pipelines.add(
+		renderer::Pipeline::Desc { .color_format = draw_image_format,
+								   .depth_format = depth_image.get_format(),
+								   .topology = renderer::Pipeline::PrimitiveTopology::TRIANGLE_STRIP,
+								   .push_constants_size = sizeof( grid_constants ) },
+		{ { "grid.vert", renderer::ShaderStage::VERTEX }, { "grid.frag", renderer::ShaderStage::FRAGMENT } } );
+
 	std::vector<asset> assets;
-	{
-		renderer::ShaderCompiler compiler( "../shaders/vulkan" );
-		tbb::parallel_invoke(
-			[ & ]
-			{
-				mesh_pipeline = pipelines.add(
-					renderer::Pipeline::Desc { .color_format = draw_image_format,
-											   .depth_format = depth_image.get_format(),
-											   .push_constants_size = sizeof( push_constants ) },
-					{ { "mesh.vert", renderer::ShaderStage::VERTEX }, { "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
-			},
-			[ & ]
-			{
-				mesh_pipeline_meshlet = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
-																				  .depth_format = depth_image.get_format(),
-																				  .push_constants_size = sizeof( push_constants ) },
-													   { { "mesh.task", renderer::ShaderStage::TASK },
-														 { "mesh.mesh", renderer::ShaderStage::MESH },
-														 { "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
-			},
-			[ & ]
-			{
-				compute_draws_pipeline = pipelines.add(
-					renderer::Pipeline::Desc { .push_constants_size = sizeof( compute_draws_constants ) },
-					{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE } } );
-			},
-			[ & ]
-			{
-				depth_pyramid_pipeline = pipelines.add(
-					renderer::Pipeline::Desc { .push_constants_size = sizeof( depth_pyramid_constants ) },
-					{ { "depth_pyramid.comp", renderer::ShaderStage::COMPUTE } } );
-			},
-			[ & ]
-			{
-				grid_pipeline = pipelines.add(
-					renderer::Pipeline::Desc { .color_format = draw_image_format,
-											   .depth_format = depth_image.get_format(),
-											   .topology = renderer::Pipeline::PrimitiveTopology::TRIANGLE_STRIP,
-											   .push_constants_size = sizeof( grid_constants ) },
-					{ { "grid.vert", renderer::ShaderStage::VERTEX }, { "grid.frag", renderer::ShaderStage::FRAGMENT } } );
-			},
-			[ & ] { assets.push_back( load_asset( device, bindless_manager, indices, "../assets/player.glb" ) ); } );
-	}
+	assets.push_back( load_asset( device, bindless_manager, indices, "../assets/player.glb" ) );
 	assets.push_back( load_asset( device, bindless_manager, indices, "../assets/sabrina.glb" ) );
 
 	auto constant_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
@@ -504,6 +485,8 @@ int main()
 	};
 	std::array<renderer::raii::StatisticsQuery, renderer::MAX_FRAMES_IN_FLIGHT> statistics_queries { device.create_statistics_query(),
 																									 device.create_statistics_query() };
+
+	pipelines.wait_ready();
 
 	OPTICK_POP();
 
