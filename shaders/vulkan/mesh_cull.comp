@@ -57,7 +57,8 @@ void main()
     if ( draw_id >= draws_count )
         return;
 
-    if (LATE == 0 && uint(visibility_buffer.draws[draw_id]) == 0)
+    const bool was_visible = uint(visibility_buffer.draws[draw_id]) == 1;
+    if (!LATE && !was_visible)
 		return;
 
     const uint mesh_id = draws_buffer.mesh_draws[draw_id].mesh;
@@ -69,7 +70,7 @@ void main()
         visible = visible && dot( scene_constants.frustum[i], vec4( mesh_center, 1 ) ) > -mesh_radius;
     }
 
-	if ( LATE != 0 && visible )
+	if ( LATE && visible )
 	{
 		vec4 aabb;
         const vec3 center = (scene_constants.view_matrix * vec4(mesh_center, 1)).xyz * vec3(1, 1, -1);
@@ -88,7 +89,7 @@ void main()
 		}
 	}
 
-    if ( visible )
+    if ( visible && ( !LATE || !was_visible ) )
     {
         const float dist = distance(scene_constants.camera_position, mesh_center);
         int lod = 3;
@@ -110,7 +111,7 @@ void main()
         commands_buffer.commands[command_id].group_count_z = 1;
     }
 
-    if ( LATE != 0 )
+    if ( LATE )
     {
         visibility_buffer.draws[draw_id] = uint8_t( visible ? 1 : 0 );
     }

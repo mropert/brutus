@@ -472,11 +472,11 @@ int main()
 
 	const auto compute_draws_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .push_constants_size = sizeof( compute_draws_constants ) },
-		{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE, { { "LATE", "0" } } } } );
+		{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE, { { "LATE", "false" } } } } );
 
 	const auto compute_draws_late_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .push_constants_size = sizeof( compute_draws_constants ) },
-		{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE, { { "LATE", "1" } } } } );
+		{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE, { { "LATE", "true" } } } } );
 
 	const auto depth_pyramid_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .push_constants_size = sizeof( depth_pyramid_constants ) },
