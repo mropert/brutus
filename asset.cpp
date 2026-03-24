@@ -291,14 +291,6 @@ class asset_load_job
 		VkFormat format = VK_FORMAT_UNDEFINED;
 	};
 
-	struct mesh_texture
-	{
-		fastgltf::MimeType type = fastgltf::MimeType::None;
-		std::size_t offset = 0;
-		std::size_t size = 0;
-		sdl::raii::Surface image;
-	};
-
 	struct mesh_data
 	{
 		mesh_attribute positions;
@@ -306,12 +298,14 @@ class asset_load_job
 		mesh_attribute tangents;
 		mesh_attribute uvs;
 		mesh_attribute indices;
-		int albedo_idx = -1;
-		int normal_idx = -1;
-		int metallic_roughness_index = -1;
-		pbr_data pbr_data;
 	};
 
+	enum class texture_usage
+	{
+		UNUSED,
+		LINEAR,
+		SRGB
+	};
 
 public:
 	asset_load_job( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& index_buffer, std::filesystem::path path )
@@ -323,6 +317,100 @@ public:
 		, _texture_upload( device, 128 * 1024 * 1024 )
 	{
 	}
+
+	asset run()
+	{
+		OPTICK_EVENT();
+		parse();
+		tbb::parallel_invoke( [ & ]() { upload_meshes(); },
+							  [ & ]
+							  {
+								  decompress_textures();
+								  upload_textures();
+							  } );
+		return finalize();
+	}
+
+private:
+	void add_texture_usage( size_t index, bool sRGB )
+	{
+		if ( _asset.textures[ index ].imageIndex != index )
+		{
+			throw renderer::Error( "Unsupported image/texture indirection" );
+		}
+		const auto usage = sRGB ? texture_usage::SRGB : texture_usage::LINEAR;
+		if ( _textures_usage[ index ] == texture_usage::UNUSED )
+		{
+			_textures_usage[ index ] = usage;
+		}
+		else if ( _textures_usage[ index ] != usage )
+		{
+			throw renderer::Error( "Unsupported mixed use of texture as both LINEAR and SRGB" );
+		}
+	}
+
+	mesh_attribute parse_attribute( size_t accessor_index ) const
+	{
+		const auto& accessor = _asset.accessors[ accessor_index ];
+		const auto& view = _asset.bufferViews[ *accessor.bufferViewIndex ];
+		VkFormat format = VK_FORMAT_UNDEFINED;
+		switch ( accessor.componentType )
+		{
+			case fastgltf::ComponentType::Float:
+			{
+				switch ( accessor.type )
+				{
+					case fastgltf::AccessorType::Scalar:
+						format = VK_FORMAT_R32_SFLOAT;
+						break;
+					case fastgltf::AccessorType::Vec2:
+						format = VK_FORMAT_R32G32_SFLOAT;
+						break;
+					case fastgltf::AccessorType::Vec3:
+						format = VK_FORMAT_R32G32B32_SFLOAT;
+						break;
+					case fastgltf::AccessorType::Vec4:
+						format = VK_FORMAT_R32G32B32A32_SFLOAT;
+						break;
+				}
+				break;
+			}
+			case fastgltf::ComponentType::UnsignedInt:
+			{
+				switch ( accessor.type )
+				{
+					case fastgltf::AccessorType::Scalar:
+						format = VK_FORMAT_R32_UINT;
+						break;
+					case fastgltf::AccessorType::Vec2:
+						format = VK_FORMAT_R32G32_UINT;
+						break;
+					case fastgltf::AccessorType::Vec3:
+						format = VK_FORMAT_R32G32B32_UINT;
+						break;
+					case fastgltf::AccessorType::Vec4:
+						format = VK_FORMAT_R32G32B32A32_UINT;
+						break;
+				}
+				break;
+			}
+			case fastgltf::ComponentType::UnsignedShort:
+			{
+				switch ( accessor.type )
+				{
+					case fastgltf::AccessorType::Scalar:
+						format = VK_FORMAT_R16_UINT;
+						break;
+				}
+				break;
+			}
+		}
+
+		return mesh_attribute { .offset = accessor.byteOffset + view.byteOffset,
+								.stride = view.byteStride.value_or( 0 ),
+								.length = accessor.count,
+								.format = format };
+	};
 
 	void parse()
 	{
@@ -350,112 +438,26 @@ public:
 			_asset = std::move( res.get() );
 		}
 
-		auto make_texture = []( const fastgltf::Asset& asset, std::size_t texture_index )
-		{
-			const auto& texture = asset.textures[ texture_index ];
-			const auto& image = asset.images[ *texture.imageIndex ];
-			const auto& data = std::get<fastgltf::sources::BufferView>( image.data );
-			const auto& view = asset.bufferViews[ data.bufferViewIndex ];
-			return mesh_texture { data.mimeType, view.byteOffset, view.byteLength };
-		};
-
-		auto make_attribute = []( const fastgltf::Asset& asset, std::size_t accessor_index )
-		{
-			const auto& accessor = asset.accessors[ accessor_index ];
-			const auto& view = asset.bufferViews[ *accessor.bufferViewIndex ];
-			VkFormat format = VK_FORMAT_UNDEFINED;
-			switch ( accessor.componentType )
-			{
-				case fastgltf::ComponentType::Float:
-				{
-					switch ( accessor.type )
-					{
-						case fastgltf::AccessorType::Scalar:
-							format = VK_FORMAT_R32_SFLOAT;
-							break;
-						case fastgltf::AccessorType::Vec2:
-							format = VK_FORMAT_R32G32_SFLOAT;
-							break;
-						case fastgltf::AccessorType::Vec3:
-							format = VK_FORMAT_R32G32B32_SFLOAT;
-							break;
-						case fastgltf::AccessorType::Vec4:
-							format = VK_FORMAT_R32G32B32A32_SFLOAT;
-							break;
-					}
-					break;
-				}
-				case fastgltf::ComponentType::UnsignedInt:
-				{
-					switch ( accessor.type )
-					{
-						case fastgltf::AccessorType::Scalar:
-							format = VK_FORMAT_R32_UINT;
-							break;
-						case fastgltf::AccessorType::Vec2:
-							format = VK_FORMAT_R32G32_UINT;
-							break;
-						case fastgltf::AccessorType::Vec3:
-							format = VK_FORMAT_R32G32B32_UINT;
-							break;
-						case fastgltf::AccessorType::Vec4:
-							format = VK_FORMAT_R32G32B32A32_UINT;
-							break;
-					}
-					break;
-				}
-				case fastgltf::ComponentType::UnsignedShort:
-				{
-					switch ( accessor.type )
-					{
-						case fastgltf::AccessorType::Scalar:
-							format = VK_FORMAT_R16_UINT;
-							break;
-					}
-					break;
-				}
-			}
-
-			return mesh_attribute { .offset = accessor.byteOffset + view.byteOffset,
-									.stride = view.byteStride.value_or( 0 ),
-									.length = accessor.count,
-									.format = format };
-		};
+		_materials_usage.resize( _asset.materials.size(), 0 );
+		_textures_usage.resize( _asset.textures.size(), texture_usage::UNUSED );
 
 		for ( const auto& mesh : _asset.meshes )
 		{
-			auto& m = _parsed_meshes.emplace_back();
+			if ( mesh.primitives.size() != 1 )
+			{
+				throw renderer::Error( "Unsupported mesh with multiple primitives" );
+			}
 			if ( mesh.primitives[ 0 ].materialIndex )
 			{
-				const auto& material = _asset.materials[ *mesh.primitives[ 0 ].materialIndex ];
-				if ( material.pbrData.baseColorTexture )
-				{
-					_textures.push_back( make_texture( _asset, material.pbrData.baseColorTexture->textureIndex ) );
-					m.albedo_idx = _textures.size() - 1;
-				}
-				if ( material.normalTexture )
-				{
-					_textures.push_back( make_texture( _asset, material.normalTexture->textureIndex ) );
-					m.normal_idx = _textures.size() - 1;
-				}
-				if ( material.pbrData.metallicRoughnessTexture )
-				{
-					_textures.push_back( make_texture( _asset, material.pbrData.metallicRoughnessTexture->textureIndex ) );
-					m.metallic_roughness_index = _textures.size() - 1;
-				}
-				m.pbr_data.base_color.x = material.pbrData.baseColorFactor.x();
-				m.pbr_data.base_color.y = material.pbrData.baseColorFactor.y();
-				m.pbr_data.base_color.z = material.pbrData.baseColorFactor.z();
-				m.pbr_data.base_color.w = material.pbrData.baseColorFactor.w();
-				m.pbr_data.metalness = material.pbrData.metallicFactor;
-				m.pbr_data.roughness = material.pbrData.roughnessFactor;
+				_materials_usage[ *mesh.primitives[ 0 ].materialIndex ] = 1;
 			}
+			auto& m = _parsed_meshes.emplace_back();
 
 			for ( const auto& attribute : mesh.primitives[ 0 ].attributes )
 			{
 				if ( attribute.name == "POSITION" )
 				{
-					m.positions = make_attribute( _asset, attribute.accessorIndex );
+					m.positions = parse_attribute( attribute.accessorIndex );
 					if ( m.positions.format != VK_FORMAT_R32G32B32_SFLOAT )
 					{
 						throw renderer::Error( "Unsupported format for mesh positions" );
@@ -463,7 +465,7 @@ public:
 				}
 				else if ( attribute.name == "NORMAL" )
 				{
-					m.normals = make_attribute( _asset, attribute.accessorIndex );
+					m.normals = parse_attribute( attribute.accessorIndex );
 					if ( m.normals.format != VK_FORMAT_R32G32B32_SFLOAT )
 					{
 						throw renderer::Error( "Unsupported format for mesh normals" );
@@ -471,7 +473,7 @@ public:
 				}
 				else if ( attribute.name == "TANGENT" )
 				{
-					m.tangents = make_attribute( _asset, attribute.accessorIndex );
+					m.tangents = parse_attribute( attribute.accessorIndex );
 					if ( m.tangents.format != VK_FORMAT_R32G32B32A32_SFLOAT )
 					{
 						throw renderer::Error( "Unsupported format for mesh tangents" );
@@ -479,7 +481,7 @@ public:
 				}
 				else if ( attribute.name == "TEXCOORD_0" )
 				{
-					m.uvs = make_attribute( _asset, attribute.accessorIndex );
+					m.uvs = parse_attribute( attribute.accessorIndex );
 					if ( m.uvs.format != VK_FORMAT_R32G32_SFLOAT )
 					{
 						throw renderer::Error( "Unsupported format for mesh texcoords" );
@@ -488,16 +490,36 @@ public:
 			}
 			if ( mesh.primitives[ 0 ].indicesAccessor )
 			{
-				m.indices = make_attribute( _asset, *mesh.primitives[ 0 ].indicesAccessor );
+				m.indices = parse_attribute( *mesh.primitives[ 0 ].indicesAccessor );
 				if ( m.indices.format != VK_FORMAT_R16_UINT && m.indices.format != VK_FORMAT_R32_UINT )
 				{
 					throw renderer::Error( "Unsupported format for mesh texcoords" );
 				}
 			}
 		}
-
 		_meshes.resize( _parsed_meshes.size() );
-		_materials.resize( _parsed_meshes.size() );
+
+		_materials.resize( _asset.materials.size() );
+		for ( int i = 0; i < _materials_usage.size(); ++i )
+		{
+			if ( _materials_usage[ i ] )
+			{
+				const auto& material = _asset.materials[ i ];
+				if ( material.pbrData.baseColorTexture )
+				{
+					add_texture_usage( material.pbrData.baseColorTexture->textureIndex, true );
+				}
+				if ( material.normalTexture )
+				{
+					add_texture_usage( material.normalTexture->textureIndex, false );
+				}
+				if ( material.pbrData.metallicRoughnessTexture )
+				{
+					add_texture_usage( material.pbrData.metallicRoughnessTexture->textureIndex, false );
+				}
+				// We ignore emissive for now
+			}
+		}
 	}
 
 	void upload_meshes()
@@ -731,69 +753,50 @@ public:
 	{
 		OPTICK_EVENT();
 		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
+		_images.resize( _textures_usage.size() );
 
-		tbb::parallel_for(
-			0uz,
-			_textures.size(),
-			[ & ]( size_t index )
-			{
-				OPTICK_EVENT( "decompress_tex" );
-				_textures[ index ].image.reset(
-					IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + _textures[ index ].offset, _textures[ index ].size ), true ) );
-				if ( !_textures[ index ].image )
-				{
-					throw renderer::Error( SDL_GetError() );
-				}
-				else if ( _textures[ index ].image->format == SDL_PIXELFORMAT_INDEX8 )
-				{
-					sdl::raii::Surface converted_image( SDL_ConvertSurface( _textures[ index ].image.get(), SDL_PIXELFORMAT_RGBA32 ) );
-					if ( !converted_image )
-					{
-						throw renderer::Error( SDL_GetError() );
-					}
-					_textures[ index ].image = std::move( converted_image );
-				}
-			} );
+		tbb::parallel_for( 0uz,
+						   _textures_usage.size(),
+						   [ & ]( size_t index )
+						   {
+							   OPTICK_EVENT( "decompress_tex" );
+							   if ( _textures_usage[ index ] != texture_usage::UNUSED )
+							   {
+								   const auto& data = std::get<fastgltf::sources::BufferView>( _asset.images[ index ].data );
+								   const auto& view = _asset.bufferViews[ data.bufferViewIndex ];
+								   _images[ index ].reset(
+									   IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + view.byteOffset, view.byteLength ), true ) );
+								   if ( !_images[ index ] )
+								   {
+									   throw renderer::Error( SDL_GetError() );
+								   }
+								   else if ( _images[ index ]->format == SDL_PIXELFORMAT_INDEX8 )
+								   {
+									   sdl::raii::Surface converted_image(
+										   SDL_ConvertSurface( _images[ index ].get(), SDL_PIXELFORMAT_RGBA32 ) );
+									   if ( !converted_image )
+									   {
+										   throw renderer::Error( SDL_GetError() );
+									   }
+									   _images[ index ] = std::move( converted_image );
+								   }
+							   }
+						   } );
 	}
 
-	void upload_materials()
+	void upload_textures()
 	{
 		OPTICK_EVENT();
-
-		std::size_t alloc_size = 0;
-		for ( auto& tex : _textures )
-		{
-			alloc_size += tex.image->w * tex.image->h * get_format_size( sdl_to_vulkan_format( sdl_gpu_format( tex.image->format ) ) );
-		}
-
+		_textures.resize( _textures_usage.size() );
 		std::size_t offset = 0;
-		for ( int i = 0; i < _meshes.size(); ++i )
+		for ( int i = 0; i < _textures_usage.size(); ++i )
 		{
-			const auto& parsed_mesh = _parsed_meshes[ i ];
-			auto& material = _materials[ i ];
-
-			auto tex = make_image_from_surface( _device, *_textures[ parsed_mesh.albedo_idx ].image, true );
-			_texture_upload.queue( *_textures[ parsed_mesh.albedo_idx ].image, tex );
-			material.gpu_data.albedo_texture_index = _bindless_manager.add_texture( std::move( tex ) ).handles.texture_index;
-
-			if ( parsed_mesh.normal_idx != -1 )
+			if ( _textures_usage[ i ] != texture_usage::UNUSED )
 			{
-				tex = make_image_from_surface( _device, *_textures[ parsed_mesh.normal_idx ].image, false );
-				_texture_upload.queue( *_textures[ parsed_mesh.normal_idx ].image, tex );
-				material.gpu_data.normal_texture_index = _bindless_manager.add_texture( std::move( tex ) ).handles.texture_index;
+				auto tex = make_image_from_surface( _device, *_images[ i ], _textures_usage[ i ] == texture_usage::SRGB );
+				_texture_upload.queue( *_images[ i ], tex );
+				_textures[ i ] = _bindless_manager.add_texture( std::move( tex ) );
 			}
-
-			if ( parsed_mesh.metallic_roughness_index != -1 )
-			{
-				tex = make_image_from_surface( _device, *_textures[ parsed_mesh.metallic_roughness_index ].image, false );
-				_texture_upload.queue( *_textures[ parsed_mesh.metallic_roughness_index ].image, tex );
-				material.gpu_data.metallic_roughness_texture_index = _bindless_manager.add_texture( std::move( tex ) )
-																		 .handles.texture_index;
-			}
-
-			material.gpu_data.pbr_data = parsed_mesh.pbr_data;
-
-			material.handle = _bindless_manager.add_buffer_entry( material.gpu_data );
 		}
 
 		_texture_upload.submit();
@@ -815,6 +818,38 @@ public:
 														 sizeof( glm::vec4 ) );
 
 		gpu_upload_job::wait_all_done( { &_mesh_upload, &_texture_upload } );
+
+		for ( int i = 0; i < _materials_usage.size(); ++i )
+		{
+			if ( _materials_usage[ i ] )
+			{
+				auto& material = _materials[ i ];
+				material.gpu_data.albedo_texture_index = _textures[ _asset.materials[ i ].pbrData.baseColorTexture->textureIndex ]
+															 .handles.texture_index;
+
+				if ( _asset.materials[ i ].normalTexture )
+				{
+					material.gpu_data.normal_texture_index = _textures[ _asset.materials[ i ].normalTexture->textureIndex ]
+																 .handles.texture_index;
+				}
+
+				if ( _asset.materials[ i ].pbrData.metallicRoughnessTexture )
+				{
+					material.gpu_data.metallic_roughness_texture_index = _textures[ _asset.materials[ i ]
+																						.pbrData.metallicRoughnessTexture->textureIndex ]
+																			 .handles.texture_index;
+				}
+				material.gpu_data.pbr_data.base_color.x = _asset.materials[ i ].pbrData.baseColorFactor.x();
+				material.gpu_data.pbr_data.base_color.y = _asset.materials[ i ].pbrData.baseColorFactor.y();
+				material.gpu_data.pbr_data.base_color.z = _asset.materials[ i ].pbrData.baseColorFactor.z();
+				material.gpu_data.pbr_data.base_color.w = _asset.materials[ i ].pbrData.baseColorFactor.w();
+				material.gpu_data.pbr_data.metalness = _asset.materials[ i ].pbrData.metallicFactor;
+				material.gpu_data.pbr_data.roughness = _asset.materials[ i ].pbrData.roughnessFactor;
+
+				material.handle = _bindless_manager.add_buffer_entry( material.gpu_data );
+			}
+		}
+
 		return asset { std::move( _meshes ),
 					   std::move( _materials ),
 					   glm::vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ) };
@@ -830,22 +865,18 @@ private:
 	gpu_upload_job _mesh_upload;
 	gpu_upload_job _texture_upload;
 	fastgltf::Asset _asset;
-	std::vector<mesh_texture> _textures;
+	std::vector<texture_usage> _textures_usage;
+	std::vector<uint8_t> _materials_usage; // Could be a dynamic bitset
 	std::vector<mesh_data> _parsed_meshes;
-	std::vector<mesh> _meshes;
+	std::vector<sdl::raii::Surface> _images;
+	std::vector<renderer::BindlessTexture> _textures;
 	std::vector<material> _materials;
+	std::vector<mesh> _meshes;
 };
 
 asset load_asset( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& index_buffer, std::filesystem::path path )
 {
 	OPTICK_EVENT();
 	asset_load_job job( device, bindless_manager, index_buffer, std::move( path ) );
-	job.parse();
-	tbb::parallel_invoke( [ & ]() { job.upload_meshes(); },
-						  [ & ]
-						  {
-							  job.decompress_textures();
-							  job.upload_materials();
-						  } );
-	return job.finalize();
+	return job.run();
 }
