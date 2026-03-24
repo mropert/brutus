@@ -499,7 +499,7 @@ private:
 			}
 		}
 
-		_images_usage.resize( _asset.textures.size(), 0 );
+		_images_usage.resize( _asset.images.size(), 0 );
 		_textures_usage.resize( _asset.textures.size(), texture_usage::UNUSED );
 		for ( int i = 0; i < _materials_usage.size(); ++i )
 		{
