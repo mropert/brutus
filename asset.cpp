@@ -334,13 +334,15 @@ public:
 private:
 	void add_texture_usage( size_t index, bool sRGB )
 	{
-		if ( _asset.textures[ index ].imageIndex != index )
-		{
-			throw renderer::Error( "Unsupported image/texture indirection" );
-		}
 		const auto usage = sRGB ? texture_usage::SRGB : texture_usage::LINEAR;
 		if ( _textures_usage[ index ] == texture_usage::UNUSED )
 		{
+			const auto image_index = *_asset.textures[ index ].imageIndex;
+			if ( _images_usage[ image_index ] )
+			{
+				throw renderer::Error( "Unsupported multiple texture references to the same image" );
+			}
+			_images_usage[ image_index ] = 1;
 			_textures_usage[ index ] = usage;
 		}
 		else if ( _textures_usage[ index ] != usage )
@@ -439,7 +441,6 @@ private:
 		}
 
 		_materials_usage.resize( _asset.materials.size(), 0 );
-		_textures_usage.resize( _asset.textures.size(), texture_usage::UNUSED );
 
 		for ( const auto& mesh : _asset.meshes )
 		{
@@ -497,9 +498,9 @@ private:
 				}
 			}
 		}
-		_meshes.resize( _parsed_meshes.size() );
 
-		_materials.resize( _asset.materials.size() );
+		_images_usage.resize( _asset.textures.size(), 0 );
+		_textures_usage.resize( _asset.textures.size(), texture_usage::UNUSED );
 		for ( int i = 0; i < _materials_usage.size(); ++i )
 		{
 			if ( _materials_usage[ i ] )
@@ -524,6 +525,7 @@ private:
 
 	void upload_meshes()
 	{
+		_meshes.resize( _parsed_meshes.size() );
 		for ( int i = 0; i < _parsed_meshes.size(); ++i )
 		{
 			upload_mesh( i );
@@ -753,14 +755,14 @@ private:
 	{
 		OPTICK_EVENT();
 		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
-		_images.resize( _textures_usage.size() );
+		_images.resize( _images_usage.size() );
 
 		tbb::parallel_for( 0uz,
-						   _textures_usage.size(),
+						   _images_usage.size(),
 						   [ & ]( size_t index )
 						   {
 							   OPTICK_EVENT( "decompress_tex" );
-							   if ( _textures_usage[ index ] != texture_usage::UNUSED )
+							   if ( _images_usage[ index ] )
 							   {
 								   const auto& data = std::get<fastgltf::sources::BufferView>( _asset.images[ index ].data );
 								   const auto& view = _asset.bufferViews[ data.bufferViewIndex ];
@@ -793,8 +795,9 @@ private:
 		{
 			if ( _textures_usage[ i ] != texture_usage::UNUSED )
 			{
-				auto tex = make_image_from_surface( _device, *_images[ i ], _textures_usage[ i ] == texture_usage::SRGB );
-				_texture_upload.queue( *_images[ i ], tex );
+				const auto image_index = *_asset.textures[ i ].imageIndex;
+				auto tex = make_image_from_surface( _device, *_images[ image_index ], _textures_usage[ i ] == texture_usage::SRGB );
+				_texture_upload.queue( *_images[ image_index ], tex );
 				_textures[ i ] = _bindless_manager.add_texture( std::move( tex ) );
 			}
 		}
@@ -819,6 +822,7 @@ private:
 
 		gpu_upload_job::wait_all_done( { &_mesh_upload, &_texture_upload } );
 
+		_materials.resize( _asset.materials.size() );
 		for ( int i = 0; i < _materials_usage.size(); ++i )
 		{
 			if ( _materials_usage[ i ] )
@@ -865,6 +869,7 @@ private:
 	gpu_upload_job _mesh_upload;
 	gpu_upload_job _texture_upload;
 	fastgltf::Asset _asset;
+	std::vector<uint8_t> _images_usage; // Could be a dynamic bitset
 	std::vector<texture_usage> _textures_usage;
 	std::vector<uint8_t> _materials_usage; // Could be a dynamic bitset
 	std::vector<mesh_data> _parsed_meshes;
