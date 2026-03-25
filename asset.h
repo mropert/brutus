@@ -75,6 +75,7 @@ struct mesh
 {
 	renderer::raii::Buffer data_buffer; // vertex + meshlets
 	mesh_handle handle;
+	uint32_t material_index;
 	// Data below is only for debugging purposes, a CPU side copy of the GPU-side descriptor
 	gpu_mesh gpu_data;
 };

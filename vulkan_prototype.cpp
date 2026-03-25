@@ -453,7 +453,7 @@ int main()
 														 .mips = calc_mip_levels( depth_pyramid_extent ) } ),
 		true );
 
-	index_buffer indices( device, 1024 * 1024 );
+	index_buffer indices( device, 128 * 1024 * 1024 );
 
 	renderer::PipelineManager pipelines( device, "../shaders/vulkan", bindless_manager );
 
@@ -492,6 +492,7 @@ int main()
 	std::vector<asset> assets;
 	assets.push_back( load_asset( device, bindless_manager, indices, "../assets/player.glb" ) );
 	assets.push_back( load_asset( device, bindless_manager, indices, "../assets/sabrina.glb" ) );
+	//assets.push_back( load_asset( device, bindless_manager, indices, "../../niagara_bistro/bistrox.gltf" ) );
 
 	auto constant_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 												  sizeof( std::array<scene_constants, renderer::MAX_FRAMES_IN_FLIGHT> ),
@@ -631,7 +632,7 @@ int main()
 				{
 					draw_buffer[ draw_count ].position = pos;
 					draw_buffer[ draw_count ].mesh = assets[ asset ].meshes[ i ].handle;
-					draw_buffer[ draw_count ].material = assets[ asset ].materials[ i ].handle;
+					draw_buffer[ draw_count ].material = assets[ asset ].materials[ assets[ asset ].meshes[ i ].material_index ].handle;
 					++draw_count;
 				}
 			}

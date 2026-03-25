@@ -182,7 +182,7 @@ public:
 	{
 		assert( _state == state::UPLOADING );
 		assert( size < _size );
-		assert( offset + size < buffer.get_size() );
+		assert( offset + size <= buffer.get_size() );
 		if ( size + _offset > _size )
 		{
 			flush_full();
@@ -309,6 +309,15 @@ class asset_load_job
 		mesh_attribute indices;
 	};
 
+	struct mesh_upload_data
+	{
+		std::vector<mesh_vertex> vertices;
+		std::span<const uint32_t> indices;
+		std::vector<uint32_t> lod_indices;
+		std::array<uint32_t, 3> indices_per_lod;
+		std::vector<uint32_t> expanded_indices;
+	};
+
 	enum class texture_usage
 	{
 		UNUSED,
@@ -337,12 +346,17 @@ public:
 	{
 		OPTICK_EVENT();
 		parse();
-		tbb::parallel_invoke( [ & ]() { upload_meshes(); },
-							  [ & ]
-							  {
-								  decompress_textures();
-								  upload_textures();
-							  } );
+		tbb::parallel_invoke(
+			[ & ]()
+			{
+				prepare_meshes();
+				upload_meshes();
+			},
+			[ & ]
+			{
+				decompress_textures();
+				upload_textures();
+			} );
 		return finalize();
 	}
 
@@ -618,37 +632,34 @@ private:
 		}
 	}
 
-	void upload_meshes()
+	void prepare_meshes()
 	{
-		_meshes.resize( _parsed_meshes.size() );
-		for ( int i = 0; i < _parsed_meshes.size(); ++i )
-		{
-			upload_mesh( i );
-		}
-		_mesh_upload.submit();
+		OPTICK_EVENT();
+		_mesh_upload_data.resize( _parsed_meshes.size() );
+		tbb::parallel_for( 0zu, _parsed_meshes.size(), [ this ]( size_t index ) { prepare_mesh( index ); } );
 	}
 
-	void upload_mesh( int mesh_index )
+	void prepare_mesh( uint32_t mesh_index )
 	{
 		OPTICK_EVENT();
 		const auto& parsed_mesh = _parsed_meshes[ mesh_index ];
+		auto& upload_data = _mesh_upload_data[ mesh_index ];
 
 		// Some models pack indices in u16 but we use u32 everywhere for now so we'll just convert them
 		// It's only an issue for legacy rendering, meshlets do not care either way
-		std::vector<uint32_t> expanded_indices;
 		if ( parsed_mesh.indices.format == VK_FORMAT_R16_UINT )
 		{
-			expanded_indices.reserve( parsed_mesh.indices.length );
+			upload_data.expanded_indices.reserve( parsed_mesh.indices.length );
 			const std::span indices(
 				reinterpret_cast<const uint16_t*>( _buffers[ parsed_mesh.indices.buffer_index ].data.data() + parsed_mesh.indices.offset ),
 				parsed_mesh.indices.length );
-			std::copy( begin( indices ), end( indices ), std::back_inserter( expanded_indices ) );
+			std::copy( begin( indices ), end( indices ), std::back_inserter( upload_data.expanded_indices ) );
 		}
-		const std::span indices = expanded_indices.empty()
+		upload_data.indices = upload_data.expanded_indices.empty()
 			? std::span( reinterpret_cast<const uint32_t*>( _buffers[ parsed_mesh.indices.buffer_index ].data.data()
 															+ parsed_mesh.indices.offset ),
 						 parsed_mesh.indices.length )
-			: expanded_indices;
+			: upload_data.expanded_indices;
 
 		const std::span positions(
 			reinterpret_cast<const glm::vec3*>( _buffers[ parsed_mesh.positions.buffer_index ].data.data() + parsed_mesh.positions.offset ),
@@ -669,7 +680,7 @@ private:
 											 .normals = normals,
 											 .uvs = uvs,
 											 .tangents = generated_tangents,
-											 .indices = indices };
+											 .indices = upload_data.indices };
 			const SMikkTSpaceContext context { const_cast<SMikkTSpaceInterface*>( &MikkTSpace::interface ), &user_data };
 			if ( !genTangSpaceDefault( &context ) )
 			{
@@ -683,34 +694,31 @@ private:
 						 parsed_mesh.tangents.length )
 			: generated_tangents;
 
-		std::vector<mesh_vertex> vertex_data;
 		{
 			OPTICK_EVENT( "repack_vertices" );
-			vertex_data.reserve( parsed_mesh.positions.length );
+			upload_data.vertices.reserve( parsed_mesh.positions.length );
 
 			for ( int v = 0; v < parsed_mesh.positions.length; ++v )
 			{
-				vertex_data.emplace_back( positions[ v ], uvs[ v ].x, normals[ v ], uvs[ v ].y, tangents[ v ] );
+				upload_data.vertices.emplace_back( positions[ v ], uvs[ v ].x, normals[ v ], uvs[ v ].y, tangents[ v ] );
 			}
 		}
 
-		std::vector<uint32_t> lod_indices;
-		std::array<uint32_t, 3> indices_per_lod;
 		{
 			OPTICK_EVENT( "lod_generation" );
 			constexpr std::array<float, 3> lod_indices_factor { { 0.2, 0.05, 0.01 } };
 			constexpr std::array<float, 3> lod_error_factor { { 0.01, 0.04, 0.1 } };
-			std::vector<uint32_t> buffer( indices.size() );
-			for ( int lod = 0; lod < indices_per_lod.size(); ++lod )
+			std::vector<uint32_t> buffer( upload_data.indices.size() );
+			for ( int lod = 0; lod < upload_data.indices_per_lod.size(); ++lod )
 			{
 				const float attr_weights[ 3 ] = { 0.5f, 0.5f, 0.5f };
 				const uint32_t size = meshopt_simplifyWithAttributes( buffer.data(),
-																	  indices.data(),
-																	  indices.size(),
-																	  &vertex_data.front().position.x,
-																	  vertex_data.size(),
+																	  upload_data.indices.data(),
+																	  upload_data.indices.size(),
+																	  &upload_data.vertices.front().position.x,
+																	  upload_data.vertices.size(),
 																	  sizeof( mesh_vertex ),
-																	  &vertex_data.front().normal.x,
+																	  &upload_data.vertices.front().normal.x,
 																	  sizeof( mesh_vertex ),
 																	  attr_weights,
 																	  3,
@@ -720,9 +728,9 @@ private:
 																	  0,
 																	  nullptr );
 
-				meshopt_optimizeVertexCache( buffer.data(), buffer.data(), size, vertex_data.size() );
-				indices_per_lod[ lod ] = size;
-				lod_indices.insert( end( lod_indices ), buffer.data(), buffer.data() + size );
+				meshopt_optimizeVertexCache( buffer.data(), buffer.data(), size, upload_data.vertices.size() );
+				upload_data.indices_per_lod[ lod ] = size;
+				upload_data.lod_indices.insert( end( upload_data.lod_indices ), buffer.data(), buffer.data() + size );
 			}
 		}
 
@@ -788,11 +796,27 @@ private:
 			}
 		}
 #endif
+	}
 
+	void upload_meshes()
+	{
+		OPTICK_EVENT();
+		_meshes.resize( _parsed_meshes.size() );
+		for ( int i = 0; i < _parsed_meshes.size(); ++i )
+		{
+			upload_mesh( i );
+		}
+		_mesh_upload.submit();
+	}
+
+	void upload_mesh( int mesh_index )
+	{
+		OPTICK_EVENT();
+		const auto& upload_data = _mesh_upload_data[ mesh_index ];
 		auto& mesh = _meshes[ mesh_index ];
 
-		const auto bounds = meshopt_computeSphereBounds( &vertex_data[ 0 ].position.x,
-														 vertex_data.size(),
+		const auto bounds = meshopt_computeSphereBounds( &upload_data.vertices[ 0 ].position.x,
+														 upload_data.vertices.size(),
 														 sizeof( mesh_vertex ),
 														 nullptr,
 														 0 );
@@ -802,33 +826,35 @@ private:
 		mesh.gpu_data.bounding_sphere.w = bounds.radius;
 
 		// Index buffer
-		uint32_t index_offset = _index_buffer.size.fetch_add( indices.size() );
-		_mesh_upload.queue( indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
+		uint32_t index_offset = _index_buffer.size.fetch_add( upload_data.indices.size() );
+		_mesh_upload.queue( upload_data.indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
 		mesh.gpu_data.lods[ 0 ].indices_offset = index_offset;
-		mesh.gpu_data.lods[ 0 ].indices_count = parsed_mesh.indices.length;
+		mesh.gpu_data.lods[ 0 ].indices_count = upload_data.indices.size();
 
-		index_offset = _index_buffer.size.fetch_add( lod_indices.size() );
-		_mesh_upload.queue( lod_indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
+		index_offset = _index_buffer.size.fetch_add( upload_data.lod_indices.size() );
+		_mesh_upload.queue( upload_data.lod_indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
 		for ( int lod = 1; lod < mesh.gpu_data.lods.size(); ++lod )
 		{
 			mesh.gpu_data.lods[ lod ].indices_offset = mesh.gpu_data.lods[ lod - 1 ].indices_offset
 				+ mesh.gpu_data.lods[ lod - 1 ].indices_count;
-			mesh.gpu_data.lods[ lod ].indices_count = indices_per_lod[ lod - 1 ];
+			mesh.gpu_data.lods[ lod ].indices_count = upload_data.indices_per_lod[ lod - 1 ];
 		}
 
-#if 0
 		// Data buffer (vertices + meshlets)
-		auto data_buffer_size = vertex_data.size() * sizeof( mesh_vertex );
+		auto data_buffer_size = upload_data.vertices.size() * sizeof( mesh_vertex );
+#if 0
 		data_buffer_size += meshlets.size() * sizeof( gpu_meshlet );
 		data_buffer_size += meshlet_vertices.size() * sizeof( uint32_t );
 		data_buffer_size += meshlet_triangles.size() * sizeof( uint8_t );
+#endif
 
 		mesh.data_buffer = _device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
 													  | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 												  data_buffer_size );
 
 		mesh.gpu_data.vertices = mesh.data_buffer.get_device_address();
-		_mesh_upload.queue( vertex_data, mesh.data_buffer );
+		_mesh_upload.queue( upload_data.vertices, mesh.data_buffer );
+#if 0
 		auto offset = vertex_data.size() * sizeof( mesh_vertex );
 
 		mesh.gpu_data.meshlets = mesh.data_buffer.get_device_address() + offset;
@@ -855,6 +881,7 @@ private:
 #endif
 
 		mesh.handle = _bindless_manager.add_buffer_entry( mesh.gpu_data );
+		mesh.material_index = *_asset.meshes[ mesh_index ].primitives[ 0 ].materialIndex;
 	}
 
 	void decompress_textures()
@@ -960,6 +987,8 @@ private:
 			}
 		}
 
+		// TODO: remove unused meshes and materials
+
 		return asset { std::move( _meshes ),
 					   std::move( _materials ),
 					   glm::vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ) };
@@ -980,6 +1009,7 @@ private:
 	std::vector<texture_usage> _textures_usage;
 	std::vector<uint8_t> _materials_usage; // Could be a dynamic bitset
 	std::vector<mesh_data> _parsed_meshes;
+	std::vector<mesh_upload_data> _mesh_upload_data;
 	std::vector<data_source> _buffers;
 	std::vector<sdl::raii::Surface> _images;
 	std::vector<renderer::BindlessTexture> _textures;
