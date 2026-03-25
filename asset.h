@@ -87,11 +87,20 @@ struct material
 	gpu_material gpu_data;
 };
 
+struct scene_node
+{
+	std::vector<uint32_t> children;	// Use small vector once we get one
+	glm::mat4 transform;
+	uint32_t mesh = -1;
+};
+
 struct asset
 {
 	std::vector<mesh> meshes;
 	std::vector<material> materials;
 	glm::vec4 bounding_sphere;
+	std::vector<scene_node> nodes;
+	std::vector<uint32_t> scene_roots;
 };
 
 asset load_asset( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& index_buffer, std::filesystem::path path );

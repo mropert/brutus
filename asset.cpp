@@ -2,6 +2,7 @@
 
 #include <SDL3_image/SDL_image.h>
 #include <fastgltf/core.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <istream>
 #include <meshoptimizer.h>
 #include <mikktspace.h>
@@ -89,6 +90,33 @@ renderer::raii::Texture make_image_from_surface( renderer::Device& device, const
 	return device.create_texture( renderer::Texture::Desc { static_cast<renderer::Texture::Format>( format ),
 															TexUsage::TRANSFER_DST | TexUsage::SAMPLED,
 															renderer::Extent2D( surface.w, surface.h ) } );
+}
+
+
+namespace
+{
+	template <class... Ts>
+	struct overloads : Ts...
+	{
+		using Ts::operator()...;
+	};
+
+	template <typename T>
+	class attribute_accessor
+	{
+	public:
+		attribute_accessor( const std::byte* buffer, size_t count, uint32_t stride )
+			: _stride( stride != 0 ? stride : sizeof( T ) )
+			, _data( buffer, count * _stride )
+		{
+		}
+
+		const T& get( int index ) const { return reinterpret_cast<const T&>( _data[ index * _stride ] ); }
+
+	private:
+		uint32_t _stride;
+		std::span<const std::byte> _data;
+	};
 }
 
 namespace MikkTSpace
@@ -281,12 +309,6 @@ private:
 	renderer::raii::Fence _upload_fence;
 	uint32_t _offset = 0;
 	state _state = state::UPLOADING;
-};
-
-template <class... Ts>
-struct overloads : Ts...
-{
-	using Ts::operator()...;
 };
 
 class asset_load_job
@@ -637,6 +659,12 @@ private:
 		OPTICK_EVENT();
 		_mesh_upload_data.resize( _parsed_meshes.size() );
 		tbb::parallel_for( 0zu, _parsed_meshes.size(), [ this ]( size_t index ) { prepare_mesh( index ); } );
+#if 0
+		for ( int i = 0; i < _parsed_meshes.size(); ++i )
+		{
+			prepare_mesh( i );
+		}
+#endif
 	}
 
 	void prepare_mesh( uint32_t mesh_index )
@@ -661,19 +689,22 @@ private:
 						 parsed_mesh.indices.length )
 			: upload_data.expanded_indices;
 
-		const std::span positions(
-			reinterpret_cast<const glm::vec3*>( _buffers[ parsed_mesh.positions.buffer_index ].data.data() + parsed_mesh.positions.offset ),
-			parsed_mesh.positions.length );
-		const std::span normals(
-			reinterpret_cast<const glm::vec3*>( _buffers[ parsed_mesh.normals.buffer_index ].data.data() + parsed_mesh.normals.offset ),
-			parsed_mesh.normals.length );
-		const std::span uvs(
-			reinterpret_cast<const glm::vec2*>( _buffers[ parsed_mesh.uvs.buffer_index ].data.data() + parsed_mesh.uvs.offset ),
-			parsed_mesh.uvs.length );
+		const attribute_accessor<glm::vec3> positions( _buffers[ parsed_mesh.positions.buffer_index ].data.data()
+														   + parsed_mesh.positions.offset,
+													   parsed_mesh.positions.length,
+													   parsed_mesh.positions.stride );
+		const attribute_accessor<glm::vec3> normals( _buffers[ parsed_mesh.normals.buffer_index ].data.data() + parsed_mesh.normals.offset,
+													 parsed_mesh.normals.length,
+													 parsed_mesh.normals.stride );
+		const attribute_accessor<glm::vec2> uvs( _buffers[ parsed_mesh.uvs.buffer_index ].data.data() + parsed_mesh.uvs.offset,
+												 parsed_mesh.uvs.length,
+												 parsed_mesh.uvs.stride );
 
 		std::vector<glm::vec4> generated_tangents;
+		auto tangents_stride = parsed_mesh.tangents.stride;
 		if ( !parsed_mesh.tangents.length )
 		{
+#if 0
 			OPTICK_EVENT( "generate_tangents" );
 			generated_tangents.resize( positions.size() );
 			MikkTSpace::UserData user_data { .positions = positions,
@@ -686,13 +717,17 @@ private:
 			{
 				throw renderer::Error( "Failed to generate tangets" );
 			}
+			tangents_stride = sizeof( glm::vec4 );
+#else
+			throw renderer::Error( "Tangent generation isn't supported" );
+#endif
 		}
 
-		const auto tangents = parsed_mesh.tangents.length
-			? std::span( reinterpret_cast<const glm::vec4*>( _buffers[ parsed_mesh.tangents.buffer_index ].data.data()
-															 + parsed_mesh.tangents.offset ),
-						 parsed_mesh.tangents.length )
-			: generated_tangents;
+		const attribute_accessor<glm::vec4> tangents(
+			generated_tangents.empty() ? _buffers[ parsed_mesh.tangents.buffer_index ].data.data() + parsed_mesh.tangents.offset
+									   : reinterpret_cast<const std::byte*>( generated_tangents.data() ),
+			parsed_mesh.tangents.length,
+			tangents_stride );
 
 		{
 			OPTICK_EVENT( "repack_vertices" );
@@ -700,7 +735,8 @@ private:
 
 			for ( int v = 0; v < parsed_mesh.positions.length; ++v )
 			{
-				upload_data.vertices.emplace_back( positions[ v ], uvs[ v ].x, normals[ v ], uvs[ v ].y, tangents[ v ] );
+				const auto& uv = uvs.get( v );
+				upload_data.vertices.emplace_back( positions.get( v ), uv.x, normals.get( v ), uv.y, tangents.get( v ) );
 			}
 		}
 
@@ -988,10 +1024,64 @@ private:
 		}
 
 		// TODO: remove unused meshes and materials
+		const overloads make_transform(
+			[]( const fastgltf::TRS& TRS )
+			{
+				glm::mat4 m( 1.f );
+				m = glm::translate( m, { TRS.translation.x(), TRS.translation.y(), TRS.translation.z() } );
+				m = glm::rotate( m, TRS.rotation.x(), glm::vec3( 1, 0, 0 ) );
+				m = glm::rotate( m, TRS.rotation.y(), glm::vec3( 0, 1, 0 ) );
+				m = glm::rotate( m, TRS.rotation.z(), glm::vec3( 0, 0, 1 ) );
+				m = glm::scale( m, { TRS.scale.x(), TRS.scale.y(), TRS.scale.z() } );
+				return m;
+			},
+			[]( const fastgltf::math::fmat4x4& matrix )
+			{
+				return glm::mat4( matrix[ 0 ][ 0 ],
+								  matrix[ 0 ][ 1 ],
+								  matrix[ 0 ][ 2 ],
+								  matrix[ 0 ][ 3 ],
+								  matrix[ 1 ][ 0 ],
+								  matrix[ 1 ][ 1 ],
+								  matrix[ 1 ][ 2 ],
+								  matrix[ 1 ][ 3 ],
+								  matrix[ 2 ][ 0 ],
+								  matrix[ 2 ][ 1 ],
+								  matrix[ 2 ][ 2 ],
+								  matrix[ 2 ][ 3 ],
+								  matrix[ 3 ][ 0 ],
+								  matrix[ 3 ][ 1 ],
+								  matrix[ 3 ][ 2 ],
+								  matrix[ 3 ][ 3 ] );
+			} );
+
+		std::vector<scene_node> nodes;
+		nodes.reserve( _asset.nodes.size() );
+		for ( const auto& node : _asset.nodes )
+		{
+			std::vector<uint32_t> children;
+			children.reserve( node.children.size() );
+			std::transform( begin( node.children ),
+							end( node.children ),
+							std::back_inserter( children ),
+							[]( size_t i ) { return static_cast<uint32_t>( i ); } );
+			nodes.push_back( scene_node { .children = std::move( children ),
+										  .transform = std::visit( make_transform, node.transform ),
+										  .mesh = static_cast<uint32_t>( node.meshIndex.value_or( -1 ) ) } );
+		}
+
+		std::vector<uint32_t> roots;
+		roots.reserve( _asset.scenes[ 0 ].nodeIndices.size() );
+		std::transform( begin( _asset.scenes[ 0 ].nodeIndices ),
+						end( _asset.scenes[ 0 ].nodeIndices ),
+						std::back_inserter( roots ),
+						[]( size_t i ) { return static_cast<uint32_t>( i ); } );
 
 		return asset { std::move( _meshes ),
 					   std::move( _materials ),
-					   glm::vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ) };
+					   glm::vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ),
+					   std::move( nodes ),
+					   std::move( roots ) };
 	}
 
 	std::size_t get_texture_count() const { return _textures.size(); }
