@@ -2,6 +2,7 @@
 
 #include <SDL3_image/SDL_image.h>
 #include <fastgltf/core.hpp>
+#include <istream>
 #include <meshoptimizer.h>
 #include <mikktspace.h>
 #include <numeric>
@@ -181,6 +182,7 @@ public:
 	{
 		assert( _state == state::UPLOADING );
 		assert( size < _size );
+		assert( offset + size < buffer.get_size() );
 		if ( size + _offset > _size )
 		{
 			flush_full();
@@ -281,6 +283,12 @@ private:
 	state _state = state::UPLOADING;
 };
 
+template <class... Ts>
+struct overloads : Ts...
+{
+	using Ts::operator()...;
+};
+
 class asset_load_job
 {
 	struct mesh_attribute
@@ -289,6 +297,7 @@ class asset_load_job
 		std::size_t stride = 0;
 		std::size_t length = 0;
 		VkFormat format = VK_FORMAT_UNDEFINED;
+		uint32_t buffer_index = -1;
 	};
 
 	struct mesh_data
@@ -305,6 +314,12 @@ class asset_load_job
 		UNUSED,
 		LINEAR,
 		SRGB
+	};
+
+	struct data_source
+	{
+		std::span<const std::byte> data;
+		std::unique_ptr<std::byte[]> buffer;
 	};
 
 public:
@@ -332,6 +347,18 @@ public:
 	}
 
 private:
+	void add_meshes( size_t node_index )
+	{
+		if ( _asset.nodes[ node_index ].meshIndex )
+		{
+			_meshes_usage[ *_asset.nodes[ node_index ].meshIndex ] = 1;
+		}
+		for ( const auto node : _asset.nodes[ node_index ].children )
+		{
+			add_meshes( node );
+		}
+	}
+
 	void add_texture_usage( size_t index, bool sRGB )
 	{
 		const auto usage = sRGB ? texture_usage::SRGB : texture_usage::LINEAR;
@@ -411,8 +438,55 @@ private:
 		return mesh_attribute { .offset = accessor.byteOffset + view.byteOffset,
 								.stride = view.byteStride.value_or( 0 ),
 								.length = accessor.count,
-								.format = format };
+								.format = format,
+								.buffer_index = static_cast<uint32_t>( view.bufferIndex ) };
 	};
+
+	data_source load( const fastgltf::DataSource& source, bool allow_bufferview ) const
+	{
+		return std::visit(
+			overloads( [ this ]( const fastgltf::sources::Array& array )
+					   { return data_source { .data = { array.bytes.data(), array.bytes.size() } }; },
+					   [ this, allow_bufferview ]( const fastgltf::sources::BufferView& view )
+					   {
+						   if ( !allow_bufferview )
+						   {
+							   throw renderer::Error( "Unsupported recursive buffer view" );
+						   }
+						   const auto& buffer_view = _asset.bufferViews[ view.bufferViewIndex ];
+						   return data_source { .data = _buffers[ buffer_view.bufferIndex ].data.subspan( buffer_view.byteOffset,
+																										  buffer_view.byteLength ) };
+					   },
+					   [ this ]( const fastgltf::sources::URI& uri )
+					   {
+						   if ( !uri.uri.isLocalPath() )
+						   {
+							   throw renderer::Error( "Unsupported remote data source" );
+						   }
+						   else if ( uri.fileByteOffset != 0 )
+						   {
+							   throw renderer::Error( "Unsupported local data source with offset (need to implement views into files)" );
+						   }
+						   else
+						   {
+							   auto path( uri.uri.fspath() );
+							   if ( !path.is_absolute() )
+								   path = _path.parent_path() / path;
+							   std::ifstream istream( path, std::ios::binary | std::ios::ate );
+							   if ( !istream )
+							   {
+								   throw renderer::Error( "Asset references non existing file" );
+							   }
+							   const size_t size = istream.tellg();
+							   auto buffer = std::make_unique<std::byte[]>( size );
+							   istream.seekg( 0 );
+							   istream.read( reinterpret_cast<char*>( buffer.get() ), size );
+							   return data_source { .data = { buffer.get(), size }, .buffer = std::move( buffer ) };
+						   }
+					   },
+					   []( const auto& ) -> data_source { throw renderer::Error( "Unsupported data source" ); } ),
+			source );
+	}
 
 	void parse()
 	{
@@ -440,61 +514,74 @@ private:
 			_asset = std::move( res.get() );
 		}
 
+		_meshes_usage.resize( _asset.meshes.size() );
+		for ( const auto& scene : _asset.scenes )
+		{
+			for ( const auto& node : scene.nodeIndices )
+			{
+				add_meshes( node );
+			}
+		}
+
 		_materials_usage.resize( _asset.materials.size(), 0 );
 
-		for ( const auto& mesh : _asset.meshes )
+		for ( int i = 0; i < _meshes_usage.size(); ++i )
 		{
-			if ( mesh.primitives.size() != 1 )
+			if ( _meshes_usage[ i ] )
 			{
-				throw renderer::Error( "Unsupported mesh with multiple primitives" );
-			}
-			if ( mesh.primitives[ 0 ].materialIndex )
-			{
-				_materials_usage[ *mesh.primitives[ 0 ].materialIndex ] = 1;
-			}
-			auto& m = _parsed_meshes.emplace_back();
+				auto& mesh = _asset.meshes[ i ];
+				if ( mesh.primitives.size() != 1 )
+				{
+					throw renderer::Error( "Unsupported mesh with multiple primitives" );
+				}
+				if ( mesh.primitives[ 0 ].materialIndex )
+				{
+					_materials_usage[ *mesh.primitives[ 0 ].materialIndex ] = 1;
+				}
+				auto& m = _parsed_meshes.emplace_back();
 
-			for ( const auto& attribute : mesh.primitives[ 0 ].attributes )
-			{
-				if ( attribute.name == "POSITION" )
+				for ( const auto& attribute : mesh.primitives[ 0 ].attributes )
 				{
-					m.positions = parse_attribute( attribute.accessorIndex );
-					if ( m.positions.format != VK_FORMAT_R32G32B32_SFLOAT )
+					if ( attribute.name == "POSITION" )
 					{
-						throw renderer::Error( "Unsupported format for mesh positions" );
+						m.positions = parse_attribute( attribute.accessorIndex );
+						if ( m.positions.format != VK_FORMAT_R32G32B32_SFLOAT )
+						{
+							throw renderer::Error( "Unsupported format for mesh positions" );
+						}
+					}
+					else if ( attribute.name == "NORMAL" )
+					{
+						m.normals = parse_attribute( attribute.accessorIndex );
+						if ( m.normals.format != VK_FORMAT_R32G32B32_SFLOAT )
+						{
+							throw renderer::Error( "Unsupported format for mesh normals" );
+						}
+					}
+					else if ( attribute.name == "TANGENT" )
+					{
+						m.tangents = parse_attribute( attribute.accessorIndex );
+						if ( m.tangents.format != VK_FORMAT_R32G32B32A32_SFLOAT )
+						{
+							throw renderer::Error( "Unsupported format for mesh tangents" );
+						}
+					}
+					else if ( attribute.name == "TEXCOORD_0" )
+					{
+						m.uvs = parse_attribute( attribute.accessorIndex );
+						if ( m.uvs.format != VK_FORMAT_R32G32_SFLOAT )
+						{
+							throw renderer::Error( "Unsupported format for mesh texcoords" );
+						}
 					}
 				}
-				else if ( attribute.name == "NORMAL" )
+				if ( mesh.primitives[ 0 ].indicesAccessor )
 				{
-					m.normals = parse_attribute( attribute.accessorIndex );
-					if ( m.normals.format != VK_FORMAT_R32G32B32_SFLOAT )
-					{
-						throw renderer::Error( "Unsupported format for mesh normals" );
-					}
-				}
-				else if ( attribute.name == "TANGENT" )
-				{
-					m.tangents = parse_attribute( attribute.accessorIndex );
-					if ( m.tangents.format != VK_FORMAT_R32G32B32A32_SFLOAT )
-					{
-						throw renderer::Error( "Unsupported format for mesh tangents" );
-					}
-				}
-				else if ( attribute.name == "TEXCOORD_0" )
-				{
-					m.uvs = parse_attribute( attribute.accessorIndex );
-					if ( m.uvs.format != VK_FORMAT_R32G32_SFLOAT )
+					m.indices = parse_attribute( *mesh.primitives[ 0 ].indicesAccessor );
+					if ( m.indices.format != VK_FORMAT_R16_UINT && m.indices.format != VK_FORMAT_R32_UINT )
 					{
 						throw renderer::Error( "Unsupported format for mesh texcoords" );
 					}
-				}
-			}
-			if ( mesh.primitives[ 0 ].indicesAccessor )
-			{
-				m.indices = parse_attribute( *mesh.primitives[ 0 ].indicesAccessor );
-				if ( m.indices.format != VK_FORMAT_R16_UINT && m.indices.format != VK_FORMAT_R32_UINT )
-				{
-					throw renderer::Error( "Unsupported format for mesh texcoords" );
 				}
 			}
 		}
@@ -521,6 +608,14 @@ private:
 				// We ignore emissive for now
 			}
 		}
+
+		// For now we assume all buffers are used one way or the other
+		// If that's wrong we'll potentially do useless file I/O
+		_buffers.reserve( _asset.buffers.size() );
+		for ( const auto& buffer : _asset.buffers )
+		{
+			_buffers.emplace_back( load( buffer.data, false ) );
+		}
 	}
 
 	void upload_meshes()
@@ -536,7 +631,6 @@ private:
 	void upload_mesh( int mesh_index )
 	{
 		OPTICK_EVENT();
-		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
 		const auto& parsed_mesh = _parsed_meshes[ mesh_index ];
 
 		// Some models pack indices in u16 but we use u32 everywhere for now so we'll just convert them
@@ -545,19 +639,26 @@ private:
 		if ( parsed_mesh.indices.format == VK_FORMAT_R16_UINT )
 		{
 			expanded_indices.reserve( parsed_mesh.indices.length );
-			const std::span indices( reinterpret_cast<const uint16_t*>( gltf_buffer.data() + parsed_mesh.indices.offset ),
-									 parsed_mesh.indices.length );
+			const std::span indices(
+				reinterpret_cast<const uint16_t*>( _buffers[ parsed_mesh.indices.buffer_index ].data.data() + parsed_mesh.indices.offset ),
+				parsed_mesh.indices.length );
 			std::copy( begin( indices ), end( indices ), std::back_inserter( expanded_indices ) );
 		}
 		const std::span indices = expanded_indices.empty()
-			? std::span( reinterpret_cast<const uint32_t*>( gltf_buffer.data() + parsed_mesh.indices.offset ), parsed_mesh.indices.length )
+			? std::span( reinterpret_cast<const uint32_t*>( _buffers[ parsed_mesh.indices.buffer_index ].data.data()
+															+ parsed_mesh.indices.offset ),
+						 parsed_mesh.indices.length )
 			: expanded_indices;
 
-		const std::span positions( reinterpret_cast<const glm::vec3*>( gltf_buffer.data() + parsed_mesh.positions.offset ),
-								   parsed_mesh.positions.length );
-		const std::span normals( reinterpret_cast<const glm::vec3*>( gltf_buffer.data() + parsed_mesh.normals.offset ),
-								 parsed_mesh.normals.length );
-		const std::span uvs( reinterpret_cast<const glm::vec2*>( gltf_buffer.data() + parsed_mesh.uvs.offset ), parsed_mesh.uvs.length );
+		const std::span positions(
+			reinterpret_cast<const glm::vec3*>( _buffers[ parsed_mesh.positions.buffer_index ].data.data() + parsed_mesh.positions.offset ),
+			parsed_mesh.positions.length );
+		const std::span normals(
+			reinterpret_cast<const glm::vec3*>( _buffers[ parsed_mesh.normals.buffer_index ].data.data() + parsed_mesh.normals.offset ),
+			parsed_mesh.normals.length );
+		const std::span uvs(
+			reinterpret_cast<const glm::vec2*>( _buffers[ parsed_mesh.uvs.buffer_index ].data.data() + parsed_mesh.uvs.offset ),
+			parsed_mesh.uvs.length );
 
 		std::vector<glm::vec4> generated_tangents;
 		if ( !parsed_mesh.tangents.length )
@@ -577,7 +678,8 @@ private:
 		}
 
 		const auto tangents = parsed_mesh.tangents.length
-			? std::span( reinterpret_cast<const glm::vec4*>( gltf_buffer.data() + parsed_mesh.tangents.offset ),
+			? std::span( reinterpret_cast<const glm::vec4*>( _buffers[ parsed_mesh.tangents.buffer_index ].data.data()
+															 + parsed_mesh.tangents.offset ),
 						 parsed_mesh.tangents.length )
 			: generated_tangents;
 
@@ -624,6 +726,7 @@ private:
 			}
 		}
 
+#if 0
 		std::vector<gpu_meshlet> meshlets;
 		std::vector<uint32_t> meshlet_vertices;
 		std::vector<uint8_t> meshlet_triangles;
@@ -684,6 +787,7 @@ private:
 				}
 			}
 		}
+#endif
 
 		auto& mesh = _meshes[ mesh_index ];
 
@@ -712,6 +816,7 @@ private:
 			mesh.gpu_data.lods[ lod ].indices_count = indices_per_lod[ lod - 1 ];
 		}
 
+#if 0
 		// Data buffer (vertices + meshlets)
 		auto data_buffer_size = vertex_data.size() * sizeof( mesh_vertex );
 		data_buffer_size += meshlets.size() * sizeof( gpu_meshlet );
@@ -747,6 +852,7 @@ private:
 		mesh.gpu_data.meshlet_triangles = mesh.data_buffer.get_device_address() + offset;
 		_mesh_upload.queue( meshlet_triangles, mesh.data_buffer, offset );
 		offset += meshlet_triangles.size() * sizeof( uint8_t );
+#endif
 
 		mesh.handle = _bindless_manager.add_buffer_entry( mesh.gpu_data );
 	}
@@ -754,36 +860,33 @@ private:
 	void decompress_textures()
 	{
 		OPTICK_EVENT();
-		const auto& gltf_buffer = std::get<fastgltf::sources::Array>( _asset.buffers[ 0 ].data ).bytes;
 		_images.resize( _images_usage.size() );
 
-		tbb::parallel_for( 0uz,
-						   _images_usage.size(),
-						   [ & ]( size_t index )
-						   {
-							   OPTICK_EVENT( "decompress_tex" );
-							   if ( _images_usage[ index ] )
-							   {
-								   const auto& data = std::get<fastgltf::sources::BufferView>( _asset.images[ index ].data );
-								   const auto& view = _asset.bufferViews[ data.bufferViewIndex ];
-								   _images[ index ].reset(
-									   IMG_Load_IO( SDL_IOFromConstMem( gltf_buffer.data() + view.byteOffset, view.byteLength ), true ) );
-								   if ( !_images[ index ] )
-								   {
-									   throw renderer::Error( SDL_GetError() );
-								   }
-								   else if ( _images[ index ]->format == SDL_PIXELFORMAT_INDEX8 )
-								   {
-									   sdl::raii::Surface converted_image(
-										   SDL_ConvertSurface( _images[ index ].get(), SDL_PIXELFORMAT_RGBA32 ) );
-									   if ( !converted_image )
-									   {
-										   throw renderer::Error( SDL_GetError() );
-									   }
-									   _images[ index ] = std::move( converted_image );
-								   }
-							   }
-						   } );
+		tbb::parallel_for(
+			0uz,
+			_images_usage.size(),
+			[ & ]( size_t index )
+			{
+				OPTICK_EVENT( "decompress_tex" );
+				if ( _images_usage[ index ] )
+				{
+					const auto source = load( _asset.images[ index ].data, true );
+					_images[ index ].reset( IMG_Load_IO( SDL_IOFromConstMem( source.data.data(), source.data.size() ), true ) );
+					if ( !_images[ index ] )
+					{
+						throw renderer::Error( SDL_GetError() );
+					}
+					else if ( _images[ index ]->format == SDL_PIXELFORMAT_INDEX8 )
+					{
+						sdl::raii::Surface converted_image( SDL_ConvertSurface( _images[ index ].get(), SDL_PIXELFORMAT_RGBA32 ) );
+						if ( !converted_image )
+						{
+							throw renderer::Error( SDL_GetError() );
+						}
+						_images[ index ] = std::move( converted_image );
+					}
+				}
+			} );
 	}
 
 	void upload_textures()
@@ -828,8 +931,11 @@ private:
 			if ( _materials_usage[ i ] )
 			{
 				auto& material = _materials[ i ];
-				material.gpu_data.albedo_texture_index = _textures[ _asset.materials[ i ].pbrData.baseColorTexture->textureIndex ]
-															 .handles.texture_index;
+				if ( _asset.materials[ i ].pbrData.baseColorTexture )
+				{
+					material.gpu_data.albedo_texture_index = _textures[ _asset.materials[ i ].pbrData.baseColorTexture->textureIndex ]
+																 .handles.texture_index;
+				}
 
 				if ( _asset.materials[ i ].normalTexture )
 				{
@@ -869,10 +975,12 @@ private:
 	gpu_upload_job _mesh_upload;
 	gpu_upload_job _texture_upload;
 	fastgltf::Asset _asset;
+	std::vector<uint8_t> _meshes_usage; // Could be a dynamic bitset
 	std::vector<uint8_t> _images_usage; // Could be a dynamic bitset
 	std::vector<texture_usage> _textures_usage;
 	std::vector<uint8_t> _materials_usage; // Could be a dynamic bitset
 	std::vector<mesh_data> _parsed_meshes;
+	std::vector<data_source> _buffers;
 	std::vector<sdl::raii::Surface> _images;
 	std::vector<renderer::BindlessTexture> _textures;
 	std::vector<material> _materials;
