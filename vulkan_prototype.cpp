@@ -152,7 +152,10 @@ glm::vec4 normalize_plane( const glm::vec4& plane )
 scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D extent, float light_time )
 {
 	const glm::mat4 view = camera.getViewMatrix();
-	glm::mat4 projection = glm::perspective( glm::radians( 70.f ), static_cast<float>( extent.width ) / extent.height, 10000.f, 0.1f );
+	// https://nlguillemot.wordpress.com/2016/12/07/reversed-z-in-opengl/
+	const auto f = 1.0f / tan( 70.f / 2.0f );
+	const auto aspect_ratio = static_cast<float>( extent.width ) / extent.height;
+	glm::mat4 projection( f / aspect_ratio, 0.0f, 0.0f, 0.0f, 0.0f, f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.01f, 0.0f );
 
 	// invert the Y direction on projection matrix so that we are more similar
 	// to opengl and gltf axis
