@@ -42,7 +42,7 @@ void main()
     for (uint i = gl_LocalInvocationIndex; i < meshlet.vertex_count; i += gl_WorkGroupSize.x) {
         const uint index = meshes[mesh_id].mvb.meshlet_vertices[meshlet.vertex_offset + i];
         const Vertex v = meshes[mesh_id].vb.vertices[index];
-        const vec3 pos = v.position + draws_buffer.mesh_draws[draw_id].position;
+        const vec3 pos = v.position + draws_buffer.mesh_draws[draw_id].translation;
         gl_MeshVerticesEXT[i].gl_Position = scene_constants.view_projection_matrix * vec4(pos, 1);
         outUV[i].x = v.uv_x;
         outUV[i].y = v.uv_y;

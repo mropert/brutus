@@ -1,3 +1,5 @@
+#define GLM_ENABLE_EXPERIMENTAL // for matrix decompose
+
 #include <SDL3/SDL.h>
 #include <array>
 #include <chrono>
@@ -6,6 +8,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_aligned.hpp>
+#include <glm/gtx/matrix_decompose.hpp>
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_vulkan.h>
@@ -33,8 +36,10 @@
 
 struct gpu_mesh_draw
 {
-	glm::aligned_vec3 position;
+	glm::vec3 translation;
 	mesh_handle mesh;
+	glm::quat rotation;
+	glm::vec3 scale;
 	material_handle material;
 };
 
@@ -366,6 +371,43 @@ int calc_mip_levels( renderer::Extent2D extent )
 	return mips;
 }
 
+void draw_node( const asset& scene, uint32_t node_index, std::span<gpu_mesh_draw> draws, uint32_t& draw_count, const glm::mat4& transform )
+{
+	const auto local_transform = scene.nodes[ node_index ].transform * transform;
+	if ( scene.nodes[ node_index ].mesh != -1 )
+	{
+		const auto& mesh = scene.meshes[ scene.nodes[ node_index ].mesh ];
+		glm::vec3 scale, translation, skew;
+		glm::vec4 perspective;
+		glm::quat rotation;
+		glm::decompose( local_transform, scale, rotation, translation, skew, perspective );
+		draws[ draw_count++ ] = {
+			.translation = translation,
+			.mesh = mesh.handle,
+			.rotation = rotation,
+			.scale = scale,
+			.material = scene.materials[ mesh.material_index ].handle,
+		};
+	}
+	for ( const auto child : scene.nodes[ node_index ].children )
+	{
+		draw_node( scene, child, draws, draw_count, local_transform );
+	}
+}
+
+uint32_t draw_scene( const asset& scene, std::span<gpu_mesh_draw> draws )
+{
+	uint32_t draw_count = 0;
+	const auto identity = glm::identity<glm::mat4>();
+	for ( const auto root : scene.scene_roots )
+	{
+		draw_node( scene, root, draws, draw_count, identity );
+	}
+	return draw_count;
+}
+
+//#define BISTRO
+
 int main()
 {
 	constexpr bool profile_startup = true;
@@ -490,9 +532,12 @@ int main()
 		{ { "grid.vert", renderer::ShaderStage::VERTEX }, { "grid.frag", renderer::ShaderStage::FRAGMENT } } );
 
 	std::vector<asset> assets;
+#ifndef BISTRO
 	assets.push_back( load_asset( device, bindless_manager, indices, "../assets/player.glb" ) );
-	assets.push_back( load_asset( device, bindless_manager, indices, "../assets/sabrina.glb" ) );
-	//assets.push_back( load_asset( device, bindless_manager, indices, "../../niagara_bistro/bistrox.gltf" ) );
+	// assets.push_back( load_asset( device, bindless_manager, indices, "../assets/sabrina.glb" ) );
+#else
+	assets.push_back( load_asset( device, bindless_manager, indices, "../../niagara_bistro/bistro.gltf" ) );
+#endif
 
 	auto constant_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 												  sizeof( std::array<scene_constants, renderer::MAX_FRAMES_IN_FLIGHT> ),
@@ -618,9 +663,12 @@ int main()
 		const auto constants_address = constant_buffers.get_device_address() + ( image_index * sizeof( scene_constants ) );
 
 		auto draw_buffer = ( draw_buffers_ptr + image_index )->data();
+#ifndef BISTRO
 		uint32_t draw_count = 0;
 		std::minstd_rand rand;
 		std::uniform_int_distribution gen( 0zu, assets.size() - 1 );
+		std::uniform_int_distribution gen_angle( 0, 360 );
+		std::uniform_real_distribution<float> gen_scale( 0.5f, 1.5f );
 
 		for ( int z = 0; z < ui_state.z_miku; ++z )
 		{
@@ -628,15 +676,23 @@ int main()
 			{
 				const auto pos = glm::vec3( x - ( ui_state.x_miku / 2 ), 0, z - ( ui_state.z_miku / 2 ) );
 				const auto asset = gen( rand );
+				const glm::quat rotation = glm::vec3( 0, gen_angle( rand ), 0 );
+				const auto scale = gen_scale( rand );
 				for ( int i = 0; i < assets[ asset ].meshes.size(); ++i )
 				{
-					draw_buffer[ draw_count ].position = pos;
-					draw_buffer[ draw_count ].mesh = assets[ asset ].meshes[ i ].handle;
-					draw_buffer[ draw_count ].material = assets[ asset ].materials[ assets[ asset ].meshes[ i ].material_index ].handle;
-					++draw_count;
+					draw_buffer[ draw_count++ ] = {
+						.translation = pos,
+						.mesh = assets[ asset ].meshes[ i ].handle,
+						.rotation = rotation,
+						.scale = { scale, scale, scale },
+						.material = assets[ asset ].materials[ assets[ asset ].meshes[ i ].material_index ].handle
+					};
 				}
 			}
 		}
+#else
+		const auto draw_count = draw_scene( assets[ 0 ], { draw_buffer, max_draws } );
+#endif
 		const uint64_t scene_hash = static_cast<uint64_t>( ui_state.z_miku ) << 32 | ui_state.x_miku;
 		const auto draw_buffer_address = draw_buffers.get_device_address() + ( image_index * sizeof( Draws ) );
 

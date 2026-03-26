@@ -62,7 +62,7 @@ void main()
 		return;
 
     const uint mesh_id = draws_buffer.mesh_draws[draw_id].mesh;
-    const vec3 mesh_center = meshes[mesh_id].bounding_sphere.xyz +  draws_buffer.mesh_draws[draw_id].position;
+    const vec3 mesh_center = meshes[mesh_id].bounding_sphere.xyz +  draws_buffer.mesh_draws[draw_id].translation;
     const float mesh_radius = meshes[mesh_id].bounding_sphere.w;
     bool visible = true;
     for ( int i = 0; i < 6; ++i )

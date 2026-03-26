@@ -5,6 +5,7 @@
 #extension GL_GOOGLE_include_directive : require
 
 #include "constants.glsl"
+#include "math.glsl"
 #include "mesh.glsl"
 
 layout (location = 0) out vec2 outUV;
@@ -33,7 +34,9 @@ void main()
 
     const Vertex v = meshes[mesh_id].vb.vertices[gl_VertexIndex];
 
-    const vec3 pos =  draws_buffer.mesh_draws[draw_id].position + v.position;
+    const vec3 pos = rotate_by_quaternion( v.position, draws_buffer.mesh_draws[draw_id].rotation ) 
+                    * draws_buffer.mesh_draws[draw_id].scale
+                    + draws_buffer.mesh_draws[draw_id].translation;
     gl_Position = scene_constants.view_projection_matrix * vec4( pos, 1 );
     outUV.x = v.uv_x;
     outUV.y = v.uv_y;

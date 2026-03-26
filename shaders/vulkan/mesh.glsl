@@ -35,9 +35,10 @@ struct Meshlet {
 
 struct MeshDraw
 {
-    vec3 position;
-    float padding;
+    vec3 translation;
     uint mesh;
+    vec4 rotation;
+    vec3 scale;
     uint material;
 };
 
