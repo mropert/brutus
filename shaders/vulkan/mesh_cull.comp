@@ -4,6 +4,7 @@
 #extension GL_GOOGLE_include_directive : require
 
 #include "constants.glsl"
+#include "math.glsl"
 #include "mesh.glsl"
 
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
@@ -62,9 +63,12 @@ void main()
 		return;
 
     const uint mesh_id = draws_buffer.mesh_draws[draw_id].mesh;
-    const vec3 mesh_center = meshes[mesh_id].bounding_sphere.xyz +  draws_buffer.mesh_draws[draw_id].translation;
-    const float mesh_radius = meshes[mesh_id].bounding_sphere.w;
-    bool visible = true;
+    const vec3 mesh_center = rotate_by_quaternion( meshes[mesh_id].bounding_sphere.xyz, draws_buffer.mesh_draws[draw_id].rotation ) 
+                                                * draws_buffer.mesh_draws[draw_id].scale
+                                                + draws_buffer.mesh_draws[draw_id].translation;
+    const float mesh_radius = meshes[mesh_id].bounding_sphere.w * max(draws_buffer.mesh_draws[draw_id].scale.x,
+                                                                    max(draws_buffer.mesh_draws[draw_id].scale.y, draws_buffer.mesh_draws[draw_id].scale.z));
+    bool visible = true;    
     for ( int i = 0; i < 6; ++i )
     {
         visible = visible && dot( scene_constants.frustum[i], vec4( mesh_center, 1 ) ) > -mesh_radius;

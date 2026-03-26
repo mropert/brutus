@@ -40,9 +40,9 @@ void main()
     gl_Position = scene_constants.view_projection_matrix * vec4( pos, 1 );
     outUV.x = v.uv_x;
     outUV.y = v.uv_y;
-    outNormal = v.normal;
+    outNormal = rotate_by_quaternion( v.normal, draws_buffer.mesh_draws[draw_id].rotation );
     outWorldPos = pos;
-    outTangent = v.tangent.xyz;
+    outTangent = rotate_by_quaternion( v.tangent.xyz, draws_buffer.mesh_draws[draw_id].rotation );
     outBitangent = cross(outNormal, outTangent) * v.tangent.w;
     outMaterial = draws_buffer.mesh_draws[draw_id].material;
 }
