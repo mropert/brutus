@@ -5,6 +5,7 @@
 #extension GL_GOOGLE_include_directive : require
 
 #include "constants.glsl"
+#include "math.glsl"
 #include "mesh.glsl"
 
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
@@ -42,13 +43,15 @@ void main()
     for (uint i = gl_LocalInvocationIndex; i < meshlet.vertex_count; i += gl_WorkGroupSize.x) {
         const uint index = meshes[mesh_id].mvb.meshlet_vertices[meshlet.vertex_offset + i];
         const Vertex v = meshes[mesh_id].vb.vertices[index];
-        const vec3 pos = v.position + draws_buffer.mesh_draws[draw_id].translation;
+        const vec3 pos = rotate_by_quaternion( v.position, draws_buffer.mesh_draws[draw_id].rotation ) 
+                * draws_buffer.mesh_draws[draw_id].scale
+                + draws_buffer.mesh_draws[draw_id].translation;
         gl_MeshVerticesEXT[i].gl_Position = scene_constants.view_projection_matrix * vec4(pos, 1);
         outUV[i].x = v.uv_x;
         outUV[i].y = v.uv_y;
-        outNormal[i] = v.normal;
+        outNormal[i] = rotate_by_quaternion( v.normal, draws_buffer.mesh_draws[draw_id].rotation );
         outWorldPos[i] = pos;
-        outTangent[i] = v.tangent.xyz;
+        outTangent[i] = rotate_by_quaternion( v.tangent.xyz, draws_buffer.mesh_draws[draw_id].rotation );
         outBitangent[i] = cross(outNormal[i], outTangent[i]) * v.tangent.w;
         outMaterial[i] = draws_buffer.mesh_draws[draw_id].material;
     }
