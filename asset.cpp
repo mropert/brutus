@@ -1,8 +1,12 @@
 #include "asset.h"
 
+#define GLM_ENABLE_EXPERIMENTAL
+
 #include <SDL3_image/SDL_image.h>
 #include <fastgltf/core.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/quaternion.hpp>
 #include <istream>
 #include <meshoptimizer.h>
 #include <mikktspace.h>
@@ -1028,13 +1032,12 @@ private:
 		const overloads make_transform(
 			[]( const fastgltf::TRS& TRS )
 			{
-				glm::mat4 m( 1.f );
-				m = glm::translate( m, { TRS.translation.x(), TRS.translation.y(), TRS.translation.z() } );
-				m = glm::rotate( m, TRS.rotation.x(), glm::vec3( 1, 0, 0 ) );
-				m = glm::rotate( m, TRS.rotation.y(), glm::vec3( 0, 1, 0 ) );
-				m = glm::rotate( m, TRS.rotation.z(), glm::vec3( 0, 0, 1 ) );
-				m = glm::scale( m, { TRS.scale.x(), TRS.scale.y(), TRS.scale.z() } );
-				return m;
+				const auto scale = glm::scale( glm::mat4( 1.f ), { TRS.scale.x(), TRS.scale.y(), TRS.scale.z() } );
+				// glm quaternion constructor takes w first because why not?
+				const auto rotation = glm::toMat4( glm::quat( TRS.rotation.w(), TRS.rotation.x(), TRS.rotation.y(), TRS.rotation.z() ) );
+				const auto translation = glm::translate( glm::mat4( 1.f ),
+														 { TRS.translation.x(), TRS.translation.y(), TRS.translation.z() } );
+				return translation * rotation * scale;
 			},
 			[]( const fastgltf::math::fmat4x4& matrix )
 			{

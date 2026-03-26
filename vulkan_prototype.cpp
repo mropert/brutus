@@ -373,7 +373,7 @@ int calc_mip_levels( renderer::Extent2D extent )
 
 void draw_node( const asset& scene, uint32_t node_index, std::span<gpu_mesh_draw> draws, uint32_t& draw_count, const glm::mat4& transform )
 {
-	const auto local_transform = scene.nodes[ node_index ].transform * transform;
+	const auto local_transform = transform * scene.nodes[ node_index ].transform;
 	if ( scene.nodes[ node_index ].mesh != -1 )
 	{
 		const auto& mesh = scene.meshes[ scene.nodes[ node_index ].mesh ];
@@ -398,15 +398,14 @@ void draw_node( const asset& scene, uint32_t node_index, std::span<gpu_mesh_draw
 uint32_t draw_scene( const asset& scene, std::span<gpu_mesh_draw> draws )
 {
 	uint32_t draw_count = 0;
-	const auto identity = glm::identity<glm::mat4>();
 	for ( const auto root : scene.scene_roots )
 	{
-		draw_node( scene, root, draws, draw_count, identity );
+		draw_node( scene, root, draws, draw_count, glm::mat4( 1.f ) );
 	}
 	return draw_count;
 }
 
-//#define BISTRO
+#define BISTRO 1
 
 int main()
 {
@@ -537,6 +536,7 @@ int main()
 	// assets.push_back( load_asset( device, bindless_manager, indices, "../assets/sabrina.glb" ) );
 #else
 	assets.push_back( load_asset( device, bindless_manager, indices, "../../niagara_bistro/bistro.gltf" ) );
+	//assets.push_back( load_asset( device, bindless_manager, indices, "../assets/player.glb" ) );
 #endif
 
 	auto constant_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
