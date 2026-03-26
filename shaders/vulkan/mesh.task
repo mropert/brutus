@@ -51,6 +51,7 @@ void main()
     const vec3 meshlet_center = rotate_by_quaternion( meshlet.bounding_sphere.xyz, draws_buffer.mesh_draws[draw_id].rotation )
                                 * draws_buffer.mesh_draws[draw_id].scale
                                 + draws_buffer.mesh_draws[draw_id].translation;
+
     const float meshlet_radius = meshlet.bounding_sphere.w * max(draws_buffer.mesh_draws[draw_id].scale.x,
                                                                 max(draws_buffer.mesh_draws[draw_id].scale.y, draws_buffer.mesh_draws[draw_id].scale.z));
     const vec3 cone_axis = rotate_by_quaternion( meshlet.cone.xyz, draws_buffer.mesh_draws[draw_id].rotation );
@@ -58,7 +59,7 @@ void main()
     bool visible = !coneCull( meshlet_center, meshlet_radius, cone_axis, meshlet.cone.w, scene_constants.camera_position );
     for ( int i = 0; i < 6; ++i )
     {
-        visible = visible && dot( scene_constants.frustum[i], vec4( meshlet_center, 1 ) ) > -meshlet.bounding_sphere.w;
+        visible = visible && dot( scene_constants.frustum[i], vec4( meshlet_center, 1 ) ) > -meshlet_radius;
     }
     if ( visible )
     {

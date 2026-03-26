@@ -286,6 +286,7 @@ void draw_ui( ui_data& data,
 		ImGui::BulletText( "UI: %.2f", gpu_timings[ Timestamps::DRAW_UI ] * 1e-6f );
 		ImGui::BulletText( "Triangles (millions): %.2f", static_cast<float>( stats.clipping_invocations / 1000 ) / 1000 );
 		ImGui::SeparatorText( "Assets" );
+		ImGui::BeginChild( "Assets", ImVec2( 0.f, 400.f ) );
 		for ( int i = 0; i < assets.size(); ++i )
 		{
 			for ( int j = 0; j < assets[ i ].meshes.size(); ++j )
@@ -299,6 +300,7 @@ void draw_ui( ui_data& data,
 							 assets[ i ].meshes[ j ].gpu_data.lods[ 3 ].indices_count );
 			}
 		}
+		ImGui::EndChild();
 
 		ImGui::SeparatorText( "Settings" );
 		if ( ImGui::Button( data.paused ? "Unpause" : "Pause" ) )
