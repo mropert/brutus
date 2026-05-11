@@ -22,7 +22,8 @@ struct gpu_material
 	uint32_t albedo_texture_index;
 	uint32_t normal_texture_index = -1;
 	uint32_t metallic_roughness_texture_index = -1;
-	uint32_t padding[ 3 ];
+	uint32_t specular_texture_index = -1;
+	uint32_t padding[ 2 ];
 };
 
 struct gpu_mesh_lod
@@ -89,7 +90,7 @@ struct material
 
 struct scene_node
 {
-	std::vector<uint32_t> children;	// Use small vector once we get one
+	std::vector<uint32_t> children; // Use small vector once we get one
 	glm::mat4 transform;
 	uint32_t mesh = -1;
 };

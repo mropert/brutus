@@ -127,9 +127,15 @@ void main()
             metalness *= metallic_roughness.b;
             roughness *= metallic_roughness.g;
         }
+        float specular_factor = 1.0;
+        if ( materials[inMaterial].specular_index != -1 )
+        {
+            specular_factor = texture(sampler2D(textures[materials[inMaterial].specular_index], samplers[0]), inUV).a;
+        }
+        
         const float NDF = DistributionGGX(N, H, roughness);
         const float G   = GeometrySmith(N, V, L, roughness);
-        const vec3 F0 = mix(vec3(0.04), albedo, metalness);
+        const vec3 F0 = mix(vec3(0.04), albedo, metalness) * specular_factor;
         const vec3 F = fresnelSchlick(HdotV, F0);
 
         const vec3 numerator    = NDF * G * F;

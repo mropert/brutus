@@ -11,15 +11,13 @@ add_compile_options(/Zi /MP)
 add_link_options(/DEBUG)
 
 add_library(Optick INTERFACE)
-if(USE_OPTICK)
-	set(OPTICK_FOUND TRUE)
-	set(OPTICK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../optick)
-	target_compile_definitions(Optick INTERFACE USE_OPTICK)
-	target_include_directories(Optick INTERFACE ${OPTICK_DIR}/include)
-	target_link_libraries(Optick INTERFACE
-		debug ${OPTICK_DIR}/lib/x64/debug/OptickCore.lib
-		optimized ${OPTICK_DIR}/lib/x64/release/OptickCore.lib)
-endif()
+set(OPTICK_FOUND TRUE)
+set(OPTICK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../optick)
+target_compile_definitions(Optick INTERFACE USE_OPTICK)
+target_include_directories(Optick INTERFACE ${OPTICK_DIR}/include)
+target_link_libraries(Optick INTERFACE
+	debug ${OPTICK_DIR}/lib/x64/debug/OptickCore.lib
+	optimized ${OPTICK_DIR}/lib/x64/release/OptickCore.lib)
 
 add_library(utils INTERFACE)
 target_include_directories(utils INTERFACE src)

@@ -14,6 +14,7 @@ struct Material
     uint albedo_index;
     uint normal_index;
     uint metallic_roughness_index;
+    uint specular_index;
 };
 
 struct MeshLOD

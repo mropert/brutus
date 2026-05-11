@@ -1,6 +1,6 @@
-#include "asset.h"
-
 #define GLM_ENABLE_EXPERIMENTAL
+
+#include "asset.h"
 
 #include <SDL3_image/SDL_image.h>
 #include <fastgltf/core.hpp>
@@ -15,6 +15,7 @@
 #include <renderer/command_buffer.h>
 #include <renderer/texture.h>
 #include <renderer/third_party/tbb.h>
+
 
 SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
 {
@@ -115,7 +116,19 @@ namespace
 		{
 		}
 
+		explicit attribute_accessor( std::span<const T> data )
+			: _stride( sizeof( T ) )
+			, _data( reinterpret_cast<const std::byte*>( data.data() ), data.size_bytes() )
+		{
+		}
+
+		explicit attribute_accessor( const std::vector<T> data )
+			: attribute_accessor( std::span( data ) )
+		{
+		}
+
 		const T& get( int index ) const { return reinterpret_cast<const T&>( _data[ index * _stride ] ); }
+		size_t size() const { return _data.size(); }
 
 	private:
 		uint32_t _stride;
@@ -127,9 +140,9 @@ namespace MikkTSpace
 {
 	struct UserData
 	{
-		std::span<const glm::vec3> positions;
-		std::span<const glm::vec3> normals;
-		std::span<const glm::vec2> uvs;
+		attribute_accessor<glm::vec3> positions;
+		attribute_accessor<glm::vec3> normals;
+		attribute_accessor<glm::vec2> uvs;
 		std::span<glm::vec4> tangents;
 		std::span<const uint32_t> indices;
 	};
@@ -149,24 +162,27 @@ namespace MikkTSpace
 	{
 		const auto data = static_cast<UserData*>( context->m_pUserData );
 		const auto index = data->indices[ face * 3 + vert ];
-		pos_out[ 0 ] = data->positions[ index ].x;
-		pos_out[ 1 ] = data->positions[ index ].y;
-		pos_out[ 2 ] = data->positions[ index ].z;
+		const auto& position = data->positions.get( index );
+		pos_out[ 0 ] = position.x;
+		pos_out[ 1 ] = position.y;
+		pos_out[ 2 ] = position.z;
 	}
 	void get_normal( const SMikkTSpaceContext* context, float* normal_out, const int face, const int vert )
 	{
 		const auto data = static_cast<UserData*>( context->m_pUserData );
 		const auto index = data->indices[ face * 3 + vert ];
-		normal_out[ 0 ] = data->normals[ index ].x;
-		normal_out[ 1 ] = data->normals[ index ].y;
-		normal_out[ 2 ] = data->normals[ index ].z;
+		const auto& normal = data->normals.get( index );
+		normal_out[ 0 ] = normal.x;
+		normal_out[ 1 ] = normal.y;
+		normal_out[ 2 ] = normal.z;
 	}
 	void get_texcoord( const SMikkTSpaceContext* context, float* uv_out, const int face, const int vert )
 	{
 		const auto data = static_cast<UserData*>( context->m_pUserData );
 		const auto index = data->indices[ face * 3 + vert ];
-		uv_out[ 0 ] = data->uvs[ index ].x;
-		uv_out[ 1 ] = data->uvs[ index ].y;
+		const auto& uv = data->uvs.get( index );
+		uv_out[ 0 ] = uv.x;
+		uv_out[ 1 ] = uv.y;
 	}
 
 	void set_tangent( const SMikkTSpaceContext* context, const float* tangent, const float sign, const int face, const int vert )
@@ -536,7 +552,7 @@ private:
 	{
 		OPTICK_EVENT();
 
-		fastgltf::Parser parser;
+		fastgltf::Parser parser( fastgltf::Extensions::KHR_materials_specular );
 		fastgltf::GltfDataBuffer data;
 		{
 			OPTICK_EVENT( "gltf_read_io" );
@@ -649,6 +665,13 @@ private:
 				{
 					add_texture_usage( material.pbrData.metallicRoughnessTexture->textureIndex, false );
 				}
+				if ( material.specular )
+				{
+					if ( material.specular->specularTexture )
+					{
+						add_texture_usage( material.specular->specularTexture->textureIndex, false );
+					}
+				}
 				// We ignore emissive for now
 			}
 		}
@@ -712,7 +735,6 @@ private:
 		auto tangents_stride = parsed_mesh.tangents.stride;
 		if ( !parsed_mesh.tangents.length )
 		{
-#if 0
 			OPTICK_EVENT( "generate_tangents" );
 			generated_tangents.resize( positions.size() );
 			MikkTSpace::UserData user_data { .positions = positions,
@@ -726,16 +748,13 @@ private:
 				throw renderer::Error( "Failed to generate tangets" );
 			}
 			tangents_stride = sizeof( glm::vec4 );
-#else
-			throw renderer::Error( "Tangent generation isn't supported" );
-#endif
 		}
 
-		const attribute_accessor<glm::vec4> tangents(
-			generated_tangents.empty() ? _buffers[ parsed_mesh.tangents.buffer_index ].data.data() + parsed_mesh.tangents.offset
-									   : reinterpret_cast<const std::byte*>( generated_tangents.data() ),
-			parsed_mesh.tangents.length,
-			tangents_stride );
+		const attribute_accessor<glm::vec4> tangents = generated_tangents.size()
+			? attribute_accessor<glm::vec4>( generated_tangents )
+			: attribute_accessor<glm::vec4>( _buffers[ parsed_mesh.tangents.buffer_index ].data.data() + parsed_mesh.tangents.offset,
+											 parsed_mesh.tangents.length,
+											 tangents_stride );
 
 		{
 			OPTICK_EVENT( "repack_vertices" );
@@ -1016,6 +1035,15 @@ private:
 					material.gpu_data.metallic_roughness_texture_index = _textures[ _asset.materials[ i ]
 																						.pbrData.metallicRoughnessTexture->textureIndex ]
 																			 .handles.texture_index;
+				}
+				if ( _asset.materials[ i ].specular )
+				{
+					if ( _asset.materials[ i ].specular->specularTexture )
+					{
+						material.gpu_data.specular_texture_index = _textures[ _asset.materials[ i ]
+																				  .specular->specularTexture->textureIndex ]
+																	   .handles.texture_index;
+					}
 				}
 				material.gpu_data.pbr_data.base_color.x = _asset.materials[ i ].pbrData.baseColorFactor.x();
 				material.gpu_data.pbr_data.base_color.y = _asset.materials[ i ].pbrData.baseColorFactor.y();
