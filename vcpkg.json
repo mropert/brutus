@@ -1,0 +1,27 @@
+{
+  "dependencies": [
+    "fastgltf",
+    "glm",
+    {
+      "name": "imgui",
+      "features": [
+        "sdl3-binding",
+        "vulkan-binding"
+      ]
+    },
+    "meshoptimizer",
+    "mikktspace",
+    {
+      "name": "sdl3",
+      "features": [
+        "vulkan"
+      ]
+    },
+    "sdl3-image",
+    "shaderc",
+    "tbb",
+    "vulkan",
+    "vulkan-memory-allocator",
+    "vulkan-validationlayers"
+  ]
+}

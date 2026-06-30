@@ -15,8 +15,8 @@
 #include <memory>
 #include <numbers>
 #include <numeric>
-#include <optick.h>
 #include <print>
+#include <renderer/details/profiler.h>
 #include <renderer/third_party/tbb.h>
 #include <span>
 

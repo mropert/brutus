@@ -11,11 +11,10 @@
 #include <meshoptimizer.h>
 #include <mikktspace.h>
 #include <numeric>
-#include <optick.h>
 #include <renderer/command_buffer.h>
+#include <renderer/details/profiler.h>
 #include <renderer/texture.h>
 #include <renderer/third_party/tbb.h>
-
 
 SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
 {
