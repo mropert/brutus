@@ -16,6 +16,7 @@
 #include <numbers>
 #include <numeric>
 #include <optick.h>
+#include <print>
 #include <renderer/third_party/tbb.h>
 #include <span>
 
@@ -194,7 +195,7 @@ struct ui_data
 	bool vsync;
 	bool stable_power;
 	bool mesh_shading;
-	bool occlusion_culling = true;
+	bool occlusion_culling;
 	bool pbr = true;
 };
 
@@ -273,18 +274,21 @@ void draw_ui( ui_data& data,
 		ImGui::Text( "Meshes (MB): %zu", meshes_bytes >> 20 );
 		ImGui::Text( "Indices (MB): %zu", ( index_buffer.size * sizeof( uint32_t ) ) >> 20 );
 
-		std::array<float, 4> per_lod_gpu_time {};
-		ImGui::SeparatorText( "Stats" );
-		ImGui::Text( "GPU times (ms): %.2f", gpu_timings[ 0 ] * 1e-6f );
-		ImGui::BulletText( "Early meshes draw: %.2f / %.2f",
-						   gpu_timings[ Timestamps::COMPUTE_DRAWS_EARLY ] * 1e-6f,
-						   gpu_timings[ Timestamps::DRAW_MESHES_EARLY ] * 1e-6f );
-		ImGui::BulletText( "Late meshes draw: %.2f / %.2f",
-						   gpu_timings[ Timestamps::COMPUTE_DRAWS_LATE ] * 1e-6f,
-						   gpu_timings[ Timestamps::DRAW_MESHES_LATE ] * 1e-6f );
-		ImGui::BulletText( "Depth pyramid: %.2f", gpu_timings[ Timestamps::DEPTH_PYRAMID ] * 1e-6f );
-		ImGui::BulletText( "UI: %.2f", gpu_timings[ Timestamps::DRAW_UI ] * 1e-6f );
-		ImGui::BulletText( "Triangles (millions): %.2f", static_cast<float>( stats.clipping_invocations / 1000 ) / 1000 );
+		if ( props.statistics_support )
+		{
+			std::array<float, 4> per_lod_gpu_time { };
+			ImGui::SeparatorText( "Stats" );
+			ImGui::Text( "GPU times (ms): %.2f", gpu_timings[ 0 ] * 1e-6f );
+			ImGui::BulletText( "Early meshes draw: %.2f / %.2f",
+							   gpu_timings[ Timestamps::COMPUTE_DRAWS_EARLY ] * 1e-6f,
+							   gpu_timings[ Timestamps::DRAW_MESHES_EARLY ] * 1e-6f );
+			ImGui::BulletText( "Late meshes draw: %.2f / %.2f",
+							   gpu_timings[ Timestamps::COMPUTE_DRAWS_LATE ] * 1e-6f,
+							   gpu_timings[ Timestamps::DRAW_MESHES_LATE ] * 1e-6f );
+			ImGui::BulletText( "Depth pyramid: %.2f", gpu_timings[ Timestamps::DEPTH_PYRAMID ] * 1e-6f );
+			ImGui::BulletText( "UI: %.2f", gpu_timings[ Timestamps::DRAW_UI ] * 1e-6f );
+			ImGui::BulletText( "Triangles (millions): %.2f", static_cast<float>( stats.clipping_invocations / 1000 ) / 1000 );
+		}
 		ImGui::SeparatorText( "Assets" );
 		ImGui::BeginChild( "Assets", ImVec2( 0.f, 400.f ) );
 		for ( int i = 0; i < assets.size(); ++i )
@@ -309,8 +313,25 @@ void draw_ui( ui_data& data,
 		}
 		ImGui::Checkbox( "V-Sync", &data.vsync );
 		ImGui::Checkbox( "Stable power", &data.stable_power );
+		const bool can_toggle_render_method = props.mesh_shader_support && props.draw_indirect_count_support;
+		if ( !can_toggle_render_method )
+		{
+			ImGui::BeginDisabled();
+		}
 		ImGui::Checkbox( "Mesh shading", &data.mesh_shading );
+		if ( !can_toggle_render_method )
+		{
+			ImGui::EndDisabled();
+		}
+		if ( !props.minmax_filter_support )
+		{
+			ImGui::BeginDisabled();
+		}
 		ImGui::Checkbox( "Occlusion culling", &data.occlusion_culling );
+		if ( !props.minmax_filter_support )
+		{
+			ImGui::EndDisabled();
+		}
 		ImGui::Checkbox( "PBR", &data.pbr );
 		ImGui::Text( "Instance count" );
 		ImGui::SliderInt( "x", &data.x_miku, 1, 100 );
@@ -410,7 +431,7 @@ uint32_t draw_scene( const asset& scene, std::span<gpu_mesh_draw> draws )
 	return draw_count;
 }
 
-#define BISTRO 1
+//#define BISTRO 1
 
 int main()
 {
@@ -423,7 +444,7 @@ int main()
 
 	OPTICK_PUSH( "Startup" );
 
-	tbb_observer observer {};
+	tbb_observer observer { };
 	observer.observe();
 
 	gpu_stable_power::Context stable_power;
@@ -433,6 +454,11 @@ int main()
 	const auto props = device.get_properties();
 	OPTICK_POP();
 
+	if ( !props.mesh_shader_support && !props.draw_indirect_count_support )
+	{
+		std::print( stderr, "Renderer requires either mesh_shader or draw_indirect_count support to run." );
+		return -1;
+	}
 	bool vsync = true;
 
 	OPTICK_PUSH( "create_swapchain" );
@@ -538,7 +564,7 @@ int main()
 	std::vector<asset> assets;
 #ifndef BISTRO
 	assets.push_back( load_asset( device, bindless_manager, indices, "../assets/player.glb" ) );
-	// assets.push_back( load_asset( device, bindless_manager, indices, "../assets/sabrina.glb" ) );
+	assets.push_back( load_asset( device, bindless_manager, indices, "../assets/sabrina.glb" ) );
 #else
 	assets.push_back( load_asset( device, bindless_manager, indices, "../../niagara_bistro/bistro.gltf" ) );
 	//assets.push_back( load_asset( device, bindless_manager, indices, "../assets/player.glb" ) );
@@ -570,12 +596,13 @@ int main()
 														  | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 													  sizeof( DrawCommands ) );
 
-	std::array<renderer::raii::TimestampQuery, renderer::MAX_FRAMES_IN_FLIGHT> timestamp_queries {
-		device.create_timestamp_query( Timestamps::COUNT ),
-		device.create_timestamp_query( Timestamps::COUNT )
+	std::array<renderer::raii::TimestampQuery, renderer::MAX_FRAMES_IN_FLIGHT> timestamp_queries { nullptr, nullptr };
+	std::array<renderer::raii::StatisticsQuery, renderer::MAX_FRAMES_IN_FLIGHT> statistics_queries { nullptr, nullptr };
+	if ( props.statistics_support )
+	{
+		timestamp_queries = { device.create_timestamp_query( Timestamps::COUNT ), device.create_timestamp_query( Timestamps::COUNT ) };
+		statistics_queries = { device.create_statistics_query(), device.create_statistics_query() };
 	};
-	std::array<renderer::raii::StatisticsQuery, renderer::MAX_FRAMES_IN_FLIGHT> statistics_queries { device.create_statistics_query(),
-																									 device.create_statistics_query() };
 
 	pipelines.wait_ready();
 
@@ -602,7 +629,12 @@ int main()
 	float time_of_day = 0.f;
 
 	bool relative_mouse = false;
-	ui_data ui_state { .vsync = vsync, .stable_power = stable_power.is_enabled(), .mesh_shading = props.mesh_shader_support };
+	// XXX: we disable occlusion culling support entirely if minmax sampler aren't supported
+	// TODO: emulate it in shaders with a gather4 instead
+	ui_data ui_state { .vsync = vsync,
+					   .stable_power = stable_power.is_enabled(),
+					   .mesh_shading = props.mesh_shader_support,
+					   .occlusion_culling = props.minmax_filter_support };
 	uint64_t last_scene_hash = 0;
 
 	while ( !quit )
