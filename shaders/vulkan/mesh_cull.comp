@@ -114,6 +114,11 @@ void main()
         commands_buffer.commands[command_id].group_count_y = 1;
         commands_buffer.commands[command_id].group_count_z = 1;
     }
+    else if ( EMIT_EMPTY )
+    {
+        const uint command_id = atomicAdd( commmands_count_buffer.commands_count, 1 );
+        commands_buffer.commands[command_id].instance_count = 0;
+    }
 
     if ( LATE )
     {

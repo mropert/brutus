@@ -36,6 +36,6 @@ target_link_libraries(brutus-vulkan PRIVATE SDL3::SDL3 fastgltf::fastgltf glm::g
 target_link_libraries(brutus-vulkan PRIVATE $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image-shared>,SDL3_image::SDL3_image-shared,SDL3_image::SDL3_image-static>)
 target_link_libraries(brutus-vulkan PRIVATE renderer gpu_stable_power TBB::tbb imgui::imgui meshoptimizer::meshoptimizer mikktspace::mikktspace)
 
-if(USE_OPTICK)
+if(OPTICK_FOUND)
 	target_link_libraries(brutus-vulkan PRIVATE Optick)
 endif()

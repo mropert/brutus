@@ -1,4 +1,4 @@
-#define GLM_ENABLE_EXPERIMENTAL // for matrix decompose
+﻿#define GLM_ENABLE_EXPERIMENTAL // for matrix decompose
 
 #include <SDL3/SDL.h>
 #include <array>
@@ -313,13 +313,12 @@ void draw_ui( ui_data& data,
 		}
 		ImGui::Checkbox( "V-Sync", &data.vsync );
 		ImGui::Checkbox( "Stable power", &data.stable_power );
-		const bool can_toggle_render_method = props.mesh_shader_support && props.draw_indirect_count_support;
-		if ( !can_toggle_render_method )
+		if ( !props.mesh_shader_support )
 		{
 			ImGui::BeginDisabled();
 		}
 		ImGui::Checkbox( "Mesh shading", &data.mesh_shading );
-		if ( !can_toggle_render_method )
+		if ( !props.mesh_shader_support )
 		{
 			ImGui::EndDisabled();
 		}
@@ -454,11 +453,6 @@ int main()
 	const auto props = device.get_properties();
 	OPTICK_POP();
 
-	if ( !props.mesh_shader_support && !props.draw_indirect_count_support )
-	{
-		std::print( stderr, "Renderer requires either mesh_shader or draw_indirect_count support to run." );
-		return -1;
-	}
 	bool vsync = true;
 
 	OPTICK_PUSH( "create_swapchain" );
@@ -542,13 +536,17 @@ int main()
 														{ "mesh.mesh", renderer::ShaderStage::MESH },
 														{ "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
 
+	std::vector<renderer::ShaderSource::Define> compute_shader_defines;
+	compute_shader_defines.emplace_back( "LATE", "false" );
+	compute_shader_defines.emplace_back( "EMIT_EMPTY", props.draw_indirect_count_support ? "false" : "true" );
+
 	const auto compute_draws_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .push_constants_size = sizeof( compute_draws_constants ) },
-		{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE, { { "LATE", "false" } } } } );
-
+		{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE, compute_shader_defines } } );
+	compute_shader_defines[ 0 ].value = "true";
 	const auto compute_draws_late_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .push_constants_size = sizeof( compute_draws_constants ) },
-		{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE, { { "LATE", "true" } } } } );
+		{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE, compute_shader_defines } } );
 
 	const auto depth_pyramid_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .push_constants_size = sizeof( depth_pyramid_constants ) },
@@ -841,12 +839,22 @@ int main()
 														.commands_buffer = draw_commands_buffer.get_device_address() + sizeof( uint32_t ) };
 
 				command_buffer->push_constants( pipelines.get( mesh_pipeline ), constants );
-				command_buffer->draw_indexed_indirect( draw_commands_buffer,
-													   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
-													   draw_commands_buffer,
-													   0,
-													   max_draws,
-													   sizeof( gpu_draw_command ) );
+				if ( props.draw_indirect_count_support )
+				{
+					command_buffer->draw_indexed_indirect( draw_commands_buffer,
+														   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+														   draw_commands_buffer,
+														   0,
+														   max_draws,
+														   sizeof( gpu_draw_command ) );
+				}
+				else
+				{
+					command_buffer->draw_indexed_indirect( draw_commands_buffer,
+														   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+														   draw_count,
+														   sizeof( gpu_draw_command ) );
+				}
 			}
 			command_buffer->end_rendering();
 		};
