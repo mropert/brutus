@@ -529,12 +529,16 @@ int main()
 								   .push_constants_size = sizeof( draw_meshes_constants ) },
 		{ { "mesh.vert", renderer::ShaderStage::VERTEX }, { "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
 
-	const auto mesh_pipeline_meshlet = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
-																				 .depth_format = depth_image.get_format(),
-																				 .push_constants_size = sizeof( draw_meshes_constants ) },
-													  { { "mesh.task", renderer::ShaderStage::TASK },
-														{ "mesh.mesh", renderer::ShaderStage::MESH },
-														{ "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
+	renderer::PipelineHandle mesh_pipeline_meshlet { };
+	if ( props.mesh_shader_support )
+	{
+		mesh_pipeline_meshlet = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
+																		  .depth_format = depth_image.get_format(),
+																		  .push_constants_size = sizeof( draw_meshes_constants ) },
+											   { { "mesh.task", renderer::ShaderStage::TASK },
+												 { "mesh.mesh", renderer::ShaderStage::MESH },
+												 { "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
+	}
 
 	std::vector<renderer::ShaderSource::Define> compute_shader_defines;
 	compute_shader_defines.emplace_back( "LATE", "false" );

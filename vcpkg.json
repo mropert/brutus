@@ -17,7 +17,12 @@
         "vulkan"
       ]
     },
-    "sdl3-image",
+    {
+      "name": "sdl3-image",
+      "features": [
+        "png"
+      ]
+    },
     "shaderc",
     "tbb",
     "vulkan",

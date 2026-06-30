@@ -29,7 +29,7 @@ layout( push_constant, std430 ) uniform block
 
 void main() 
 {   
-    const uint draw_id = commands_buffer.commands[gl_DrawIDARB].draw_id;
+    const uint draw_id = commands_buffer.commands[gl_BaseInstanceARB].draw_id;
     const uint mesh_id = draws_buffer.mesh_draws[draw_id].mesh;
 
     const Vertex v = meshes[mesh_id].vb.vertices[gl_VertexIndex];

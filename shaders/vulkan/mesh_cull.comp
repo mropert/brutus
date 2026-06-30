@@ -109,7 +109,7 @@ void main()
         commands_buffer.commands[command_id].instance_count = 1;
         commands_buffer.commands[command_id].first_index = meshes[mesh_id].lods[lod].indices_offset;
         commands_buffer.commands[command_id].vertex_offset = 0;
-        commands_buffer.commands[command_id].first_instance = 0;
+        commands_buffer.commands[command_id].first_instance = command_id;
         commands_buffer.commands[command_id].group_count_x = ( meshes[mesh_id].lods[lod].meshlets_count + 32 - 1 ) / 32;
         commands_buffer.commands[command_id].group_count_y = 1;
         commands_buffer.commands[command_id].group_count_z = 1;
