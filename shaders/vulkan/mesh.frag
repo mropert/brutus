@@ -30,6 +30,22 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0)
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
+// Fresnel that folds in roughness, for the ambient/environment term
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness)
+{
+    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+// Analytic environment BRDF approximation (Karis, "mobile") - stands in for the split-sum LUT
+vec2 EnvBRDFApprox(float NdotV, float roughness)
+{
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572,  0.022);
+    const vec4 c1 = vec4( 1.0,  0.0425,  1.04,  -0.04);
+    vec4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+    return vec2(-1.04, 1.04) * a004 + r.zw;
+}
+
 float DistributionGGX(vec3 N, vec3 H, float roughness)
 {
     const float a      = roughness*roughness;
@@ -106,7 +122,7 @@ void main()
 
     const vec3 L = normalize(-scene_constants.main_light.xyz);
     const float NdotL = max(dot(N, L), 0.0);
-    const float ambient_factor = 0.03;
+    const float ambient_factor = 0.1;
     vec3 color;
 
     if ( scene_constants.pbr == 1 )
@@ -115,7 +131,7 @@ void main()
         const vec3 H = normalize(V + L);
         const float  NdotV = max(dot(N, V), 1e-4);
         const float  HdotV = max(dot(H, V), 1e-4);
-        const float attenuation = scene_constants.main_light.w;
+        const float attenuation = scene_constants.main_light.w * 3;
         const vec3 radiance     = vec3(1.0, 1.0, 1.0) * attenuation;
 
         // cook-torrance brdf
@@ -124,8 +140,9 @@ void main()
         if ( materials[inMaterial].metallic_roughness_index != -1 )
         {
             const vec3 metallic_roughness = texture(sampler2D(textures[materials[inMaterial].metallic_roughness_index], samplers[0]), inUV).rgb;
-            metalness *= metallic_roughness.b;
-            roughness *= metallic_roughness.g;
+            // Our current test model has broken data on the MR texture
+            metalness = 0;
+            roughness *= metallic_roughness.b;
         }
         float specular_factor = 1.0;
         if ( materials[inMaterial].specular_index != -1 )
@@ -139,18 +156,36 @@ void main()
         const vec3 F = fresnelSchlick(HdotV, F0);
 
         const vec3 numerator    = NDF * G * F;
-        const float denominator = max(4.0 * NdotV * HdotV + 1e-4, 1e-4);
+        const float denominator = max(4.0 * NdotV * NdotL + 1e-4, 1e-4);
         const vec3 specular     = numerator / denominator;
 
         // add to outgoing radiance Lo
         const vec3 kD = (1 - F) * (1 - metalness);
         const vec3 Lo = (kD * albedo / PI + specular) * radiance * NdotL;
 
-        const vec3 ambient = ambient_factor * albedo;// * ao;
+        // Ambient / fake-IBL: no cubemap yet, so approximate the environment with a
+        // hemisphere (sky above, ground below). These colors ARE the environment radiance.
+        // Tie the sky/ambient to the sun so there's a single exposure knob (the sun) and the
+        // balance between them stays fixed. sky_to_sun is the "mood": higher = flatter/overcast.
+        const float sky_to_sun    = 0.25;
+        const float env_intensity = attenuation * sky_to_sun;
+        const vec3 sky_color    = vec3(0.5, 0.6, 0.7) * env_intensity;
+        const vec3 ground_color = vec3(0.2, 0.18, 0.15) * env_intensity;
+        const vec3 R = reflect(-V, N);
+        const vec3 irradiance  = mix(ground_color, sky_color, 0.5 * (N.y + 1.0)); // diffuse env
+        const vec3 prefiltered = mix(ground_color, sky_color, 0.5 * (R.y + 1.0)); // specular env
+
+        const vec3 F_amb   = fresnelSchlickRoughness(NdotV, F0, roughness);
+        const vec3 kD_amb  = (1.0 - F_amb) * (1.0 - metalness);
+        const vec2 envBRDF = EnvBRDFApprox(NdotV, roughness);
+        const vec3 diffuse_ambient  = irradiance * albedo;
+        const vec3 specular_ambient = prefiltered * (F0 * envBRDF.x + envBRDF.y);
+        const vec3 ambient = kD_amb * diffuse_ambient + specular_ambient;// * ao;
+
         color = ambient + Lo;
 
-        //color = color / (color + vec3(1.0));
-        //color = pow(color, vec3(1.0/2.2));
+        color = color / (color + vec3(1.0)); // Reinhard tonemap; env is HDR now
+        //color = pow(color, vec3(1.0/2.2));  // leave off: swapchain is sRGB
     }
     else
     {

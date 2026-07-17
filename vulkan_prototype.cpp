@@ -162,10 +162,18 @@ scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D 
 	// to opengl and gltf axis
 	projection[ 1 ][ 1 ] *= -1;
 
-	const glm::vec4 main_light( 20.f * std::cosf( light_time * std::numbers::pi * 2.f ),
-								2.f,
-								10.f * std::sinf( light_time * std::numbers::pi * 2.f ),
-								2.5f );
+	// Sun as a point on a sphere: fixed elevation above the horizon, azimuth orbiting over time.
+	const float sun_elevation = glm::radians( 60.f );                  // height in the sky (0 = horizon, 90 = zenith)
+	const float sun_azimuth   = light_time * std::numbers::pi * 2.f;    // full circle over one period
+	const float sun_intensity = 2.5f;
+
+	// Unit vector pointing *toward* the sun. Elevation lives in the angle, so it survives normalize().
+	const glm::vec3 to_sun( std::cosf( sun_elevation ) * std::cosf( sun_azimuth ),
+							std::sinf( sun_elevation ),
+							std::cosf( sun_elevation ) * std::sinf( sun_azimuth ) );
+
+	// Store the direction the light travels (sun -> scene); the shader negates it back to L = to_sun.
+	const glm::vec4 main_light( -to_sun, sun_intensity );
 	scene_constants constants { .view_projection_matrix = projection * view,
 								.projection_matrix = projection,
 								.view_matrix = view,
