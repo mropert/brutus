@@ -160,10 +160,6 @@ build_scene_constants( const Camera& camera, renderer::Extent2D extent, float li
 	const auto aspect_ratio = static_cast<float>( extent.width ) / extent.height;
 	glm::mat4 projection( f / aspect_ratio, 0.0f, 0.0f, 0.0f, 0.0f, f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.01f, 0.0f );
 
-	// invert the Y direction on projection matrix so that we are more similar
-	// to opengl and gltf axis
-	projection[ 1 ][ 1 ] *= -1;
-
 	// Sun as a point on a sphere: fixed elevation above the horizon, azimuth orbiting over time.
 	const float sun_elevation = glm::radians( 60.f ); // height in the sky (0 = horizon, 90 = zenith)
 	const float sun_azimuth = light_time * std::numbers::pi * 2.f; // full circle over one period
