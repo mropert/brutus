@@ -131,7 +131,7 @@ void main()
         const vec3 H = normalize(V + L);
         const float  NdotV = max(dot(N, V), 1e-4);
         const float  HdotV = max(dot(H, V), 1e-4);
-        const float attenuation = scene_constants.main_light.w * 3;
+        const float attenuation = scene_constants.main_light.w;
         const vec3 radiance     = vec3(1.0, 1.0, 1.0) * attenuation;
 
         // cook-torrance brdf
@@ -167,8 +167,7 @@ void main()
         // hemisphere (sky above, ground below). These colors ARE the environment radiance.
         // Tie the sky/ambient to the sun so there's a single exposure knob (the sun) and the
         // balance between them stays fixed. sky_to_sun is the "mood": higher = flatter/overcast.
-        const float sky_to_sun    = 0.25;
-        const float env_intensity = attenuation * sky_to_sun;
+        const float env_intensity = attenuation * scene_constants.sky_to_sun;
         const vec3 sky_color    = vec3(0.5, 0.6, 0.7) * env_intensity;
         const vec3 ground_color = vec3(0.2, 0.18, 0.15) * env_intensity;
         const vec3 R = reflect(-V, N);

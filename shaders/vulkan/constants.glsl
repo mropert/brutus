@@ -7,4 +7,5 @@ layout(buffer_reference, std430) readonly buffer SceneConstants {
 	vec3 camera_position;
 	uint pbr;
 	vec4 main_light;
+	float sky_to_sun;
 };

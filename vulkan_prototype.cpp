@@ -143,6 +143,7 @@ struct scene_constants
 	glm::vec3 camera_position;
 	uint32_t pbr;
 	glm::aligned_vec4 main_light;
+	float sky_to_sun;
 };
 
 glm::vec4 normalize_plane( const glm::vec4& plane )
@@ -150,7 +151,8 @@ glm::vec4 normalize_plane( const glm::vec4& plane )
 	return plane / glm::length( glm::vec3( plane ) );
 }
 
-scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D extent, float light_time )
+scene_constants
+build_scene_constants( const Camera& camera, renderer::Extent2D extent, float light_time, float sun_intensity, float sky_to_sun )
 {
 	const glm::mat4 view = camera.getViewMatrix();
 	// https://nlguillemot.wordpress.com/2016/12/07/reversed-z-in-opengl/
@@ -163,9 +165,8 @@ scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D 
 	projection[ 1 ][ 1 ] *= -1;
 
 	// Sun as a point on a sphere: fixed elevation above the horizon, azimuth orbiting over time.
-	const float sun_elevation = glm::radians( 60.f );                  // height in the sky (0 = horizon, 90 = zenith)
-	const float sun_azimuth   = light_time * std::numbers::pi * 2.f;    // full circle over one period
-	const float sun_intensity = 2.5f;
+	const float sun_elevation = glm::radians( 60.f ); // height in the sky (0 = horizon, 90 = zenith)
+	const float sun_azimuth = light_time * std::numbers::pi * 2.f; // full circle over one period
 
 	// Unit vector pointing *toward* the sun. Elevation lives in the angle, so it survives normalize().
 	const glm::vec3 to_sun( std::cosf( sun_elevation ) * std::cosf( sun_azimuth ),
@@ -173,13 +174,14 @@ scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D 
 							std::cosf( sun_elevation ) * std::sinf( sun_azimuth ) );
 
 	// Store the direction the light travels (sun -> scene); the shader negates it back to L = to_sun.
-	const glm::vec4 main_light( -to_sun, sun_intensity );
+	const glm::vec4 main_light( -to_sun, sun_intensity * std::numbers::pi );
 	scene_constants constants { .view_projection_matrix = projection * view,
 								.projection_matrix = projection,
 								.view_matrix = view,
 								.inverse_view_matrix = glm::inverse( view ),
 								.camera_position = camera.position,
-								.main_light = main_light };
+								.main_light = main_light,
+								.sky_to_sun = sky_to_sun };
 
 	// Math from https://github.com/zeux/niagara
 	const float draw_distance = 500.f;
@@ -199,6 +201,8 @@ struct ui_data
 	int x_miku = 1;
 	int z_miku = 1;
 	float lod_cutoff = 10.f;
+	float sun_intensity = 4.5f;
+	float sky_to_sun = 0.06;
 	bool paused = false;
 	bool vsync;
 	bool stable_power;
@@ -315,6 +319,8 @@ void draw_ui( ui_data& data,
 		ImGui::EndChild();
 
 		ImGui::SeparatorText( "Settings" );
+		ImGui::SliderFloat( "Sun intensity", &data.sun_intensity, 1.f, 10.f );
+		ImGui::SliderFloat( "Sky intensity", &data.sky_to_sun, 0.01f, 0.3f );
 		if ( ImGui::Button( data.paused ? "Unpause" : "Pause" ) )
 		{
 			data.paused = !data.paused;
@@ -703,7 +709,7 @@ int main()
 		}
 
 		{
-			auto constants = build_scene_constants( camera, draw_image_extent, time_of_day / day_period );
+			auto constants = build_scene_constants( camera, draw_image_extent, time_of_day / day_period, ui_state.sun_intensity, ui_state.sky_to_sun );
 			constants.pbr = ui_state.pbr ? 1 : 0;
 			memcpy( constant_buffers_ptr + image_index, &constants, sizeof( constants ) );
 		}
