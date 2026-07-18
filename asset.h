@@ -20,9 +20,9 @@ struct gpu_material
 {
 	pbr_data pbr_data;
 	uint32_t albedo_texture_index;
-	uint32_t normal_texture_index = -1;
-	uint32_t metallic_roughness_texture_index = -1;
-	uint32_t specular_texture_index = -1;
+	uint32_t normal_texture_index = renderer::BindlessTexture::UNSET;
+	uint32_t metallic_roughness_texture_index = renderer::BindlessTexture::UNSET;
+	uint32_t specular_texture_index = renderer::BindlessTexture::UNSET;
 	uint32_t padding[ 2 ];
 };
 
@@ -56,7 +56,7 @@ struct gpu_mesh
 
 struct index_buffer
 {
-	index_buffer( renderer::Device& device, uint32_t max_size )
+	index_buffer( renderer::Device& device, size_t max_size )
 		: buffer( device.create_buffer( renderer::Buffer::Usage::INDEX_BUFFER | renderer::Buffer::Usage::TRANSFER_DST,
 										max_size * sizeof( uint32_t ) ) )
 		, capacity( max_size )
@@ -64,8 +64,8 @@ struct index_buffer
 	}
 
 	renderer::raii::Buffer buffer;
-	std::atomic<uint32_t> size = 0;
-	uint32_t capacity;
+	std::atomic<size_t> size = 0;
+	size_t capacity;
 };
 
 using BindlessManager = renderer::BindlessManager<gpu_mesh, gpu_material>;
@@ -76,7 +76,7 @@ struct mesh
 {
 	renderer::raii::Buffer data_buffer; // vertex + meshlets
 	mesh_handle handle;
-	uint32_t material_index;
+	size_t material_index;
 	// Data below is only for debugging purposes, a CPU side copy of the GPU-side descriptor
 	gpu_mesh gpu_data;
 };
@@ -92,7 +92,7 @@ struct scene_node
 {
 	std::vector<uint32_t> children; // Use small vector once we get one
 	glm::mat4 transform;
-	uint32_t mesh = -1;
+	size_t mesh = static_cast<size_t>( -1 );
 };
 
 struct asset

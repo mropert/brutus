@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(MSVC)
-	add_compile_options(/Zi /MP)
+	add_compile_options(/Zi /MP /W4 /WX)
 	add_link_options(/DEBUG)
 
 	add_library(Optick INTERFACE)

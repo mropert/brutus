@@ -162,7 +162,7 @@ build_scene_constants( const Camera& camera, renderer::Extent2D extent, float li
 
 	// Sun as a point on a sphere: fixed elevation above the horizon, azimuth orbiting over time.
 	const float sun_elevation = glm::radians( 60.f ); // height in the sky (0 = horizon, 90 = zenith)
-	const float sun_azimuth = light_time * std::numbers::pi * 2.f; // full circle over one period
+	const float sun_azimuth = light_time * std::numbers::pi_v<float> * 2.f; // full circle over one period
 
 	// Unit vector pointing *toward* the sun. Elevation lives in the angle, so it survives normalize().
 	const glm::vec3 to_sun( std::cosf( sun_elevation ) * std::cosf( sun_azimuth ),
@@ -198,7 +198,7 @@ struct ui_data
 	int z_miku = 1;
 	float lod_cutoff = 10.f;
 	float sun_intensity = 4.5f;
-	float sky_to_sun = 0.06;
+	float sky_to_sun = 0.06f;
 	bool paused = false;
 	bool vsync;
 	bool stable_power;
@@ -694,7 +694,6 @@ int main()
 
 		auto [ image_index, swapchain_image, swapchain_image_view ] = swapchain.acquire();
 
-		const uint32_t query_pool_offset = image_index * Timestamps::COUNT;
 		renderer::Statistics stats;
 		if ( frame_count > renderer::MAX_FRAMES_IN_FLIGHT )
 		{

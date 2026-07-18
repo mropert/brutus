@@ -109,7 +109,7 @@ namespace
 	class attribute_accessor
 	{
 	public:
-		attribute_accessor( const std::byte* buffer, size_t count, uint32_t stride )
+		attribute_accessor( const std::byte* buffer, size_t count, size_t stride )
 			: _stride( stride != 0 ? stride : sizeof( T ) )
 			, _data( buffer, count * _stride )
 		{
@@ -130,7 +130,7 @@ namespace
 		size_t size() const { return _data.size(); }
 
 	private:
-		uint32_t _stride;
+		size_t _stride;
 		std::span<const std::byte> _data;
 	};
 }
@@ -148,7 +148,7 @@ namespace MikkTSpace
 
 	int get_num_faces( const SMikkTSpaceContext* context )
 	{
-		return static_cast<UserData*>( context->m_pUserData )->indices.size() / 3;
+		return static_cast<int>( static_cast<UserData*>( context->m_pUserData )->indices.size() / 3 );
 	}
 
 	int get_num_vertices_of_face( const SMikkTSpaceContext*, const int )
@@ -225,7 +225,7 @@ public:
 
 	~gpu_upload_job() { assert( _state == state::DONE ); }
 
-	void queue( const void* data, uint32_t size, renderer::Buffer& buffer, const uint32_t offset = 0 )
+	void queue( const void* data, size_t size, renderer::Buffer& buffer, const size_t offset = 0 )
 	{
 		assert( _state == state::UPLOADING );
 		assert( size < _size );
@@ -241,14 +241,14 @@ public:
 	}
 
 	template <typename T>
-	void queue( std::span<const T> data, renderer::Buffer& buffer, const uint32_t offset = 0 )
+	void queue( std::span<const T> data, renderer::Buffer& buffer, const size_t offset = 0 )
 	{
 		assert( offset % alignof( T ) == 0 );
 		queue( data.data(), data.size_bytes(), buffer, offset );
 	}
 
 	template <typename T>
-	void queue( const std::vector<T>& data, renderer::Buffer& buffer, const uint32_t offset = 0 )
+	void queue( const std::vector<T>& data, renderer::Buffer& buffer, const size_t offset = 0 )
 	{
 		queue( std::span<const T>( data ), buffer, offset );
 	}
@@ -258,8 +258,8 @@ public:
 		assert( _state == state::UPLOADING );
 		const auto ptr = static_cast<std::byte*>( _upload_buffer.get_mapped_address() );
 		const auto gpu_format = sdl_gpu_format( surface.format );
-		const auto pitch = surface.w * get_format_size( sdl_to_vulkan_format( gpu_format ) );
-		const auto size = pitch * surface.h;
+		const auto pitch = static_cast<int>( surface.w * get_format_size( sdl_to_vulkan_format( gpu_format ) ) );
+		const auto size = static_cast<size_t>( pitch * surface.h );
 		assert( size < _size );
 		if ( size + _offset > _size )
 		{
@@ -321,12 +321,12 @@ private:
 		_cmd_buffer->begin();
 	}
 
-	uint32_t _size;
+	size_t _size;
 	renderer::Device& _device;
 	renderer::raii::CommandBuffer _cmd_buffer;
 	renderer::raii::Buffer _upload_buffer;
 	renderer::raii::Fence _upload_fence;
-	uint32_t _offset = 0;
+	size_t _offset = 0;
 	state _state = state::UPLOADING;
 };
 
@@ -338,7 +338,7 @@ class asset_load_job
 		std::size_t stride = 0;
 		std::size_t length = 0;
 		VkFormat format = VK_FORMAT_UNDEFINED;
-		uint32_t buffer_index = -1;
+		uint32_t buffer_index = static_cast<uint32_t>( -1 );
 	};
 
 	struct mesh_data
@@ -688,7 +688,7 @@ private:
 	{
 		OPTICK_EVENT();
 		_mesh_upload_data.resize( _parsed_meshes.size() );
-		tbb::parallel_for( 0zu, _parsed_meshes.size(), [ this ]( size_t index ) { prepare_mesh( index ); } );
+		tbb::parallel_for( 0zu, _parsed_meshes.size(), [ this ]( size_t index ) { prepare_mesh( static_cast<uint32_t>( index ) ); } );
 #if 0
 		for ( int i = 0; i < _parsed_meshes.size(); ++i )
 		{
@@ -768,30 +768,31 @@ private:
 
 		{
 			OPTICK_EVENT( "lod_generation" );
-			constexpr std::array<float, 3> lod_indices_factor { { 0.2, 0.05, 0.01 } };
-			constexpr std::array<float, 3> lod_error_factor { { 0.01, 0.04, 0.1 } };
+			constexpr std::array<float, 3> lod_indices_factor { { 0.2f, 0.05f, 0.01f } };
+			constexpr std::array<float, 3> lod_error_factor { { 0.01f, 0.04f, 0.1f } };
 			std::vector<uint32_t> buffer( upload_data.indices.size() );
 			for ( int lod = 0; lod < upload_data.indices_per_lod.size(); ++lod )
 			{
 				const float attr_weights[ 3 ] = { 0.5f, 0.5f, 0.5f };
-				const uint32_t size = meshopt_simplifyWithAttributes( buffer.data(),
-																	  upload_data.indices.data(),
-																	  upload_data.indices.size(),
-																	  &upload_data.vertices.front().position.x,
-																	  upload_data.vertices.size(),
-																	  sizeof( mesh_vertex ),
-																	  &upload_data.vertices.front().normal.x,
-																	  sizeof( mesh_vertex ),
-																	  attr_weights,
-																	  3,
-																	  nullptr,
-																	  parsed_mesh.indices.length * lod_indices_factor[ lod ],
-																	  lod_error_factor[ lod ],
-																	  0,
-																	  nullptr );
+				const auto size = meshopt_simplifyWithAttributes(
+					buffer.data(),
+					upload_data.indices.data(),
+					upload_data.indices.size(),
+					&upload_data.vertices.front().position.x,
+					upload_data.vertices.size(),
+					sizeof( mesh_vertex ),
+					&upload_data.vertices.front().normal.x,
+					sizeof( mesh_vertex ),
+					attr_weights,
+					3,
+					nullptr,
+					static_cast<size_t>( parsed_mesh.indices.length * lod_indices_factor[ lod ] ),
+					lod_error_factor[ lod ],
+					0,
+					nullptr );
 
 				meshopt_optimizeVertexCache( buffer.data(), buffer.data(), size, upload_data.vertices.size() );
-				upload_data.indices_per_lod[ lod ] = size;
+				upload_data.indices_per_lod[ lod ] = static_cast<uint32_t>( size );
 				upload_data.lod_indices.insert( end( upload_data.lod_indices ), buffer.data(), buffer.data() + size );
 			}
 		}
@@ -799,7 +800,7 @@ private:
 		{
 			OPTICK_EVENT( "meshlet_generation" );
 			std::vector<meshopt_Meshlet> meshlet_buffer;
-			uint32_t index_offset = 0;
+			size_t index_offset = 0;
 			for ( int lod = 0; lod < 4; ++lod )
 			{
 				const auto indices_ptr = lod == 0 ? upload_data.indices.data() : upload_data.lod_indices.data() + index_offset;
@@ -827,7 +828,7 @@ private:
 																	  96,
 																	  0.f );
 
-					upload_data.meshlets_per_lod.push_back( meshlet_count );
+					upload_data.meshlets_per_lod.push_back( static_cast<uint32_t>( meshlet_count ) );
 					const auto& last = meshlet_buffer[ meshlet_count - 1 ];
 
 					upload_data.meshlet_vertices.resize( vertices_offset + last.vertex_offset + last.vertex_count );
@@ -835,8 +836,8 @@ private:
 
 					for ( const auto& meshlet : std::span( meshlet_buffer.data(), meshlet_count ) )
 					{
-						const uint32_t vertex_index = meshlet.vertex_offset + vertices_offset;
-						const uint32_t triangle_index = meshlet.triangle_offset + triangles_offset;
+						const size_t vertex_index = meshlet.vertex_offset + vertices_offset;
+						const size_t triangle_index = meshlet.triangle_offset + triangles_offset;
 						const auto bounds = meshopt_computeMeshletBounds( upload_data.meshlet_vertices.data() + vertex_index,
 																		  upload_data.meshlet_triangles.data() + triangle_index,
 																		  meshlet.triangle_count,
@@ -845,8 +846,8 @@ private:
 																		  sizeof( mesh_vertex ) );
 
 						upload_data.meshlets.emplace_back(
-							vertex_index,
-							triangle_index,
+							static_cast<uint32_t>( vertex_index ),
+							static_cast<uint32_t>( triangle_index ),
 							meshlet.vertex_count,
 							meshlet.triangle_count,
 							glm::vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ),
@@ -889,10 +890,10 @@ private:
 		mesh.gpu_data.bounding_sphere.w = bounds.radius;
 
 		// Index buffer
-		uint32_t index_offset = _index_buffer.size.fetch_add( upload_data.indices.size() );
+		auto index_offset = _index_buffer.size.fetch_add( upload_data.indices.size() );
 		_mesh_upload.queue( upload_data.indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
-		mesh.gpu_data.lods[ 0 ].indices_offset = index_offset;
-		mesh.gpu_data.lods[ 0 ].indices_count = upload_data.indices.size();
+		mesh.gpu_data.lods[ 0 ].indices_offset = static_cast<uint32_t>( index_offset );
+		mesh.gpu_data.lods[ 0 ].indices_count = static_cast<uint32_t>( upload_data.indices.size() );
 
 		index_offset = _index_buffer.size.fetch_add( upload_data.lod_indices.size() );
 		_mesh_upload.queue( upload_data.lod_indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
@@ -979,7 +980,6 @@ private:
 	{
 		OPTICK_EVENT();
 		_textures.resize( _textures_usage.size() );
-		std::size_t offset = 0;
 		for ( int i = 0; i < _textures_usage.size(); ++i )
 		{
 			if ( _textures_usage[ i ] != texture_usage::UNUSED )
@@ -1039,9 +1039,9 @@ private:
 				{
 					if ( _asset.materials[ i ].specular->specularTexture )
 					{
-						material.gpu_data.specular_texture_index = _textures[ _asset.materials[ i ]
-																				  .specular->specularTexture->textureIndex ]
-																	   .handles.texture_index;
+						material.gpu_data
+							.specular_texture_index = _textures[ _asset.materials[ i ].specular->specularTexture->textureIndex ]
+														  .handles.texture_index;
 					}
 				}
 				material.gpu_data.pbr_data.base_color.x = _asset.materials[ i ].pbrData.baseColorFactor.x();
