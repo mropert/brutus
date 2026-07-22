@@ -360,8 +360,8 @@ struct grid_constants
 
 struct depth_pyramid_constants
 {
-	uint32_t depth_in;
-	uint32_t depth_out;
+	renderer::BindlessSampledTexture depth_in;
+	renderer::BindlessStorageTexture depth_out;
 	glm::aligned_vec2 size;
 };
 
@@ -374,7 +374,7 @@ struct compute_draws_constants
 	renderer::BufferHandle scene_constants;
 	uint32_t draws_count;
 	float lod_cutoff;
-	uint32_t depth_pyramid;
+	renderer::BindlessSampledTexture depth_pyramid;
 };
 
 uint32_t calc_group_count( uint32_t count )
@@ -704,7 +704,11 @@ int main()
 		}
 
 		{
-			auto constants = build_scene_constants( camera, draw_image_extent, time_of_day / day_period, ui_state.sun_intensity, ui_state.sky_to_sun );
+			auto constants = build_scene_constants( camera,
+													draw_image_extent,
+													time_of_day / day_period,
+													ui_state.sun_intensity,
+													ui_state.sky_to_sun );
 			constants.pbr = ui_state.pbr ? 1 : 0;
 			memcpy( constant_buffers_ptr + image_index, &constants, sizeof( constants ) );
 		}
@@ -801,7 +805,7 @@ int main()
 														  .scene_constants = constants_address,
 														  .draws_count = draw_count,
 														  .lod_cutoff = ui_state.lod_cutoff,
-														  .depth_pyramid = depth_pyramid.handles.texture_index };
+														  .depth_pyramid = depth_pyramid.handles.sampled_texture };
 				command_buffer->push_constants( pipeline, constants );
 				command_buffer->dispatch( calc_group_count( draw_count ), 1, 1 );
 				command_buffer->buffer_barrier( draw_commands_buffer );
@@ -890,9 +894,9 @@ int main()
 													renderer::Texture::Layout::GENERAL,
 													mip );
 
-				const depth_pyramid_constants constants { .depth_in = mip == 0 ? depth_resolved_image.handles.texture_index
-																			   : depth_pyramid.mips[ mip - 1 ].texture_index,
-														  .depth_out = depth_pyramid.mips[ mip ].storage_index,
+				const depth_pyramid_constants constants { .depth_in = mip == 0 ? depth_resolved_image.handles.sampled_texture
+																			   : depth_pyramid.mips[ mip - 1 ].sampled_texture,
+														  .depth_out = depth_pyramid.mips[ mip ].storage_texture,
 														  .size = glm::aligned_vec2( extent.width, extent.height ) };
 				command_buffer->push_constants( pipelines.get( depth_pyramid_pipeline ), constants );
 				command_buffer->dispatch( calc_group_count( extent.width ), calc_group_count( extent.height ), 1 );

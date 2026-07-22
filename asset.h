@@ -19,10 +19,10 @@ struct pbr_data
 struct gpu_material
 {
 	pbr_data pbr_data;
-	uint32_t albedo_texture_index;
-	uint32_t normal_texture_index = renderer::BindlessTexture::UNSET;
-	uint32_t metallic_roughness_texture_index = renderer::BindlessTexture::UNSET;
-	uint32_t specular_texture_index = renderer::BindlessTexture::UNSET;
+	renderer::BindlessSampledTexture albedo_texture;
+	renderer::BindlessSampledTexture normal_texture;
+	renderer::BindlessSampledTexture metallic_roughness_texture;
+	renderer::BindlessSampledTexture specular_texture;
 	uint32_t padding[ 2 ];
 };
 

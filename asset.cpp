@@ -1019,29 +1019,28 @@ private:
 				auto& material = _materials[ i ];
 				if ( _asset.materials[ i ].pbrData.baseColorTexture )
 				{
-					material.gpu_data.albedo_texture_index = _textures[ _asset.materials[ i ].pbrData.baseColorTexture->textureIndex ]
-																 .handles.texture_index;
+					material.gpu_data.albedo_texture = _textures[ _asset.materials[ i ].pbrData.baseColorTexture->textureIndex ]
+														   .handles.sampled_texture;
 				}
 
 				if ( _asset.materials[ i ].normalTexture )
 				{
-					material.gpu_data.normal_texture_index = _textures[ _asset.materials[ i ].normalTexture->textureIndex ]
-																 .handles.texture_index;
+					material.gpu_data.normal_texture = _textures[ _asset.materials[ i ].normalTexture->textureIndex ]
+														   .handles.sampled_texture;
 				}
 
 				if ( _asset.materials[ i ].pbrData.metallicRoughnessTexture )
 				{
-					material.gpu_data.metallic_roughness_texture_index = _textures[ _asset.materials[ i ]
-																						.pbrData.metallicRoughnessTexture->textureIndex ]
-																			 .handles.texture_index;
+					material.gpu_data
+						.metallic_roughness_texture = _textures[ _asset.materials[ i ].pbrData.metallicRoughnessTexture->textureIndex ]
+														  .handles.sampled_texture;
 				}
 				if ( _asset.materials[ i ].specular )
 				{
 					if ( _asset.materials[ i ].specular->specularTexture )
 					{
-						material.gpu_data
-							.specular_texture_index = _textures[ _asset.materials[ i ].specular->specularTexture->textureIndex ]
-														  .handles.texture_index;
+						material.gpu_data.specular_texture = _textures[ _asset.materials[ i ].specular->specularTexture->textureIndex ]
+																 .handles.sampled_texture;
 					}
 				}
 				material.gpu_data.pbr_data.base_color.x = _asset.materials[ i ].pbrData.baseColorFactor.x();
