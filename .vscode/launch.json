@@ -1,0 +1,29 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug (CMake launch target)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${command:cmake.launchTargetPath}",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "VK_ADD_LAYER_PATH",
+                    "value": "${workspaceFolder}/build/vcpkg_installed/arm64-osx/bin"
+                },
+                {
+                    "name": "VK_ICD_FILENAMES",
+                    "value": "/opt/homebrew/Cellar/molten-vk/1.4.1/etc/vulkan/icd.d/MoltenVK_icd.json"
+                }
+            ],
+            "externalConsole": false,
+            "MIMode": "lldb"
+        }
+    ]
+}

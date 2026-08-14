@@ -128,7 +128,7 @@ struct tbb_observer final : public tbb::task_scheduler_observer
 	{
 		if ( is_worker )
 		{
-			static thread_local OPTICK_THREAD( "TBB Worker" );
+			OPTICK_THREAD_STATIC( "TBB Worker" );
 		}
 	}
 };
@@ -478,19 +478,21 @@ int main()
 		const auto internals = device.get_internals();
 		ImGui_ImplSDL3_InitForVulkan( internals.window );
 		const VkFormat color_format = static_cast<VkFormat>( draw_image_format );
-		ImGui_ImplVulkan_InitInfo info { .ApiVersion = internals.api_version,
-										 .Instance = internals.instance,
-										 .PhysicalDevice = internals.physical_device,
-										 .Device = internals.device,
-										 .QueueFamily = internals.queue_family,
-										 .Queue = internals.queue,
-										 .MinImageCount = swapchain.get_image_count(),
-										 .ImageCount = swapchain.get_image_count(),
-										 .DescriptorPoolSize = renderer::MAX_FRAMES_IN_FLIGHT,
-										 .UseDynamicRendering = true,
-										 .PipelineRenderingCreateInfo = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
-																		  .colorAttachmentCount = 1,
-																		  .pColorAttachmentFormats = &color_format } };
+		ImGui_ImplVulkan_InitInfo info {
+			.ApiVersion = internals.api_version,
+			.Instance = internals.instance,
+			.PhysicalDevice = internals.physical_device,
+			.Device = internals.device,
+			.QueueFamily = internals.queue_family,
+			.Queue = internals.queue,
+			.DescriptorPoolSize = IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE,
+			.MinImageCount = swapchain.get_image_count(),
+			.ImageCount = swapchain.get_image_count(),
+			.PipelineInfoMain = { .PipelineRenderingCreateInfo = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
+																   .colorAttachmentCount = 1u,
+																   .pColorAttachmentFormats = &color_format } },
+			.UseDynamicRendering = true
+		};
 		ImGui_ImplVulkan_Init( &info );
 	}
 
@@ -531,7 +533,7 @@ int main()
 
 	index_buffer indices( device, 128 * 1024 * 1024 );
 
-	renderer::PipelineManager pipelines( device, "../shaders/vulkan", bindless_manager );
+	renderer::PipelineManager pipelines( device, "shaders/vulkan", bindless_manager );
 
 	const auto mesh_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .color_format = draw_image_format,
@@ -575,11 +577,11 @@ int main()
 
 	std::vector<asset> assets;
 #ifndef BISTRO
-	assets.push_back( load_asset( device, bindless_manager, indices, "../assets/player.glb" ) );
-	assets.push_back( load_asset( device, bindless_manager, indices, "../assets/sabrina.glb" ) );
+	assets.push_back( load_asset( device, bindless_manager, indices, "assets/player.glb" ) );
+	assets.push_back( load_asset( device, bindless_manager, indices, "assets/sabrina.glb" ) );
 #else
-	assets.push_back( load_asset( device, bindless_manager, indices, "../../niagara_bistro/bistro.gltf" ) );
-	//assets.push_back( load_asset( device, bindless_manager, indices, "../assets/player.glb" ) );
+	assets.push_back( load_asset( device, bindless_manager, indices, "../niagara_bistro/bistro.gltf" ) );
+	//assets.push_back( load_asset( device, bindless_manager, indices, "assets/player.glb" ) );
 #endif
 
 	auto constant_buffers = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
