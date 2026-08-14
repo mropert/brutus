@@ -890,12 +890,12 @@ private:
 		mesh.gpu_data.bounding_sphere.w = bounds.radius;
 
 		// Index buffer
-		auto index_offset = _index_buffer.size.fetch_add( upload_data.indices.size() );
+		auto index_offset = _index_buffer.size.fetch_add( upload_data.indices.size() + upload_data.lod_indices.size() );
 		_mesh_upload.queue( upload_data.indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
 		mesh.gpu_data.lods[ 0 ].indices_offset = static_cast<uint32_t>( index_offset );
 		mesh.gpu_data.lods[ 0 ].indices_count = static_cast<uint32_t>( upload_data.indices.size() );
 
-		index_offset = _index_buffer.size.fetch_add( upload_data.lod_indices.size() );
+		index_offset += mesh.gpu_data.lods[ 0 ].indices_count;
 		_mesh_upload.queue( upload_data.lod_indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
 		for ( int lod = 1; lod < mesh.gpu_data.lods.size(); ++lod )
 		{
