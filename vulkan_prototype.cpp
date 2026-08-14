@@ -768,12 +768,22 @@ int main()
 		command_buffer->reset_query( statistics_queries[ image_index ] );
 		command_buffer->begin_query( statistics_queries[ image_index ] );
 
-		if ( last_scene_hash != scene_hash || !occlusion_culling )
+		if ( occlusion_culling )
 		{
-			// Can't reuse visibility buffer if the scene has changed
-			command_buffer->fill_buffer( draw_visibility_buffer, 0, draw_visibility_buffer.get_size(), 0 );
+			if ( last_scene_hash != scene_hash )
+			{
+				// Can't reuse visibility buffer if the scene has changed
+				command_buffer->fill_buffer( draw_visibility_buffer, 0, draw_visibility_buffer.get_size(), 0 );
+				command_buffer->buffer_barrier( draw_visibility_buffer );
+				last_scene_hash = scene_hash;
+			}
+		}
+		else
+		{
+			// Force everything to be drawn in the early pass
+			command_buffer->fill_buffer( draw_visibility_buffer, 0, draw_visibility_buffer.get_size(), 0x01010101 );
 			command_buffer->buffer_barrier( draw_visibility_buffer );
-			last_scene_hash = scene_hash;
+			last_scene_hash = 0xdeadbeef;
 		}
 
 		command_buffer->transition_texture( draw_image,
@@ -880,40 +890,43 @@ int main()
 
 		draw_meshes( true );
 
-		command_buffer->transition_texture( depth_resolved_image.texture,
-											renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL,
-											renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
-
+		if ( occlusion_culling )
 		{
-			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DEPTH_PYRAMID );
-			OPTICK_GPU_EVENT( "Depth Pyramid" );
-			command_buffer->bind_pipeline( pipelines.get( depth_pyramid_pipeline ), bindless_manager );
-			auto extent = depth_pyramid_extent;
-			for ( int mip = 0; mip < depth_pyramid.mips.size(); ++mip )
+			command_buffer->transition_texture( depth_resolved_image.texture,
+												renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL,
+												renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
+
 			{
-				command_buffer->transition_texture( depth_pyramid.texture,
-													renderer::Texture::Layout::UNDEFINED,
-													renderer::Texture::Layout::GENERAL,
-													mip );
+				command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DEPTH_PYRAMID );
+				OPTICK_GPU_EVENT( "Depth Pyramid" );
+				command_buffer->bind_pipeline( pipelines.get( depth_pyramid_pipeline ), bindless_manager );
+				auto extent = depth_pyramid_extent;
+				for ( int mip = 0; mip < depth_pyramid.mips.size(); ++mip )
+				{
+					command_buffer->transition_texture( depth_pyramid.texture,
+														renderer::Texture::Layout::UNDEFINED,
+														renderer::Texture::Layout::GENERAL,
+														mip );
 
-				const depth_pyramid_constants constants { .depth_in = mip == 0 ? depth_resolved_image.handles.sampled_texture
-																			   : depth_pyramid.mips[ mip - 1 ].sampled_texture,
-														  .depth_out = depth_pyramid.mips[ mip ].storage_texture,
-														  .size = glm::aligned_vec2( extent.width, extent.height ) };
-				command_buffer->push_constants( pipelines.get( depth_pyramid_pipeline ), constants );
-				command_buffer->dispatch( calc_group_count( extent.width ), calc_group_count( extent.height ), 1 );
+					const depth_pyramid_constants constants { .depth_in = mip == 0 ? depth_resolved_image.handles.sampled_texture
+																				: depth_pyramid.mips[ mip - 1 ].sampled_texture,
+															.depth_out = depth_pyramid.mips[ mip ].storage_texture,
+															.size = glm::aligned_vec2( extent.width, extent.height ) };
+					command_buffer->push_constants( pipelines.get( depth_pyramid_pipeline ), constants );
+					command_buffer->dispatch( calc_group_count( extent.width ), calc_group_count( extent.height ), 1 );
 
-				command_buffer->transition_texture( depth_pyramid.texture,
-													renderer::Texture::Layout::GENERAL,
-													renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL,
-													mip );
+					command_buffer->transition_texture( depth_pyramid.texture,
+														renderer::Texture::Layout::GENERAL,
+														renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL,
+														mip );
 
-				extent.width = std::max( extent.width / 2, 1u );
-				extent.height = std::max( extent.height / 2, 1u );
+					extent.width = std::max( extent.width / 2, 1u );
+					extent.height = std::max( extent.height / 2, 1u );
+				}
 			}
-		}
 
-		draw_meshes( false );
+			draw_meshes( false );
+		}
 
 		{
 			OPTICK_GPU_EVENT( "Draw Grid" );
