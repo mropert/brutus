@@ -28,5 +28,11 @@
     "vulkan",
     "vulkan-memory-allocator",
     "vulkan-validationlayers"
-  ]
+  ],
+  "features": {
+    "tracy": {
+      "description": "Enable Tracy profiler support",
+      "dependencies": [ "tracy" ]
+    }
+  }
 }

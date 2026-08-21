@@ -1,4 +1,10 @@
 cmake_minimum_required(VERSION 3.18)
+
+option(USE_TRACY "Enable Tracy profiler instrumentation" OFF)
+if(USE_TRACY)
+	list(APPEND VCPKG_MANIFEST_FEATURES "tracy")
+endif()
+
 project(brutus-ng CXX)
 
 set(CMAKE_CXX_STANDARD 23)

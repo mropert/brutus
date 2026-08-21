@@ -128,7 +128,7 @@ struct tbb_observer final : public tbb::task_scheduler_observer
 	{
 		if ( is_worker )
 		{
-			OPTICK_THREAD_STATIC( "TBB Worker" );
+			PROFILER_THREAD_STATIC( "TBB Worker" );
 		}
 	}
 };
@@ -260,7 +260,7 @@ void draw_ui( ui_data& data,
 			  std::span<const float> gpu_timings,
 			  const renderer::Statistics& stats )
 {
-	OPTICK_EVENT();
+	PROFILER_SCOPE();
 	ImGui::Begin( "Vulkan renderer" );
 	{
 		ImGui::SeparatorText( "Hardware" );
@@ -448,32 +448,32 @@ int main()
 
 	if ( profile_startup )
 	{
-		OPTICK_START_CAPTURE();
+		PROFILER_START_CAPTURE();
 	}
 
-	OPTICK_PUSH( "Startup" );
+	PROFILER_SCOPE_PUSH( startup, "Startup" );
 
 	tbb_observer observer { };
 	observer.observe();
 
 	gpu_stable_power::Context stable_power;
 
-	OPTICK_PUSH( "create_device" );
+	PROFILER_SCOPE_PUSH( create_device, "create_device" );
 	renderer::Device device( "Brutus-NG [Vulkan]" );
 	const auto props = device.get_properties();
-	OPTICK_POP();
+	PROFILER_SCOPE_POP( create_device );
 
 	bool vsync = true;
 
-	OPTICK_PUSH( "create_swapchain" );
+	PROFILER_SCOPE_PUSH( create_swapchain, "create_swapchain" );
 	constexpr auto swapchain_image_format = renderer::Texture::Format::R8G8B8A8_SRGB;
 	renderer::Swapchain swapchain( device, swapchain_image_format, vsync );
-	OPTICK_POP();
+	PROFILER_SCOPE_POP( create_swapchain );
 
 	constexpr auto draw_image_format = renderer::Texture::Format::R16G16B16A16_SFLOAT;
 
 	{
-		OPTICK_EVENT( "init_imgui" );
+		PROFILER_SCOPE_N( "init_imgui" );
 		ImGui::CreateContext();
 		const auto internals = device.get_internals();
 		ImGui_ImplSDL3_InitForVulkan( internals.window );
@@ -620,18 +620,18 @@ int main()
 
 	pipelines.wait_ready();
 
-	OPTICK_POP();
+	PROFILER_SCOPE_POP( startup );
 
 	Camera camera { .position = glm::vec3( 0, 1.f, 2.f ) };
 	Timings gpu_timings( device.get_timestamp_period() );
 
 	if ( profile_startup )
 	{
-		OPTICK_STOP_CAPTURE();
+		PROFILER_STOP_CAPTURE();
 #ifdef _DEBUG
-		OPTICK_SAVE_CAPTURE( "startup_debug.opt" );
+		PROFILER_SAVE_CAPTURE( "startup_debug.opt" );
 #else
-		OPTICK_SAVE_CAPTURE( "startup_release.opt" );
+		PROFILER_SAVE_CAPTURE( "startup_release.opt" );
 #endif
 	}
 
@@ -653,7 +653,7 @@ int main()
 
 	while ( !quit )
 	{
-		OPTICK_FRAME( "MainThread" );
+		PROFILER_FRAME( "MainThread" );
 		SDL_Event event;
 		while ( SDL_PollEvent( &event ) )
 		{
@@ -804,7 +804,7 @@ int main()
 			command_buffer->write_timestamp( timestamp_queries[ image_index ],
 											 early ? Timestamps::COMPUTE_DRAWS_EARLY : Timestamps::COMPUTE_DRAWS_LATE );
 			{
-				OPTICK_GPU_EVENT( "Compute Draws" );
+				PROFILER_GPU_EVENT( "Compute Draws" );
 				command_buffer->buffer_barrier( draw_commands_buffer );
 				command_buffer->fill_buffer( draw_commands_buffer, 0, sizeof( uint32_t ), 0 );
 				command_buffer->buffer_barrier( draw_commands_buffer );
@@ -845,7 +845,7 @@ int main()
 											 early ? Timestamps::DRAW_MESHES_EARLY : Timestamps::DRAW_MESHES_LATE );
 			if ( mesh_shading )
 			{
-				OPTICK_GPU_EVENT( "Draw Meshlets" );
+				PROFILER_GPU_EVENT( "Draw Meshlets" );
 				command_buffer->bind_pipeline( pipelines.get( mesh_pipeline_meshlet ), bindless_manager );
 				const draw_meshes_constants constants { .scene_constants = constants_address,
 														.draws_buffer = draw_buffer_address,
@@ -860,7 +860,7 @@ int main()
 			}
 			else
 			{
-				OPTICK_GPU_EVENT( "Draw Meshes" );
+				PROFILER_GPU_EVENT( "Draw Meshes" );
 				command_buffer->bind_pipeline( pipelines.get( mesh_pipeline ), bindless_manager );
 				command_buffer->bind_index_buffer( indices.buffer );
 				const draw_meshes_constants constants { .scene_constants = constants_address,
@@ -898,7 +898,7 @@ int main()
 
 			{
 				command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DEPTH_PYRAMID );
-				OPTICK_GPU_EVENT( "Depth Pyramid" );
+				PROFILER_GPU_EVENT( "Depth Pyramid" );
 				command_buffer->bind_pipeline( pipelines.get( depth_pyramid_pipeline ), bindless_manager );
 				auto extent = depth_pyramid_extent;
 				for ( int mip = 0; mip < depth_pyramid.mips.size(); ++mip )
@@ -929,7 +929,7 @@ int main()
 		}
 
 		{
-			OPTICK_GPU_EVENT( "Draw Grid" );
+			PROFILER_GPU_EVENT( "Draw Grid" );
 			command_buffer->begin_rendering(
 				draw_image_extent,
 				renderer::RenderAttachment { .target = draw_image_view, .resolve_target = draw_resolved_image_view },
@@ -948,7 +948,7 @@ int main()
 		command_buffer->begin_rendering( draw_image_extent, renderer::RenderAttachment { .target = draw_resolved_image_view } );
 
 		{
-			OPTICK_GPU_EVENT( "Draw UI" );
+			PROFILER_GPU_EVENT( "Draw UI" );
 			ImGui::Render();
 			ImGui_ImplVulkan_RenderDrawData( ImGui::GetDrawData(), command_buffer->get_impl() );
 		}
@@ -995,7 +995,7 @@ int main()
 	ImGui_ImplSDL3_Shutdown();
 	ImGui::DestroyContext();
 
-	OPTICK_SHUTDOWN();
+	PROFILER_SHUTDOWN();
 
 	return 0;
 }

@@ -84,7 +84,7 @@ struct mesh_vertex
 
 renderer::raii::Texture make_image_from_surface( renderer::Device& device, const SDL_Surface& surface, bool sRGB )
 {
-	OPTICK_EVENT();
+	PROFILER_SCOPE();
 	const auto format = sdl_to_vulkan_format( sdl_gpu_format( surface.format ), sRGB );
 	if ( format == VK_FORMAT_UNDEFINED )
 	{
@@ -389,7 +389,7 @@ public:
 
 	asset run()
 	{
-		OPTICK_EVENT();
+		PROFILER_SCOPE();
 		parse();
 		tbb::parallel_invoke(
 			[ & ]()
@@ -549,12 +549,12 @@ private:
 
 	void parse()
 	{
-		OPTICK_EVENT();
+		PROFILER_SCOPE();
 
 		fastgltf::Parser parser( fastgltf::Extensions::KHR_materials_specular );
 		fastgltf::GltfDataBuffer data;
 		{
-			OPTICK_EVENT( "gltf_read_io" );
+			PROFILER_SCOPE_N( "gltf_read_io" );
 			auto res = fastgltf::GltfDataBuffer::FromPath( _path );
 			if ( res.error() != fastgltf::Error::None )
 			{
@@ -564,7 +564,7 @@ private:
 		}
 
 		{
-			OPTICK_EVENT( "gltf_parse" );
+			PROFILER_SCOPE_N( "gltf_parse" );
 			auto res = parser.loadGltf( data, _path.parent_path(), fastgltf::Options::None );
 			if ( auto error = res.error(); error != fastgltf::Error::None )
 			{
@@ -686,7 +686,7 @@ private:
 
 	void prepare_meshes()
 	{
-		OPTICK_EVENT();
+		PROFILER_SCOPE();
 		_mesh_upload_data.resize( _parsed_meshes.size() );
 		tbb::parallel_for( 0zu, _parsed_meshes.size(), [ this ]( size_t index ) { prepare_mesh( static_cast<uint32_t>( index ) ); } );
 #if 0
@@ -699,7 +699,7 @@ private:
 
 	void prepare_mesh( uint32_t mesh_index )
 	{
-		OPTICK_EVENT();
+		PROFILER_SCOPE();
 		const auto& parsed_mesh = _parsed_meshes[ mesh_index ];
 		auto& upload_data = _mesh_upload_data[ mesh_index ];
 
@@ -734,7 +734,7 @@ private:
 		auto tangents_stride = parsed_mesh.tangents.stride;
 		if ( !parsed_mesh.tangents.length )
 		{
-			OPTICK_EVENT( "generate_tangents" );
+			PROFILER_SCOPE_N( "generate_tangents" );
 			generated_tangents.resize( positions.size() );
 			MikkTSpace::UserData user_data { .positions = positions,
 											 .normals = normals,
@@ -756,7 +756,7 @@ private:
 											 tangents_stride );
 
 		{
-			OPTICK_EVENT( "repack_vertices" );
+			PROFILER_SCOPE_N( "repack_vertices" );
 			upload_data.vertices.reserve( parsed_mesh.positions.length );
 
 			for ( int v = 0; v < parsed_mesh.positions.length; ++v )
@@ -767,7 +767,7 @@ private:
 		}
 
 		{
-			OPTICK_EVENT( "lod_generation" );
+			PROFILER_SCOPE_N( "lod_generation" );
 			constexpr std::array<float, 3> lod_indices_factor { { 0.2f, 0.05f, 0.01f } };
 			constexpr std::array<float, 3> lod_error_factor { { 0.01f, 0.04f, 0.1f } };
 			std::vector<uint32_t> buffer( upload_data.indices.size() );
@@ -798,7 +798,7 @@ private:
 		}
 
 		{
-			OPTICK_EVENT( "meshlet_generation" );
+			PROFILER_SCOPE_N( "meshlet_generation" );
 			std::vector<meshopt_Meshlet> meshlet_buffer;
 			size_t index_offset = 0;
 			for ( int lod = 0; lod < 4; ++lod )
@@ -864,7 +864,7 @@ private:
 
 	void upload_meshes()
 	{
-		OPTICK_EVENT();
+		PROFILER_SCOPE();
 		_meshes.resize( _parsed_meshes.size() );
 		for ( int i = 0; i < _parsed_meshes.size(); ++i )
 		{
@@ -875,7 +875,7 @@ private:
 
 	void upload_mesh( int mesh_index )
 	{
-		OPTICK_EVENT();
+		PROFILER_SCOPE();
 		const auto& upload_data = _mesh_upload_data[ mesh_index ];
 		auto& mesh = _meshes[ mesh_index ];
 
@@ -946,7 +946,7 @@ private:
 
 	void decompress_textures()
 	{
-		OPTICK_EVENT();
+		PROFILER_SCOPE();
 		_images.resize( _images_usage.size() );
 
 		tbb::parallel_for(
@@ -954,7 +954,7 @@ private:
 			_images_usage.size(),
 			[ & ]( size_t index )
 			{
-				OPTICK_EVENT( "decompress_tex" );
+				PROFILER_SCOPE_N( "decompress_tex" );
 				if ( _images_usage[ index ] )
 				{
 					const auto source = load( _asset.images[ index ].data, true );
@@ -978,7 +978,7 @@ private:
 
 	void upload_textures()
 	{
-		OPTICK_EVENT();
+		PROFILER_SCOPE();
 		_textures.resize( _textures_usage.size() );
 		for ( int i = 0; i < _textures_usage.size(); ++i )
 		{
@@ -996,7 +996,7 @@ private:
 
 	asset finalize()
 	{
-		OPTICK_EVENT();
+		PROFILER_SCOPE();
 		std::vector<glm::vec4> bounding_spheres;
 		bounding_spheres.reserve( _meshes.size() );
 		for ( const auto& mesh : _meshes )
@@ -1139,7 +1139,7 @@ private:
 
 asset load_asset( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& index_buffer, std::filesystem::path path )
 {
-	OPTICK_EVENT();
+	PROFILER_SCOPE();
 	asset_load_job job( device, bindless_manager, index_buffer, std::move( path ) );
 	return job.run();
 }
