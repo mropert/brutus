@@ -49,10 +49,12 @@ void main()
         gl_MeshVerticesEXT[i].gl_Position = scene_constants.view_projection_matrix * vec4(pos, 1);
         outUV[i].x = v.uv_x;
         outUV[i].y = v.uv_y;
-        outNormal[i] = rotate_by_quaternion( v.normal, draws_buffer.mesh_draws[draw_id].rotation );
+        const vec3 normal = rotate_by_quaternion( v.normal, draws_buffer.mesh_draws[draw_id].rotation );
+        outNormal[i] = normal;
         outWorldPos[i] = pos;
-        outTangent[i] = rotate_by_quaternion( v.tangent.xyz, draws_buffer.mesh_draws[draw_id].rotation );
-        outBitangent[i] = cross(outNormal[i], outTangent[i]) * v.tangent.w;
+        const vec3 tangent = rotate_by_quaternion( v.tangent.xyz, draws_buffer.mesh_draws[draw_id].rotation );
+        outTangent[i] = tangent;
+        outBitangent[i] = cross( normal, tangent * v.tangent.w );
         outMaterial[i] = draws_buffer.mesh_draws[draw_id].material;
     }
 

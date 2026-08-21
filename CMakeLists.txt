@@ -45,3 +45,7 @@ target_link_libraries(brutus-vulkan PRIVATE renderer gpu_stable_power TBB::tbb i
 if(OPTICK_FOUND)
 	target_link_libraries(brutus-vulkan PRIVATE Optick)
 endif()
+
+set_target_properties(brutus-vulkan PROPERTIES
+    VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+)
