@@ -35,6 +35,10 @@ find_package(imgui CONFIG REQUIRED)
 find_package(meshoptimizer CONFIG REQUIRED)
 find_package(mikktspace CONFIG REQUIRED)
 
+if(USE_TRACY)
+	find_package(Tracy CONFIG REQUIRED)
+endif()
+
 add_executable(brutus-vulkan)
 target_sources(brutus-vulkan PRIVATE vulkan_prototype.cpp asset.cpp)
 target_compile_definitions(brutus-vulkan PRIVATE GLM_FORCE_INTRINSICS GLM_FORCE_DEPTH_ZERO_TO_ONE)
@@ -46,6 +50,15 @@ if(OPTICK_FOUND)
 	target_link_libraries(brutus-vulkan PRIVATE Optick)
 endif()
 
+if(USE_TRACY)
+	target_compile_definitions(brutus-vulkan PRIVATE USE_TRACY)
+	target_link_libraries(brutus-vulkan PRIVATE Tracy::TracyClient)
+endif()
+
 set_target_properties(brutus-vulkan PROPERTIES
     VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
 )
+
+if(MSVC)
+    target_compile_options(brutus-vulkan PRIVATE "/d1trimfile:${CMAKE_SOURCE_DIR}\\")
+endif()

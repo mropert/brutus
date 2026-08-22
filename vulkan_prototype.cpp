@@ -654,26 +654,29 @@ int main()
 	while ( !quit )
 	{
 		PROFILER_FRAME( "MainThread" );
-		SDL_Event event;
-		while ( SDL_PollEvent( &event ) )
 		{
-			if ( event.type == SDL_EVENT_QUIT || event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED
-				 || ( event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE ) )
+			PROFILER_SCOPE_N( "PollEvents" );
+			SDL_Event event;
+			while ( SDL_PollEvent( &event ) )
 			{
-				quit = true;
-			}
-			else if ( event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_LALT )
-			{
-				relative_mouse = !relative_mouse;
-				device.set_relative_mouse_mode( relative_mouse );
-			}
-			if ( relative_mouse )
-			{
-				camera.processSDLEvent( event );
-			}
-			else
-			{
-				ImGui_ImplSDL3_ProcessEvent( &event );
+				if ( event.type == SDL_EVENT_QUIT || event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED
+					 || ( event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE ) )
+				{
+					quit = true;
+				}
+				else if ( event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_LALT )
+				{
+					relative_mouse = !relative_mouse;
+					device.set_relative_mouse_mode( relative_mouse );
+				}
+				if ( relative_mouse )
+				{
+					camera.processSDLEvent( event );
+				}
+				else
+				{
+					ImGui_ImplSDL3_ProcessEvent( &event );
+				}
 			}
 		}
 		const auto old_time = time;
@@ -719,28 +722,29 @@ int main()
 		auto draw_buffer = ( draw_buffers_ptr + image_index )->data();
 #ifndef BISTRO
 		uint32_t draw_count = 0;
-		std::minstd_rand rand;
-		std::uniform_int_distribution gen( 0zu, assets.size() - 1 );
-		std::uniform_int_distribution gen_angle( 0, 360 );
-		std::uniform_real_distribution<float> gen_scale( 0.5f, 1.5f );
-
-		for ( int z = 0; z < ui_state.z_miku; ++z )
 		{
-			for ( int x = 0; x < ui_state.x_miku; ++x )
+			PROFILER_SCOPE_N( "Generate GPU scene" );
+			std::minstd_rand rand;
+			std::uniform_int_distribution gen( 0zu, assets.size() - 1 );
+			std::uniform_int_distribution gen_angle( 0, 360 );
+			std::uniform_real_distribution<float> gen_scale( 0.5f, 1.5f );
+
+			for ( int z = 0; z < ui_state.z_miku; ++z )
 			{
-				const auto pos = glm::vec3( x - ( ui_state.x_miku / 2 ), 0, z - ( ui_state.z_miku / 2 ) );
-				const auto asset = gen( rand );
-				const glm::quat rotation = glm::vec3( 0, gen_angle( rand ), 0 );
-				const auto scale = gen_scale( rand );
-				for ( int i = 0; i < assets[ asset ].meshes.size(); ++i )
+				for ( int x = 0; x < ui_state.x_miku; ++x )
 				{
-					draw_buffer[ draw_count++ ] = {
-						.translation = pos,
-						.mesh = assets[ asset ].meshes[ i ].handle,
-						.rotation = rotation,
-						.scale = { scale, scale, scale },
-						.material = assets[ asset ].materials[ assets[ asset ].meshes[ i ].material_index ].handle
-					};
+					const auto pos = glm::vec3( x - ( ui_state.x_miku / 2 ), 0, z - ( ui_state.z_miku / 2 ) );
+					const auto& asset = assets[ gen( rand ) ];
+					const glm::quat rotation = glm::vec3( 0, gen_angle( rand ), 0 );
+					const auto scale = gen_scale( rand );
+					for ( const auto& mesh : asset.meshes )
+					{
+						draw_buffer[ draw_count++ ] = { .translation = pos,
+														.mesh = mesh.handle,
+														.rotation = rotation,
+														.scale = { scale, scale, scale },
+														.material = asset.materials[ mesh.material_index ].handle };
+					}
 				}
 			}
 		}
@@ -909,9 +913,9 @@ int main()
 														mip );
 
 					const depth_pyramid_constants constants { .depth_in = mip == 0 ? depth_resolved_image.handles.sampled_texture
-																				: depth_pyramid.mips[ mip - 1 ].sampled_texture,
-															.depth_out = depth_pyramid.mips[ mip ].storage_texture,
-															.size = glm::aligned_vec2( extent.width, extent.height ) };
+																				   : depth_pyramid.mips[ mip - 1 ].sampled_texture,
+															  .depth_out = depth_pyramid.mips[ mip ].storage_texture,
+															  .size = glm::aligned_vec2( extent.width, extent.height ) };
 					command_buffer->push_constants( pipelines.get( depth_pyramid_pipeline ), constants );
 					command_buffer->dispatch( calc_group_count( extent.width ), calc_group_count( extent.height ), 1 );
 
