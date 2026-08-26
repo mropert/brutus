@@ -22,6 +22,8 @@ if(MSVC)
 	target_link_libraries(Optick INTERFACE
 	debug ${OPTICK_DIR}/lib/x64/debug/OptickCore.lib
 	optimized ${OPTICK_DIR}/lib/x64/release/OptickCore.lib)
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+	add_compile_options(-W -Wall -Werror)
 endif()
 
 add_subdirectory(submodules/vk-renderer)

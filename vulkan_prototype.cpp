@@ -87,7 +87,7 @@ public:
 
 	void processSDLEvent( SDL_Event& e )
 	{
-		if ( e.type == SDL_EVENT_KEY_DOWN || SDL_EVENT_KEY_UP )
+		if ( e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP )
 		{
 			const float factor = e.type == SDL_EVENT_KEY_DOWN ? 5.f : 0.f;
 			if ( e.key.key == SDLK_W )
@@ -237,11 +237,11 @@ struct Timings
 		using namespace Timestamps;
 		const int index = frame_index % last_values[ 0 ].size();
 		last_values[ 0 ][ index ] = ( values[ FRAME_END ] - values[ FRAME_START ] ) * period;
-		for ( int i = 1; i < last_values.size(); ++i )
+		for ( size_t i = 1; i < last_values.size(); ++i )
 		{
 			last_values[ i ][ index ] = ( values[ i + 1 ] - values[ i ] ) * period;
 		}
-		for ( int i = 0; i < last_values.size(); ++i )
+		for ( size_t i = 0; i < last_values.size(); ++i )
 		{
 			averages[ i ] = std::accumulate( begin( last_values[ i ] ), end( last_values[ i ] ), 0.f ) / last_values[ i ].size();
 		}
@@ -284,7 +284,6 @@ void draw_ui( ui_data& data,
 
 		if ( props.statistics_support )
 		{
-			std::array<float, 4> per_lod_gpu_time { };
 			ImGui::SeparatorText( "Stats" );
 			ImGui::Text( "GPU times (ms): %.2f", gpu_timings[ 0 ] * 1e-6f );
 			ImGui::BulletText( "Early meshes draw: %.2f / %.2f",
@@ -299,11 +298,11 @@ void draw_ui( ui_data& data,
 		}
 		ImGui::SeparatorText( "Assets" );
 		ImGui::BeginChild( "Assets", ImVec2( 0.f, 400.f ) );
-		for ( int i = 0; i < assets.size(); ++i )
+		for ( size_t i = 0; i < assets.size(); ++i )
 		{
-			for ( int j = 0; j < assets[ i ].meshes.size(); ++j )
+			for ( size_t j = 0; j < assets[ i ].meshes.size(); ++j )
 			{
-				ImGui::Text( "Asset #%d Mesh #%d: %d / %d / %d / %d triangles",
+				ImGui::Text( "Asset #%zu Mesh #%zu: %d / %d / %d / %d triangles",
 							 i,
 							 j,
 							 assets[ i ].meshes[ j ].gpu_data.lods[ 0 ].indices_count,
@@ -409,7 +408,7 @@ int calc_mip_levels( renderer::Extent2D extent )
 void draw_node( const asset& scene, uint32_t node_index, std::span<gpu_mesh_draw> draws, uint32_t& draw_count, const glm::mat4& transform )
 {
 	const auto local_transform = transform * scene.nodes[ node_index ].transform;
-	if ( scene.nodes[ node_index ].mesh != -1 )
+	if ( scene.nodes[ node_index ].mesh != size_t( -1 ) )
 	{
 		const auto& mesh = scene.meshes[ scene.nodes[ node_index ].mesh ];
 		glm::vec3 scale, translation, skew;
@@ -535,11 +534,11 @@ int main()
 
 	renderer::PipelineManager pipelines( device, "shaders/vulkan", bindless_manager );
 
-	const auto mesh_pipeline = pipelines.add(
-		renderer::Pipeline::Desc { .color_format = draw_image_format,
-								   .depth_format = depth_image.get_format(),
-								   .push_constants_size = sizeof( draw_meshes_constants ) },
-		{ { "mesh.vert", renderer::ShaderStage::VERTEX }, { "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
+	const auto mesh_pipeline = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
+																		 .depth_format = depth_image.get_format(),
+																		 .push_constants_size = sizeof( draw_meshes_constants ) },
+											  { { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX },
+												{ .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT } } );
 
 	renderer::PipelineHandle mesh_pipeline_meshlet { };
 	if ( props.mesh_shader_support )
@@ -547,9 +546,9 @@ int main()
 		mesh_pipeline_meshlet = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
 																		  .depth_format = depth_image.get_format(),
 																		  .push_constants_size = sizeof( draw_meshes_constants ) },
-											   { { "mesh.task", renderer::ShaderStage::TASK },
-												 { "mesh.mesh", renderer::ShaderStage::MESH },
-												 { "mesh.frag", renderer::ShaderStage::FRAGMENT } } );
+											   { { .path = "mesh.task", .stage = renderer::ShaderStage::TASK },
+												 { .path = "mesh.mesh", .stage = renderer::ShaderStage::MESH },
+												 { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT } } );
 	}
 
 	std::vector<renderer::ShaderSource::Define> compute_shader_defines;
@@ -558,22 +557,22 @@ int main()
 
 	const auto compute_draws_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .push_constants_size = sizeof( compute_draws_constants ) },
-		{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE, compute_shader_defines } } );
+		{ { .path = "mesh_cull.comp", .stage = renderer::ShaderStage::COMPUTE, .defines = compute_shader_defines } } );
 	compute_shader_defines[ 0 ].value = "true";
 	const auto compute_draws_late_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .push_constants_size = sizeof( compute_draws_constants ) },
-		{ { "mesh_cull.comp", renderer::ShaderStage::COMPUTE, compute_shader_defines } } );
+		{ { .path = "mesh_cull.comp", .stage = renderer::ShaderStage::COMPUTE, .defines = compute_shader_defines } } );
 
 	const auto depth_pyramid_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .push_constants_size = sizeof( depth_pyramid_constants ) },
-		{ { "depth_pyramid.comp", renderer::ShaderStage::COMPUTE } } );
+		{ { .path = "depth_pyramid.comp", .stage = renderer::ShaderStage::COMPUTE } } );
 
-	const auto grid_pipeline = pipelines.add(
-		renderer::Pipeline::Desc { .color_format = draw_image_format,
-								   .depth_format = depth_image.get_format(),
-								   .topology = renderer::Pipeline::PrimitiveTopology::TRIANGLE_STRIP,
-								   .push_constants_size = sizeof( grid_constants ) },
-		{ { "grid.vert", renderer::ShaderStage::VERTEX }, { "grid.frag", renderer::ShaderStage::FRAGMENT } } );
+	const auto grid_pipeline = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
+																		 .depth_format = depth_image.get_format(),
+																		 .topology = renderer::Pipeline::PrimitiveTopology::TRIANGLE_STRIP,
+																		 .push_constants_size = sizeof( grid_constants ) },
+											  { { .path = "grid.vert", .stage = renderer::ShaderStage::VERTEX },
+												{ .path = "grid.frag", .stage = renderer::ShaderStage::FRAGMENT } } );
 
 	std::vector<asset> assets;
 #ifndef BISTRO
@@ -905,12 +904,12 @@ int main()
 				PROFILER_GPU_EVENT( "Depth Pyramid" );
 				command_buffer->bind_pipeline( pipelines.get( depth_pyramid_pipeline ), bindless_manager );
 				auto extent = depth_pyramid_extent;
-				for ( int mip = 0; mip < depth_pyramid.mips.size(); ++mip )
+				for ( size_t mip = 0; mip < depth_pyramid.mips.size(); ++mip )
 				{
 					command_buffer->transition_texture( depth_pyramid.texture,
 														renderer::Texture::Layout::UNDEFINED,
 														renderer::Texture::Layout::GENERAL,
-														mip );
+														static_cast<int>( mip ) );
 
 					const depth_pyramid_constants constants { .depth_in = mip == 0 ? depth_resolved_image.handles.sampled_texture
 																				   : depth_pyramid.mips[ mip - 1 ].sampled_texture,
@@ -922,7 +921,7 @@ int main()
 					command_buffer->transition_texture( depth_pyramid.texture,
 														renderer::Texture::Layout::GENERAL,
 														renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL,
-														mip );
+														static_cast<int>( mip ) );
 
 					extent.width = std::max( extent.width / 2, 1u );
 					extent.height = std::max( extent.height / 2, 1u );

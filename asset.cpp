@@ -126,7 +126,7 @@ namespace
 		{
 		}
 
-		const T& get( int index ) const { return reinterpret_cast<const T&>( _data[ index * _stride ] ); }
+		const T& get( size_t index ) const { return reinterpret_cast<const T&>( _data[ index * _stride ] ); }
 		size_t size() const { return _data.size(); }
 
 	private:
@@ -460,6 +460,8 @@ private:
 					case fastgltf::AccessorType::Vec4:
 						format = VK_FORMAT_R32G32B32A32_SFLOAT;
 						break;
+					default:
+						break;
 				}
 				break;
 			}
@@ -479,6 +481,8 @@ private:
 					case fastgltf::AccessorType::Vec4:
 						format = VK_FORMAT_R32G32B32A32_UINT;
 						break;
+					default:
+						break;
 				}
 				break;
 			}
@@ -489,9 +493,13 @@ private:
 					case fastgltf::AccessorType::Scalar:
 						format = VK_FORMAT_R16_UINT;
 						break;
+				default:
+						break;
 				}
 				break;
 			}
+			default:
+				break;
 		}
 
 		return mesh_attribute { .offset = accessor.byteOffset + view.byteOffset,
@@ -504,7 +512,7 @@ private:
 	data_source load( const fastgltf::DataSource& source, bool allow_bufferview ) const
 	{
 		return std::visit(
-			overloads( [ this ]( const fastgltf::sources::Array& array )
+			overloads( []( const fastgltf::sources::Array& array )
 					   { return data_source { .data = { array.bytes.data(), array.bytes.size() } }; },
 					   [ this, allow_bufferview ]( const fastgltf::sources::BufferView& view )
 					   {
@@ -584,7 +592,7 @@ private:
 
 		_materials_usage.resize( _asset.materials.size(), 0 );
 
-		for ( int i = 0; i < _meshes_usage.size(); ++i )
+		for ( size_t i = 0; i < _meshes_usage.size(); ++i )
 		{
 			if ( _meshes_usage[ i ] )
 			{
@@ -647,7 +655,7 @@ private:
 
 		_images_usage.resize( _asset.images.size(), 0 );
 		_textures_usage.resize( _asset.textures.size(), texture_usage::UNUSED );
-		for ( int i = 0; i < _materials_usage.size(); ++i )
+		for ( size_t i = 0; i < _materials_usage.size(); ++i )
 		{
 			if ( _materials_usage[ i ] )
 			{
@@ -759,7 +767,7 @@ private:
 			PROFILER_SCOPE_N( "repack_vertices" );
 			upload_data.vertices.reserve( parsed_mesh.positions.length );
 
-			for ( int v = 0; v < parsed_mesh.positions.length; ++v )
+			for ( size_t v = 0; v < parsed_mesh.positions.length; ++v )
 			{
 				const auto& uv = uvs.get( v );
 				upload_data.vertices.emplace_back( positions.get( v ), uv.x, normals.get( v ), uv.y, tangents.get( v ) );
@@ -771,7 +779,7 @@ private:
 			constexpr std::array<float, 3> lod_indices_factor { { 0.2f, 0.05f, 0.01f } };
 			constexpr std::array<float, 3> lod_error_factor { { 0.01f, 0.04f, 0.1f } };
 			std::vector<uint32_t> buffer( upload_data.indices.size() );
-			for ( int lod = 0; lod < upload_data.indices_per_lod.size(); ++lod )
+			for ( size_t lod = 0; lod < upload_data.indices_per_lod.size(); ++lod )
 			{
 				const float attr_weights[ 3 ] = { 0.5f, 0.5f, 0.5f };
 				const auto size = meshopt_simplifyWithAttributes(
@@ -866,14 +874,14 @@ private:
 	{
 		PROFILER_SCOPE();
 		_meshes.resize( _parsed_meshes.size() );
-		for ( int i = 0; i < _parsed_meshes.size(); ++i )
+		for ( size_t i = 0; i < _parsed_meshes.size(); ++i )
 		{
 			upload_mesh( i );
 		}
 		_mesh_upload.submit();
 	}
 
-	void upload_mesh( int mesh_index )
+	void upload_mesh( size_t mesh_index )
 	{
 		PROFILER_SCOPE();
 		const auto& upload_data = _mesh_upload_data[ mesh_index ];
@@ -897,7 +905,7 @@ private:
 
 		index_offset += mesh.gpu_data.lods[ 0 ].indices_count;
 		_mesh_upload.queue( upload_data.lod_indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
-		for ( int lod = 1; lod < mesh.gpu_data.lods.size(); ++lod )
+		for ( size_t lod = 1; lod < mesh.gpu_data.lods.size(); ++lod )
 		{
 			mesh.gpu_data.lods[ lod ].indices_offset = mesh.gpu_data.lods[ lod - 1 ].indices_offset
 				+ mesh.gpu_data.lods[ lod - 1 ].indices_count;
@@ -980,7 +988,7 @@ private:
 	{
 		PROFILER_SCOPE();
 		_textures.resize( _textures_usage.size() );
-		for ( int i = 0; i < _textures_usage.size(); ++i )
+		for ( size_t i = 0; i < _textures_usage.size(); ++i )
 		{
 			if ( _textures_usage[ i ] != texture_usage::UNUSED )
 			{
@@ -1012,7 +1020,7 @@ private:
 		gpu_upload_job::wait_all_done( { &_mesh_upload, &_texture_upload } );
 
 		_materials.resize( _asset.materials.size() );
-		for ( int i = 0; i < _materials_usage.size(); ++i )
+		for ( size_t i = 0; i < _materials_usage.size(); ++i )
 		{
 			if ( _materials_usage[ i ] )
 			{
