@@ -269,17 +269,16 @@ public:
 		{
 			throw renderer::Error( SDL_GetError() );
 		}
-		_cmd_buffer->transition_texture( texture, renderer::Texture::Layout::UNDEFINED, renderer::Texture::Layout::TRANSFER_DST_OPTIMAL );
+		_cmd_buffer->texture_barrier( texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::TRANSFER_DST );
 		_cmd_buffer->copy_buffer_to_texture( _upload_buffer, _offset, texture );
-		_cmd_buffer->transition_texture( texture,
-										 renderer::Texture::Layout::TRANSFER_DST_OPTIMAL,
-										 renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
+		_cmd_buffer->texture_barrier( texture, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::SHADER_READ );
 		_offset += size;
 	}
 
 	void submit()
 	{
 		assert( _state == state::UPLOADING );
+		_cmd_buffer->memory_barrier( renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::ANY_BUFFER_READ );
 		_cmd_buffer->end();
 		_device.submit( *_cmd_buffer, _upload_fence );
 		_state = state::SUBMITTED;
@@ -493,7 +492,7 @@ private:
 					case fastgltf::AccessorType::Scalar:
 						format = VK_FORMAT_R16_UINT;
 						break;
-				default:
+					default:
 						break;
 				}
 				break;

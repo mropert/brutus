@@ -218,8 +218,8 @@ namespace Timestamps
 		COMPUTE_DRAWS_LATE,
 		DRAW_MESHES_LATE,
 		DRAW_GRID,
-		DRAW_UI,
 		BLIT,
+		DRAW_UI,
 		FRAME_END,
 		COUNT
 	};
@@ -476,7 +476,7 @@ int main()
 		ImGui::CreateContext();
 		const auto internals = device.get_internals();
 		ImGui_ImplSDL3_InitForVulkan( internals.window );
-		const VkFormat color_format = static_cast<VkFormat>( draw_image_format );
+		const VkFormat color_format = static_cast<VkFormat>( swapchain_image_format );
 		ImGui_ImplVulkan_InitInfo info {
 			.ApiVersion = internals.api_version,
 			.Instance = internals.instance,
@@ -777,7 +777,9 @@ int main()
 			{
 				// Can't reuse visibility buffer if the scene has changed
 				command_buffer->fill_buffer( draw_visibility_buffer, 0, draw_visibility_buffer.get_size(), 0 );
-				command_buffer->buffer_barrier( draw_visibility_buffer );
+				command_buffer->buffer_barrier( draw_visibility_buffer,
+												renderer::ResourceState::TRANSFER_DST,
+												renderer::ResourceState::STORAGE_READ );
 				last_scene_hash = scene_hash;
 			}
 		}
@@ -785,22 +787,20 @@ int main()
 		{
 			// Force everything to be drawn in the early pass
 			command_buffer->fill_buffer( draw_visibility_buffer, 0, draw_visibility_buffer.get_size(), 0x01010101 );
-			command_buffer->buffer_barrier( draw_visibility_buffer );
+			command_buffer->buffer_barrier( draw_visibility_buffer,
+											renderer::ResourceState::TRANSFER_DST,
+											renderer::ResourceState::STORAGE_READ );
 			last_scene_hash = 0xdeadbeef;
 		}
 
-		command_buffer->transition_texture( draw_image,
-											renderer::Texture::Layout::UNDEFINED,
-											renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL );
-		command_buffer->transition_texture( draw_resolved_image,
-											renderer::Texture::Layout::UNDEFINED,
-											renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL );
-		command_buffer->transition_texture( depth_image,
-											renderer::Texture::Layout::UNDEFINED,
-											renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL );
-		command_buffer->transition_texture( depth_resolved_image.texture,
-											renderer::Texture::Layout::UNDEFINED,
-											renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL );
+		command_buffer->texture_barrier( draw_image, renderer::ResourceState::UNDEFINED, renderer::ResourceState::COLOR_ATTACHMENT );
+		command_buffer->texture_barrier( draw_resolved_image,
+										 renderer::ResourceState::UNDEFINED,
+										 renderer::ResourceState::COLOR_ATTACHMENT );
+		command_buffer->texture_barrier( depth_image, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
+		command_buffer->texture_barrier( depth_resolved_image.texture,
+										 renderer::ResourceState::UNDEFINED,
+										 renderer::ResourceState::DEPTH_ATTACHMENT );
 
 		const auto draw_meshes = [ & ]( bool early )
 		{
@@ -808,9 +808,13 @@ int main()
 											 early ? Timestamps::COMPUTE_DRAWS_EARLY : Timestamps::COMPUTE_DRAWS_LATE );
 			{
 				PROFILER_GPU_EVENT( "Compute Draws" );
-				command_buffer->buffer_barrier( draw_commands_buffer );
+				command_buffer->buffer_barrier( draw_commands_buffer,
+												renderer::ResourceState::INDIRECT_ARGUMENT,
+												renderer::ResourceState::TRANSFER_DST );
 				command_buffer->fill_buffer( draw_commands_buffer, 0, sizeof( uint32_t ), 0 );
-				command_buffer->buffer_barrier( draw_commands_buffer );
+				command_buffer->buffer_barrier( draw_commands_buffer,
+												renderer::ResourceState::TRANSFER_DST,
+												renderer::ResourceState::STORAGE_READ_WRITE );
 				const auto pipeline = early ? pipelines.get( compute_draws_pipeline ) : pipelines.get( compute_draws_late_pipeline );
 				command_buffer->bind_pipeline( pipeline, bindless_manager );
 				const compute_draws_constants constants { .draws_buffer = draw_buffer_address,
@@ -823,8 +827,12 @@ int main()
 														  .depth_pyramid = depth_pyramid.handles.sampled_texture };
 				command_buffer->push_constants( pipeline, constants );
 				command_buffer->dispatch( calc_group_count( draw_count ), 1, 1 );
-				command_buffer->buffer_barrier( draw_commands_buffer );
-				command_buffer->buffer_barrier( draw_visibility_buffer );
+				command_buffer->buffer_barrier( draw_commands_buffer,
+												renderer::ResourceState::STORAGE_WRITE,
+												renderer::ResourceState::INDIRECT_ARGUMENT );
+				command_buffer->buffer_barrier( draw_visibility_buffer,
+												renderer::ResourceState::STORAGE_READ_WRITE,
+												renderer::ResourceState::STORAGE_READ_WRITE );
 			}
 
 			renderer::RenderAttachment color_attachment { .target = draw_image_view };
@@ -895,9 +903,9 @@ int main()
 
 		if ( occlusion_culling )
 		{
-			command_buffer->transition_texture( depth_resolved_image.texture,
-												renderer::Texture::Layout::DEPTH_ATTACHMENT_OPTIMAL,
-												renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL );
+			command_buffer->texture_barrier( depth_resolved_image.texture,
+											 renderer::ResourceState::DEPTH_ATTACHMENT,
+											 renderer::ResourceState::COMPUTE_SHADER_READ );
 
 			{
 				command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DEPTH_PYRAMID );
@@ -906,10 +914,10 @@ int main()
 				auto extent = depth_pyramid_extent;
 				for ( size_t mip = 0; mip < depth_pyramid.mips.size(); ++mip )
 				{
-					command_buffer->transition_texture( depth_pyramid.texture,
-														renderer::Texture::Layout::UNDEFINED,
-														renderer::Texture::Layout::GENERAL,
-														static_cast<int>( mip ) );
+					command_buffer->texture_barrier( depth_pyramid.texture,
+													 renderer::ResourceState::UNDEFINED,
+													 renderer::ResourceState::STORAGE_WRITE,
+													 static_cast<int>( mip ) );
 
 					const depth_pyramid_constants constants { .depth_in = mip == 0 ? depth_resolved_image.handles.sampled_texture
 																				   : depth_pyramid.mips[ mip - 1 ].sampled_texture,
@@ -918,10 +926,10 @@ int main()
 					command_buffer->push_constants( pipelines.get( depth_pyramid_pipeline ), constants );
 					command_buffer->dispatch( calc_group_count( extent.width ), calc_group_count( extent.height ), 1 );
 
-					command_buffer->transition_texture( depth_pyramid.texture,
-														renderer::Texture::Layout::GENERAL,
-														renderer::Texture::Layout::SHADER_READ_ONLY_OPTIMAL,
-														static_cast<int>( mip ) );
+					command_buffer->texture_barrier( depth_pyramid.texture,
+													 renderer::ResourceState::STORAGE_WRITE,
+													 renderer::ResourceState::COMPUTE_SHADER_READ,
+													 static_cast<int>( mip ) );
 
 					extent.width = std::max( extent.width / 2, 1u );
 					extent.height = std::max( extent.height / 2, 1u );
@@ -947,30 +955,28 @@ int main()
 			command_buffer->end_rendering();
 		}
 
-		command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_UI );
-		command_buffer->begin_rendering( draw_image_extent, renderer::RenderAttachment { .target = draw_resolved_image_view } );
+		command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::BLIT );
+		command_buffer->texture_barrier( draw_resolved_image,
+										 renderer::ResourceState::COLOR_ATTACHMENT,
+										 renderer::ResourceState::TRANSFER_SRC );
+		command_buffer->texture_barrier( swapchain_image, renderer::ResourceState::UNDEFINED, renderer::ResourceState::TRANSFER_DST );
+		command_buffer->blit_texture( draw_resolved_image, swapchain_image );
 
 		{
 			PROFILER_GPU_EVENT( "Draw UI" );
+			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_UI );
+			command_buffer->texture_barrier( swapchain_image,
+											 renderer::ResourceState::TRANSFER_DST,
+											 renderer::ResourceState::COLOR_ATTACHMENT );
+			command_buffer->begin_rendering( swapchain_image.get_extent(), renderer::RenderAttachment { .target = swapchain_image_view } );
 			ImGui::Render();
 			ImGui_ImplVulkan_RenderDrawData( ImGui::GetDrawData(), command_buffer->get_impl() );
+			command_buffer->end_rendering();
 		}
-		command_buffer->end_rendering();
 
-		command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::BLIT );
-
-		command_buffer->transition_texture( draw_resolved_image,
-											renderer::Texture::Layout::COLOR_ATTACHMENT_OPTIMAL,
-											renderer::Texture::Layout::TRANSFER_SRC_OPTIMAL );
-		command_buffer->transition_texture( swapchain_image,
-											renderer::Texture::Layout::UNDEFINED,
-											renderer::Texture::Layout::TRANSFER_DST_OPTIMAL );
-
-		command_buffer->blit_texture( draw_resolved_image, swapchain_image );
-
-		command_buffer->transition_texture( swapchain_image,
-											renderer::Texture::Layout::TRANSFER_DST_OPTIMAL,
-											renderer::Texture::Layout::PRESENT_SRC );
+		command_buffer->texture_barrier( swapchain_image,
+										 renderer::ResourceState::COLOR_ATTACHMENT,
+										 renderer::ResourceState::PRESENT );
 
 		command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::FRAME_END );
 		command_buffer->end_query( statistics_queries[ image_index ] );
