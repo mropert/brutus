@@ -495,27 +495,28 @@ int main()
 		ImGui_ImplVulkan_Init( &info );
 	}
 
+	constexpr auto samples = 4;
 	const auto draw_image_extent = device.get_extent();
 	using usage = renderer::Texture::Usage;
 	auto draw_image = device.create_texture( renderer::Texture::Desc { .format = draw_image_format,
 																	   .usage = usage::COLOR_ATTACHMENT,
 																	   .extent = draw_image_extent,
-																	   .samples = 4 } );
+																	   .samples = samples } );
 	auto draw_image_view = device.create_texture_view( draw_image, renderer::TextureView::Aspect::COLOR );
 
 	auto depth_image = device.create_texture( renderer::Texture::Desc { .format = renderer::Texture::Format::D32_SFLOAT,
 																		.usage = usage::DEPTH_STENCIL_ATTACHMENT,
 																		.extent = draw_image_extent,
-																		.samples = 4 } );
+																		.samples = samples } );
 
 	auto depth_image_view = device.create_texture_view( depth_image, renderer::TextureView::Aspect::DEPTH );
 
-	auto draw_resolved_image = device.create_texture( renderer::Texture::Desc { .format = draw_image_format,
-																				.usage = usage::COLOR_ATTACHMENT | usage::TRANSFER_SRC,
-																				.extent = draw_image_extent } );
-	auto draw_resolved_image_view = device.create_texture_view( draw_resolved_image, renderer::TextureView::Aspect::COLOR );
-
 	BindlessManager bindless_manager( device, std::array { MAX_MESHES, MAX_MATERIALS } );
+
+	const auto draw_resolved_image = bindless_manager.add_texture(
+		device.create_texture( renderer::Texture::Desc { .format = draw_image_format,
+														 .usage = usage::COLOR_ATTACHMENT | usage::SAMPLED,
+														 .extent = draw_image_extent } ) );
 
 	const auto depth_resolved_image = bindless_manager.add_texture(
 		device.create_texture( renderer::Texture::Desc { .format = renderer::Texture::Format::D32_SFLOAT,
@@ -536,6 +537,7 @@ int main()
 
 	const auto mesh_pipeline = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
 																		 .depth_format = depth_image.get_format(),
+																		 .sample_count = samples,
 																		 .push_constants_size = sizeof( draw_meshes_constants ) },
 											  { { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX },
 												{ .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT } } );
@@ -545,6 +547,7 @@ int main()
 	{
 		mesh_pipeline_meshlet = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
 																		  .depth_format = depth_image.get_format(),
+																		  .sample_count = samples,
 																		  .push_constants_size = sizeof( draw_meshes_constants ) },
 											   { { .path = "mesh.task", .stage = renderer::ShaderStage::TASK },
 												 { .path = "mesh.mesh", .stage = renderer::ShaderStage::MESH },
@@ -570,9 +573,16 @@ int main()
 	const auto grid_pipeline = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
 																		 .depth_format = depth_image.get_format(),
 																		 .topology = renderer::Pipeline::PrimitiveTopology::TRIANGLE_STRIP,
+																		 .sample_count = samples,
 																		 .push_constants_size = sizeof( grid_constants ) },
 											  { { .path = "grid.vert", .stage = renderer::ShaderStage::VERTEX },
 												{ .path = "grid.frag", .stage = renderer::ShaderStage::FRAGMENT } } );
+
+	const auto tonemap_pipeline = pipelines.add(
+		renderer::Pipeline::Desc { .color_format = swapchain_image_format,
+								   .push_constants_size = sizeof( renderer::BindlessSampledTexture ) },
+		{ { .path = "fullscreen.vert", .stage = renderer::ShaderStage::VERTEX },
+		  { .path = "tonemap.frag", .stage = renderer::ShaderStage::FRAGMENT } } );
 
 	std::vector<asset> assets;
 #ifndef BISTRO
@@ -794,9 +804,6 @@ int main()
 		}
 
 		command_buffer->texture_barrier( draw_image, renderer::ResourceState::UNDEFINED, renderer::ResourceState::COLOR_ATTACHMENT );
-		command_buffer->texture_barrier( draw_resolved_image,
-										 renderer::ResourceState::UNDEFINED,
-										 renderer::ResourceState::COLOR_ATTACHMENT );
 		command_buffer->texture_barrier( depth_image, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
 		command_buffer->texture_barrier( depth_resolved_image.texture,
 										 renderer::ResourceState::UNDEFINED,
@@ -941,9 +948,12 @@ int main()
 
 		{
 			PROFILER_GPU_EVENT( "Draw Grid" );
+			command_buffer->texture_barrier( draw_resolved_image.texture,
+											 renderer::ResourceState::UNDEFINED,
+											 renderer::ResourceState::COLOR_ATTACHMENT );
 			command_buffer->begin_rendering(
 				draw_image_extent,
-				renderer::RenderAttachment { .target = draw_image_view, .resolve_target = draw_resolved_image_view },
+				renderer::RenderAttachment { .target = draw_image_view, .resolve_target = draw_resolved_image.handles.view },
 				renderer::RenderAttachment { .target = depth_image_view } );
 
 			command_buffer->set_viewport( draw_image_extent );
@@ -955,28 +965,34 @@ int main()
 			command_buffer->end_rendering();
 		}
 
-		command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::BLIT );
-		command_buffer->texture_barrier( draw_resolved_image,
-										 renderer::ResourceState::COLOR_ATTACHMENT,
-										 renderer::ResourceState::TRANSFER_SRC );
-		command_buffer->texture_barrier( swapchain_image, renderer::ResourceState::UNDEFINED, renderer::ResourceState::TRANSFER_DST );
-		command_buffer->blit_texture( draw_resolved_image, swapchain_image );
+		{
+			PROFILER_GPU_EVENT( "Tonemap" );
+			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::BLIT );
+			command_buffer->texture_barrier( draw_resolved_image.texture,
+											 renderer::ResourceState::COLOR_ATTACHMENT,
+											 renderer::ResourceState::FRAGMENT_SHADER_READ );
+			command_buffer->texture_barrier( swapchain_image,
+											 renderer::ResourceState::UNDEFINED,
+											 renderer::ResourceState::COLOR_ATTACHMENT );
+			command_buffer->begin_rendering( swapchain_image.get_extent(), renderer::RenderAttachment { .target = swapchain_image_view } );
+			command_buffer->set_viewport( swapchain_image.get_extent() );
+			command_buffer->set_scissor( swapchain_image.get_extent() );
+			command_buffer->bind_pipeline( pipelines.get( tonemap_pipeline ), bindless_manager );
+			command_buffer->push_constants( pipelines.get( tonemap_pipeline ), draw_resolved_image.handles.sampled_texture );
+			command_buffer->draw( 3 );
+			command_buffer->end_rendering();
+		}
 
 		{
 			PROFILER_GPU_EVENT( "Draw UI" );
 			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_UI );
-			command_buffer->texture_barrier( swapchain_image,
-											 renderer::ResourceState::TRANSFER_DST,
-											 renderer::ResourceState::COLOR_ATTACHMENT );
 			command_buffer->begin_rendering( swapchain_image.get_extent(), renderer::RenderAttachment { .target = swapchain_image_view } );
 			ImGui::Render();
 			ImGui_ImplVulkan_RenderDrawData( ImGui::GetDrawData(), command_buffer->get_impl() );
 			command_buffer->end_rendering();
 		}
 
-		command_buffer->texture_barrier( swapchain_image,
-										 renderer::ResourceState::COLOR_ATTACHMENT,
-										 renderer::ResourceState::PRESENT );
+		command_buffer->texture_barrier( swapchain_image, renderer::ResourceState::COLOR_ATTACHMENT, renderer::ResourceState::PRESENT );
 
 		command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::FRAME_END );
 		command_buffer->end_query( statistics_queries[ image_index ] );

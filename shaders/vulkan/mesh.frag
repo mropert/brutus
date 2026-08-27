@@ -182,9 +182,6 @@ void main()
         const vec3 ambient = kD_amb * diffuse_ambient + specular_ambient;// * ao;
 
         color = ambient + Lo;
-
-        color = color / (color + vec3(1.0)); // Reinhard tonemap; env is HDR now
-        //color = pow(color, vec3(1.0/2.2));  // leave off: swapchain is sRGB
     }
     else
     {
