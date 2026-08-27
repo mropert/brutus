@@ -465,8 +465,8 @@ int main()
 	bool vsync = true;
 
 	PROFILER_SCOPE_PUSH( create_swapchain, "create_swapchain" );
-	constexpr auto swapchain_image_format = renderer::Texture::Format::R8G8B8A8_SRGB;
-	renderer::Swapchain swapchain( device, swapchain_image_format, vsync );
+	renderer::Swapchain swapchain( device, renderer::Texture::Format::R8G8B8A8_SRGB, vsync );
+	const auto swapchain_image_format = swapchain.get_format();
 	PROFILER_SCOPE_POP( create_swapchain );
 
 	constexpr auto draw_image_format = renderer::Texture::Format::R16G16B16A16_SFLOAT;
