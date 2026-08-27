@@ -12,6 +12,7 @@ layout( push_constant, std430 ) uniform block
 
 void main() {
     vec3 color = texelFetch(textures[tex_index], ivec2(gl_FragCoord.xy), 0).rgb;
-    color = color / (color + vec3(1.0));
+    color *= 0.25;  // exposure
+    color = color / (color + vec3(1.0));    // tonemap
     outColor = vec4(color, 1.0);
 }

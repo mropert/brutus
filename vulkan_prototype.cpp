@@ -465,7 +465,7 @@ int main()
 	bool vsync = true;
 
 	PROFILER_SCOPE_PUSH( create_swapchain, "create_swapchain" );
-	renderer::Swapchain swapchain( device, renderer::Texture::Format::R8G8B8A8_SRGB, vsync );
+	renderer::Swapchain swapchain( device, vsync );
 	const auto swapchain_image_format = swapchain.get_format();
 	PROFILER_SCOPE_POP( create_swapchain );
 
@@ -1007,7 +1007,7 @@ int main()
 		if ( ui_state.vsync != vsync )
 		{
 			vsync = ui_state.vsync;
-			swapchain.recreate( swapchain_image_format, vsync );
+			swapchain.recreate( vsync );
 			ImGui_ImplVulkan_SetMinImageCount( swapchain.get_image_count() );
 		}
 		ui_state.stable_power = stable_power.set_enabled( ui_state.stable_power );
