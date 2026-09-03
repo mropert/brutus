@@ -463,10 +463,14 @@ int main()
 	PROFILER_SCOPE_POP( create_device );
 
 	bool vsync = true;
+#ifdef __APPLE__
+	constexpr auto swapchain_format = renderer::Texture::Format::B8G8R8A8_SRGB;
+#else
+	constexpr auto swapchain_format = renderer::Texture::Format::R8G8B8A8_SRGB;
+#endif
 
 	PROFILER_SCOPE_PUSH( create_swapchain, "create_swapchain" );
-	renderer::Swapchain swapchain( device, vsync );
-	const auto swapchain_image_format = swapchain.get_format();
+	renderer::Swapchain swapchain( device, swapchain_format, vsync );
 	PROFILER_SCOPE_POP( create_swapchain );
 
 	constexpr auto draw_image_format = renderer::Texture::Format::R16G16B16A16_SFLOAT;
@@ -476,7 +480,7 @@ int main()
 		ImGui::CreateContext();
 		const auto internals = device.get_internals();
 		ImGui_ImplSDL3_InitForVulkan( internals.window );
-		const VkFormat color_format = static_cast<VkFormat>( swapchain_image_format );
+		const VkFormat color_format = static_cast<VkFormat>( swapchain_format );
 		ImGui_ImplVulkan_InitInfo info {
 			.ApiVersion = internals.api_version,
 			.Instance = internals.instance,
@@ -579,8 +583,7 @@ int main()
 												{ .path = "grid.frag", .stage = renderer::ShaderStage::FRAGMENT } } );
 
 	const auto tonemap_pipeline = pipelines.add(
-		renderer::Pipeline::Desc { .color_format = swapchain_image_format,
-								   .push_constants_size = sizeof( renderer::BindlessSampledTexture ) },
+		renderer::Pipeline::Desc { .color_format = swapchain_format, .push_constants_size = sizeof( renderer::BindlessSampledTexture ) },
 		{ { .path = "fullscreen.vert", .stage = renderer::ShaderStage::VERTEX },
 		  { .path = "tonemap.frag", .stage = renderer::ShaderStage::FRAGMENT } } );
 
