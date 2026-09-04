@@ -857,7 +857,7 @@ int main()
 				depth_attachment.resolve_target = depth_resolved_image.handles.view;
 			}
 
-			command_buffer->begin_rendering( draw_image_extent, color_attachment, depth_attachment );
+			command_buffer->begin_rendering( { .color_target = color_attachment, .depth_target = depth_attachment } );
 
 			command_buffer->set_viewport( draw_image_extent );
 			command_buffer->set_scissor( draw_image_extent );
@@ -955,9 +955,8 @@ int main()
 											 renderer::ResourceState::UNDEFINED,
 											 renderer::ResourceState::COLOR_ATTACHMENT );
 			command_buffer->begin_rendering(
-				draw_image_extent,
-				renderer::RenderAttachment { .target = draw_image_view, .resolve_target = draw_resolved_image.handles.view },
-				renderer::RenderAttachment { .target = depth_image_view } );
+				{ .color_target = { .target = draw_image_view, .resolve_target = draw_resolved_image.handles.view },
+				  .depth_target = { .target = depth_image_view } } );
 
 			command_buffer->set_viewport( draw_image_extent );
 			command_buffer->set_scissor( draw_image_extent );
@@ -977,7 +976,7 @@ int main()
 			command_buffer->texture_barrier( swapchain_image,
 											 renderer::ResourceState::UNDEFINED,
 											 renderer::ResourceState::COLOR_ATTACHMENT );
-			command_buffer->begin_rendering( swapchain_image.get_extent(), renderer::RenderAttachment { .target = swapchain_image_view } );
+			command_buffer->begin_rendering( { .color_target = { .target = swapchain_image_view } } );
 			command_buffer->set_viewport( swapchain_image.get_extent() );
 			command_buffer->set_scissor( swapchain_image.get_extent() );
 			command_buffer->bind_pipeline( pipelines.get( tonemap_pipeline ), bindless_manager );
@@ -989,7 +988,7 @@ int main()
 		{
 			PROFILER_GPU_EVENT( "Draw UI" );
 			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_UI );
-			command_buffer->begin_rendering( swapchain_image.get_extent(), renderer::RenderAttachment { .target = swapchain_image_view } );
+			command_buffer->begin_rendering( { .color_target = { .target = swapchain_image_view } } );
 			ImGui::Render();
 			ImGui_ImplVulkan_RenderDrawData( ImGui::GetDrawData(), command_buffer->get_impl() );
 			command_buffer->end_rendering();
