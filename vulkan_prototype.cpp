@@ -196,7 +196,7 @@ struct ui_data
 {
 	int x_miku = 1;
 	int z_miku = 1;
-	float lod_cutoff = 10.f;
+	int lod_pixel_tolerance = 1;
 	float sun_intensity = 4.5f;
 	float sky_to_sun = 0.06f;
 	bool paused = false;
@@ -344,7 +344,7 @@ void draw_ui( ui_data& data,
 		ImGui::Text( "Instance count" );
 		ImGui::SliderInt( "x", &data.x_miku, 1, 100 );
 		ImGui::SliderInt( "z", &data.z_miku, 1, 100 );
-		ImGui::SliderFloat( "LOD cutoff", &data.lod_cutoff, 0.f, 200.f );
+		ImGui::SliderInt( "LOD pixel tolerance", &data.lod_pixel_tolerance, 1, 8 );
 	}
 	ImGui::End();
 }
@@ -372,7 +372,7 @@ struct compute_draws_constants
 	renderer::BufferHandle visibility_buffer;
 	renderer::BufferHandle scene_constants;
 	uint32_t draws_count;
-	float lod_cutoff;
+	float lod_target;
 	renderer::BindlessSampledTexture depth_pyramid;
 };
 
@@ -838,7 +838,8 @@ int main()
 														  .visibility_buffer = draw_visibility_buffer.get_device_address(),
 														  .scene_constants = constants_address,
 														  .draws_count = draw_count,
-														  .lod_cutoff = ui_state.lod_cutoff,
+														  .lod_target = ui_state.lod_pixel_tolerance
+															  / ( draw_image_extent.height / ( 2 * std::tan( 70.f * 0.5f ) ) ),
 														  .depth_pyramid = depth_pyramid.handles.sampled_texture };
 				command_buffer->push_constants( pipeline, constants );
 				command_buffer->dispatch( calc_group_count( draw_count ), 1, 1 );

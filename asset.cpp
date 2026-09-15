@@ -355,6 +355,7 @@ class asset_load_job
 		std::span<const uint32_t> indices;
 		std::vector<uint32_t> lod_indices;
 		std::array<uint32_t, MESH_LOD_COUNT - 1> indices_per_lod;
+		std::array<float, MESH_LOD_COUNT> error_per_lod;
 		std::vector<uint32_t> expanded_indices;
 		std::vector<gpu_meshlet> meshlets;
 		std::vector<uint32_t> meshlet_vertices;
@@ -796,7 +797,7 @@ private:
 					static_cast<size_t>( parsed_mesh.indices.length * lod_indices_factor[ lod ] ),
 					lod_error_factor[ lod ],
 					0,
-					nullptr );
+					&upload_data.error_per_lod[ lod ] );
 
 				meshopt_optimizeVertexCache( buffer.data(), buffer.data(), size, upload_data.vertices.size() );
 				upload_data.indices_per_lod[ lod ] = static_cast<uint32_t>( size );
@@ -931,6 +932,7 @@ private:
 
 		for ( int lod = 0; lod < MESH_LOD_COUNT; ++lod )
 		{
+			mesh.gpu_data.lods[ lod ].error =  lod == 0 ? 0.f : upload_data.error_per_lod[ lod - 1 ];
 			mesh.gpu_data.lods[ lod ].meshlets_count = upload_data.meshlets_per_lod[ lod ];
 			if ( lod > 0 )
 			{

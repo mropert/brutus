@@ -25,7 +25,7 @@ layout( push_constant ) uniform block
     VisibilityBuffer visibility_buffer;
     SceneConstants scene_constants;
     uint draws_count;
-    float lod_cutoff;
+    float lod_target;
     uint depth_pyramid;
 };
 
@@ -66,8 +66,9 @@ void main()
     const vec3 mesh_center = rotate_by_quaternion( meshes[mesh_id].bounding_sphere.xyz, draws_buffer.mesh_draws[draw_id].rotation ) 
                                                 * draws_buffer.mesh_draws[draw_id].scale
                                                 + draws_buffer.mesh_draws[draw_id].translation;
-    const float mesh_radius = meshes[mesh_id].bounding_sphere.w * max(draws_buffer.mesh_draws[draw_id].scale.x,
-                                                                    max(draws_buffer.mesh_draws[draw_id].scale.y, draws_buffer.mesh_draws[draw_id].scale.z));
+    const float mesh_scale = max(draws_buffer.mesh_draws[draw_id].scale.x,
+                                max(draws_buffer.mesh_draws[draw_id].scale.y, draws_buffer.mesh_draws[draw_id].scale.z));
+    const float mesh_radius = meshes[mesh_id].bounding_sphere.w * mesh_scale;
     bool visible = true;    
     for ( int i = 0; i < 6; ++i )
     {
@@ -95,11 +96,14 @@ void main()
 
     if ( visible && ( !LATE || !was_visible ) )
     {
-        const float dist = distance(scene_constants.camera_position, mesh_center);
-        int lod = MESH_LOD_COUNT - 1;
-        while ( dist < lod * lod_cutoff )
+        const float dist = max(distance(scene_constants.camera_position, mesh_center) - mesh_radius, 0.0);
+        const float threshold = dist * lod_target / mesh_scale;
+
+        int lod = 0;
+        for (int i = 1; i < MESH_LOD_COUNT; ++i)
         {
-            --lod;
+            if (meshes[mesh_id].lods[i].error < threshold)
+                lod = i;
         }
 
         const uint command_id = atomicAdd( commmands_count_buffer.commands_count, 1 );

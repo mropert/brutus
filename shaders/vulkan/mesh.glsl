@@ -23,6 +23,7 @@ struct MeshLOD
     uint indices_count;
     uint meshlets_offset;
     uint meshlets_count;
+    float error;
 };
 
 struct Meshlet {

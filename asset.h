@@ -34,6 +34,7 @@ struct gpu_mesh_lod
 	uint32_t indices_count;
 	uint32_t meshlets_offset;
 	uint32_t meshlets_count;
+	float error;
 };
 
 struct gpu_meshlet
