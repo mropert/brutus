@@ -53,7 +53,7 @@ layout(buffer_reference, std430) readonly buffer MeshDrawBuffer { MeshDraw mesh_
 struct Mesh
 {
     vec4 bounding_sphere;
-    MeshLOD lods[4];
+    MeshLOD lods[MESH_LOD_COUNT];
     VertexBuffer vb;
     MeshletBuffer mb;
     MeshletVertexBuffer mvb;

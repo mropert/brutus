@@ -96,7 +96,7 @@ void main()
     if ( visible && ( !LATE || !was_visible ) )
     {
         const float dist = distance(scene_constants.camera_position, mesh_center);
-        int lod = 3;
+        int lod = MESH_LOD_COUNT - 1;
         while ( dist < lod * lod_cutoff )
         {
             --lod;

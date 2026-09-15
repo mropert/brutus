@@ -60,7 +60,7 @@ struct draw_meshes_constants
 	renderer::BufferHandle commands_buffer;
 };
 
-static constexpr uint32_t MAX_MESHES = 8192;
+static constexpr uint32_t MAX_MESHES = 4096;
 static constexpr uint32_t MAX_MATERIALS = 8192;
 
 class Camera
@@ -539,28 +539,33 @@ int main()
 
 	renderer::PipelineManager pipelines( device, "shaders/vulkan", bindless_manager );
 
-	const auto mesh_pipeline = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
-																		 .depth_format = depth_image.get_format(),
-																		 .sample_count = samples,
-																		 .push_constants_size = sizeof( draw_meshes_constants ) },
-											  { { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX },
-												{ .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT } } );
+	const std::vector<renderer::ShaderSource::Define> mesh_shaders_defines { { "MESH_LOD_COUNT", std::to_string( MESH_LOD_COUNT ) } };
+
+	const auto mesh_pipeline = pipelines.add(
+		renderer::Pipeline::Desc { .color_format = draw_image_format,
+								   .depth_format = depth_image.get_format(),
+								   .sample_count = samples,
+								   .push_constants_size = sizeof( draw_meshes_constants ) },
+		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines },
+		  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_shaders_defines } } );
 
 	renderer::PipelineHandle mesh_pipeline_meshlet { };
 	if ( props.mesh_shader_support )
 	{
-		mesh_pipeline_meshlet = pipelines.add( renderer::Pipeline::Desc { .color_format = draw_image_format,
-																		  .depth_format = depth_image.get_format(),
-																		  .sample_count = samples,
-																		  .push_constants_size = sizeof( draw_meshes_constants ) },
-											   { { .path = "mesh.task", .stage = renderer::ShaderStage::TASK },
-												 { .path = "mesh.mesh", .stage = renderer::ShaderStage::MESH },
-												 { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT } } );
+		mesh_pipeline_meshlet = pipelines.add(
+			renderer::Pipeline::Desc { .color_format = draw_image_format,
+									   .depth_format = depth_image.get_format(),
+									   .sample_count = samples,
+									   .push_constants_size = sizeof( draw_meshes_constants ) },
+			{ { .path = "mesh.task", .stage = renderer::ShaderStage::TASK, .defines = mesh_shaders_defines },
+			  { .path = "mesh.mesh", .stage = renderer::ShaderStage::MESH, .defines = mesh_shaders_defines },
+			  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_shaders_defines } } );
 	}
 
 	std::vector<renderer::ShaderSource::Define> compute_shader_defines;
 	compute_shader_defines.emplace_back( "LATE", "false" );
 	compute_shader_defines.emplace_back( "EMIT_EMPTY", props.draw_indirect_count_support ? "false" : "true" );
+	std::copy( begin( mesh_shaders_defines ), end( mesh_shaders_defines ), std::back_inserter( compute_shader_defines ) );
 
 	const auto compute_draws_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .push_constants_size = sizeof( compute_draws_constants ) },

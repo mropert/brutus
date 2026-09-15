@@ -9,6 +9,8 @@
 #include <renderer/device.h>
 #include <vector>
 
+static constexpr size_t MESH_LOD_COUNT = 6;
+
 struct pbr_data
 {
 	glm::vec4 base_color;
@@ -47,7 +49,7 @@ struct gpu_meshlet
 struct gpu_mesh
 {
 	glm::aligned_vec4 bounding_sphere; // z is radius
-	std::array<gpu_mesh_lod, 4> lods;
+	std::array<gpu_mesh_lod, MESH_LOD_COUNT> lods;
 	renderer::BufferHandle vertices;
 	renderer::BufferHandle meshlets;
 	renderer::BufferHandle meshlet_vertices;

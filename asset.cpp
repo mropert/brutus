@@ -354,7 +354,7 @@ class asset_load_job
 		std::vector<mesh_vertex> vertices;
 		std::span<const uint32_t> indices;
 		std::vector<uint32_t> lod_indices;
-		std::array<uint32_t, 3> indices_per_lod;
+		std::array<uint32_t, MESH_LOD_COUNT - 1> indices_per_lod;
 		std::vector<uint32_t> expanded_indices;
 		std::vector<gpu_meshlet> meshlets;
 		std::vector<uint32_t> meshlet_vertices;
@@ -775,8 +775,8 @@ private:
 
 		{
 			PROFILER_SCOPE_N( "lod_generation" );
-			constexpr std::array<float, 3> lod_indices_factor { { 0.2f, 0.05f, 0.01f } };
-			constexpr std::array<float, 3> lod_error_factor { { 0.01f, 0.04f, 0.1f } };
+			constexpr std::array<float, MESH_LOD_COUNT - 1> lod_indices_factor { { 0.5f, 0.25f, 0.12f, 0.05f, 0.01f } };
+			constexpr std::array<float, MESH_LOD_COUNT - 1> lod_error_factor { { 0.005f, 0.01f, 0.02f, 0.05f, 0.1f } };
 			std::vector<uint32_t> buffer( upload_data.indices.size() );
 			for ( size_t lod = 0; lod < upload_data.indices_per_lod.size(); ++lod )
 			{
@@ -808,7 +808,7 @@ private:
 			PROFILER_SCOPE_N( "meshlet_generation" );
 			std::vector<meshopt_Meshlet> meshlet_buffer;
 			size_t index_offset = 0;
-			for ( int lod = 0; lod < 4; ++lod )
+			for ( int lod = 0; lod < MESH_LOD_COUNT; ++lod )
 			{
 				const auto indices_ptr = lod == 0 ? upload_data.indices.data() : upload_data.lod_indices.data() + index_offset;
 				const auto indices_count = lod == 0 ? upload_data.indices.size() : upload_data.indices_per_lod[ lod - 1 ];
@@ -929,7 +929,7 @@ private:
 		_mesh_upload.queue( upload_data.meshlets, mesh.data_buffer, offset );
 		offset += upload_data.meshlets.size() * sizeof( gpu_meshlet );
 
-		for ( int lod = 0; lod < 4; ++lod )
+		for ( int lod = 0; lod < MESH_LOD_COUNT; ++lod )
 		{
 			mesh.gpu_data.lods[ lod ].meshlets_count = upload_data.meshlets_per_lod[ lod ];
 			if ( lod > 0 )
