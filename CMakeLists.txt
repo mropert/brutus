@@ -42,7 +42,10 @@ if(USE_TRACY)
 endif()
 
 add_executable(brutus-vulkan)
-target_sources(brutus-vulkan PRIVATE vulkan_prototype.cpp asset.cpp)
+target_sources(brutus-vulkan PRIVATE
+		src/asset.cpp
+		src/main.cpp
+)
 target_compile_definitions(brutus-vulkan PRIVATE GLM_FORCE_INTRINSICS GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_link_libraries(brutus-vulkan PRIVATE SDL3::SDL3 fastgltf::fastgltf glm::glm-header-only)
 target_link_libraries(brutus-vulkan PRIVATE $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image-shared>,SDL3_image::SDL3_image-shared,SDL3_image::SDL3_image-static>)

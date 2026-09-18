@@ -537,7 +537,7 @@ int main()
 
 	index_buffer indices( device, 128 * 1024 * 1024 );
 
-	renderer::PipelineManager pipelines( device, "shaders/vulkan", bindless_manager );
+	renderer::PipelineManager pipelines( device, "shaders", bindless_manager );
 
 	const std::vector<renderer::ShaderSource::Define> mesh_shaders_defines { { "MESH_LOD_COUNT", std::to_string( MESH_LOD_COUNT ) } };
 
