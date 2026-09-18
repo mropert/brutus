@@ -44,7 +44,9 @@ endif()
 add_executable(brutus-vulkan)
 target_sources(brutus-vulkan PRIVATE
 		src/asset.cpp
+		src/camera.cpp
 		src/main.cpp
+		src/scene_renderer.cpp
 )
 target_compile_definitions(brutus-vulkan PRIVATE GLM_FORCE_INTRINSICS GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_link_libraries(brutus-vulkan PRIVATE SDL3::SDL3 fastgltf::fastgltf glm::glm-header-only)
