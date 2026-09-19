@@ -803,7 +803,7 @@ private:
 		{
 			PROFILER_SCOPE_N( "lod_generation" );
 			constexpr std::array<float, MESH_LOD_COUNT - 1> lod_indices_factor { { 0.5f, 0.25f, 0.12f, 0.05f, 0.01f } };
-			constexpr std::array<float, MESH_LOD_COUNT - 1> lod_error_factor { { 0.005f, 0.01f, 0.02f, 0.05f, 0.1f } };
+			constexpr std::array<float, MESH_LOD_COUNT - 1> lod_error_factor { { 0.005f, 0.01f, 0.02f, 0.04f, 0.08f } };
 			std::vector<uint32_t> buffer( upload_data.indices.size() );
 			for ( size_t lod = 0; lod < upload_data.indices_per_lod.size(); ++lod )
 			{
