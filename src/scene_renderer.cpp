@@ -23,20 +23,6 @@ namespace
 		return r;
 	}
 
-	int calc_mip_levels( renderer::Extent2D extent )
-	{
-		int mips = 1;
-
-		while ( extent.width > 1 || extent.height > 1 )
-		{
-			++mips;
-			extent.width /= 2;
-			extent.height /= 2;
-		}
-
-		return mips;
-	}
-
 	// Not used on CPU side, only there for buffer sizing
 	struct gpu_draw_command
 	{

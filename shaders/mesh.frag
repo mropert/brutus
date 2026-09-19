@@ -9,9 +9,8 @@
 layout (location = 0) in vec2 inUV;
 layout (location = 1) in vec3 inFragPos;
 layout (location = 2) in vec3 inNormal;
-layout (location = 3) in vec3 inTangent;
-layout (location = 4) in vec3 inBitangent;
-layout (location = 5) in flat uint inMaterial;
+layout (location = 3) in vec4 inTangent;
+layout (location = 4) in flat uint inMaterial;
 layout (location = 0) out vec4 outFragColor;
 
 layout(set = 0, binding = 0) uniform texture2D textures[1024];
@@ -112,7 +111,9 @@ void main()
     if ( materials[inMaterial].normal_index != -1 )
     {
         const vec3 normalDisplacement = (texture(sampler2D(textures[materials[inMaterial].normal_index], samplers[0]), inUV).xyz * 2.0) - 1.0;
-        const mat3 TBN = mat3(normalize(inTangent), normalize(inBitangent), normalize(inNormal));
+        const vec3 normal = normalize(inNormal);
+        const vec3 tangent = normalize(inTangent.xyz);
+        const mat3 TBN = mat3(tangent,  cross(normal, tangent * inTangent.w), normalize(inNormal));
         N = normalize(TBN * normalDisplacement);
     }
     else

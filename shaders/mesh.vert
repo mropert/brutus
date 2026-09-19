@@ -11,9 +11,8 @@
 layout (location = 0) out vec2 outUV;
 layout (location = 1) out vec3 outWorldPos;
 layout (location = 2) out vec3 outNormal;
-layout (location = 3) out vec3 outTangent;
-layout (location = 4) out vec3 outBitangent;
-layout (location = 5) out flat uint outMaterial;
+layout (location = 3) out vec4 outTangent;
+layout (location = 4) out flat uint outMaterial;
 
 layout(std430, set = 1, binding = 0) readonly buffer ssbo1 { Mesh meshes[]; };
 
@@ -42,7 +41,6 @@ void main()
     outUV.y = v.uv_y;
     outNormal = rotate_by_quaternion( v.normal, draws_buffer.mesh_draws[draw_id].rotation );
     outWorldPos = pos;
-    outTangent = rotate_by_quaternion( v.tangent.xyz, draws_buffer.mesh_draws[draw_id].rotation );
-    outBitangent = cross(outNormal, outTangent) * v.tangent.w;
+    outTangent = vec4( rotate_by_quaternion( v.tangent.xyz, draws_buffer.mesh_draws[draw_id].rotation ), v.tangent.w);
     outMaterial = draws_buffer.mesh_draws[draw_id].material;
 }

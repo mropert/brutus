@@ -16,6 +16,20 @@
 #include <renderer/texture.h>
 #include <renderer/third_party/tbb.h>
 
+int calc_mip_levels( renderer::Extent2D extent )
+{
+	int mips = 1;
+
+	while ( extent.width > 1 || extent.height > 1 )
+	{
+		++mips;
+		extent.width /= 2;
+		extent.height /= 2;
+	}
+
+	return mips;
+}
+
 SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
 {
 	switch ( format )
@@ -91,9 +105,11 @@ renderer::raii::Texture make_image_from_surface( renderer::Device& device, const
 		throw renderer::Error( "Unsupported format" );
 	}
 	using TexUsage = renderer::Texture::Usage;
-	return device.create_texture( renderer::Texture::Desc { static_cast<renderer::Texture::Format>( format ),
-															TexUsage::TRANSFER_DST | TexUsage::SAMPLED,
-															renderer::Extent2D( surface.w, surface.h ) } );
+	const renderer::Extent2D extent( surface.w, surface.h );
+	return device.create_texture( renderer::Texture::Desc { .format = static_cast<renderer::Texture::Format>( format ),
+															.usage = TexUsage::TRANSFER_SRC | TexUsage::TRANSFER_DST | TexUsage::SAMPLED,
+															.extent = extent,
+															.mips = calc_mip_levels( extent ) } );
 }
 
 
@@ -269,9 +285,19 @@ public:
 		{
 			throw renderer::Error( SDL_GetError() );
 		}
-		_cmd_buffer->texture_barrier( texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::TRANSFER_DST );
+		_cmd_buffer->texture_barrier( texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::TRANSFER_DST, 0 );
 		_cmd_buffer->copy_buffer_to_texture( _upload_buffer, _offset, texture );
-		_cmd_buffer->texture_barrier( texture, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::SHADER_READ );
+		for ( int mip = 1; mip < texture.get_mips(); ++mip )
+		{
+			_cmd_buffer->texture_barrier( texture, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::TRANSFER_SRC, mip - 1 );
+			_cmd_buffer->texture_barrier( texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::TRANSFER_DST, mip );
+			_cmd_buffer->blit_texture( texture, texture, mip - 1, mip, true );
+			_cmd_buffer->texture_barrier( texture, renderer::ResourceState::TRANSFER_SRC, renderer::ResourceState::SHADER_READ, mip - 1 );
+		}
+		_cmd_buffer->texture_barrier( texture,
+									  renderer::ResourceState::TRANSFER_DST,
+									  renderer::ResourceState::SHADER_READ,
+									  texture.get_mips() - 1 );
 		_offset += size;
 	}
 
@@ -932,7 +958,7 @@ private:
 
 		for ( int lod = 0; lod < MESH_LOD_COUNT; ++lod )
 		{
-			mesh.gpu_data.lods[ lod ].error =  lod == 0 ? 0.f : upload_data.error_per_lod[ lod - 1 ];
+			mesh.gpu_data.lods[ lod ].error = lod == 0 ? 0.f : upload_data.error_per_lod[ lod - 1 ];
 			mesh.gpu_data.lods[ lod ].meshlets_count = upload_data.meshlets_per_lod[ lod ];
 			if ( lod > 0 )
 			{

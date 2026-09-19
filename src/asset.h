@@ -11,6 +11,8 @@
 
 static constexpr size_t MESH_LOD_COUNT = 6;
 
+int calc_mip_levels( renderer::Extent2D extent );
+
 struct pbr_data
 {
 	glm::vec4 base_color;
