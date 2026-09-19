@@ -232,7 +232,7 @@ public:
 		: _size( max_size )
 		, _device( device )
 		, _cmd_buffer( device.grab_command_buffer() )
-		, _upload_buffer( device.create_buffer( renderer::Buffer::Usage::TRANSFER_SRC, _size, true ) )
+		, _upload_buffer( device.create_buffer( renderer::Buffer::Usage::TRANSFER_SRC, _size, renderer::Buffer::CpuUsage::WRITE ) )
 		, _upload_fence( device.create_fence() )
 	{
 		_cmd_buffer->reset();

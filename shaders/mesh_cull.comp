@@ -16,6 +16,11 @@ layout(std430, set = 1, binding = 0) readonly buffer ssbo1 { Mesh meshes[]; };
 layout(buffer_reference, std430) writeonly buffer DrawCommandsBuffer { MeshDrawCommand commands[]; };
 layout(buffer_reference, std430) buffer DrawCommandsCountBuffer { uint commands_count; };
 layout(buffer_reference, std430) buffer VisibilityBuffer { uint8_t draws[]; };
+layout(buffer_reference, std430) writeonly buffer DrawStatisticsBuffer
+{
+    uint meshes[MESH_LOD_COUNT];
+    uint indices[MESH_LOD_COUNT];
+};
 
 layout( push_constant ) uniform block
 {
@@ -23,6 +28,7 @@ layout( push_constant ) uniform block
     DrawCommandsBuffer commands_buffer;
     DrawCommandsCountBuffer commmands_count_buffer;
     VisibilityBuffer visibility_buffer;
+    DrawStatisticsBuffer statistics_buffer;
     SceneConstants scene_constants;
     uint draws_count;
     float lod_target;
@@ -109,7 +115,8 @@ void main()
         const uint command_id = atomicAdd( commmands_count_buffer.commands_count, 1 );
         commands_buffer.commands[command_id].draw_id = draw_id;
         commands_buffer.commands[command_id].lod = lod;
-        commands_buffer.commands[command_id].index_count = meshes[mesh_id].lods[lod].indices_count;
+        const uint index_count = meshes[mesh_id].lods[lod].indices_count;
+        commands_buffer.commands[command_id].index_count = index_count;
         commands_buffer.commands[command_id].instance_count = 1;
         commands_buffer.commands[command_id].first_index = meshes[mesh_id].lods[lod].indices_offset;
         commands_buffer.commands[command_id].vertex_offset = 0;
@@ -117,6 +124,9 @@ void main()
         commands_buffer.commands[command_id].group_count_x = ( meshes[mesh_id].lods[lod].meshlets_count + 32 - 1 ) / 32;
         commands_buffer.commands[command_id].group_count_y = 1;
         commands_buffer.commands[command_id].group_count_z = 1;
+
+        atomicAdd( statistics_buffer.meshes[lod], 1 );
+        atomicAdd( statistics_buffer.indices[lod], index_count );
     }
     else if ( EMIT_EMPTY )
     {

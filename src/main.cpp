@@ -145,7 +145,8 @@ void draw_ui( ui_data& data,
 			  const index_buffer& index_buffer,
 			  std::span<const asset> assets,
 			  std::span<const float> gpu_timings,
-			  const renderer::Statistics& stats )
+			  const renderer::Statistics& stats,
+			  const SceneRenderer::DrawStatistics& scene_stats )
 {
 	PROFILER_SCOPE();
 	ImGui::Begin( "Vulkan renderer" );
@@ -183,22 +184,39 @@ void draw_ui( ui_data& data,
 			ImGui::BulletText( "UI: %.2f", gpu_timings[ Timestamps::DRAW_UI ] * 1e-6f );
 			ImGui::BulletText( "Triangles (millions): %.2f", static_cast<float>( stats.clipping_invocations / 1000 ) / 1000 );
 		}
-		ImGui::SeparatorText( "Assets" );
-		ImGui::BeginChild( "Assets", ImVec2( 0.f, 400.f ) );
-		for ( size_t i = 0; i < assets.size(); ++i )
+		if ( ImGui::BeginTable( "scene_stats", MESH_LOD_COUNT + 1, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg ) )
 		{
-			for ( size_t j = 0; j < assets[ i ].meshes.size(); ++j )
+			ImGui::TableSetupColumn( "LOD" );
+			for ( int i = 0; i < MESH_LOD_COUNT; ++i )
 			{
-				ImGui::Text( "Asset #%zu Mesh #%zu: %d / %d / %d / %d triangles",
-							 i,
-							 j,
-							 assets[ i ].meshes[ j ].gpu_data.lods[ 0 ].indices_count,
-							 assets[ i ].meshes[ j ].gpu_data.lods[ 1 ].indices_count,
-							 assets[ i ].meshes[ j ].gpu_data.lods[ 2 ].indices_count,
-							 assets[ i ].meshes[ j ].gpu_data.lods[ 3 ].indices_count );
+				ImGui::TableSetupColumn( std::to_string( i ).c_str() );
 			}
+			ImGui::TableHeadersRow();
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex( 0 );
+			ImGui::Text( "Meshes" );
+			for ( int i = 0; i < MESH_LOD_COUNT; ++i )
+			{
+				ImGui::TableSetColumnIndex( i + 1 );
+				ImGui::Text( "%d", scene_stats.meshes[ i ] );
+			}
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex( 0 );
+			ImGui::Text( "Tris" );
+			for ( int i = 0; i < MESH_LOD_COUNT; ++i )
+			{
+				ImGui::TableSetColumnIndex( i + 1 );
+				if ( scene_stats.indices[ i ] / 3 > 100'000 )
+				{
+					ImGui::Text( "%.2fm", scene_stats.indices[ i ] / 3000000.f );
+				}
+				else
+				{
+					ImGui::Text( "%.2fk", scene_stats.indices[ i ] / 3000.f );
+				}
+			}
+			ImGui::EndTable();
 		}
-		ImGui::EndChild();
 
 		ImGui::SeparatorText( "Settings" );
 		ImGui::SliderFloat( "Sun intensity", &data.sun_intensity, 1.f, 10.f );
@@ -489,7 +507,7 @@ int main()
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
-		draw_ui( ui_state, props, bindless_manager, indices, assets, gpu_timings.averages, stats );
+		draw_ui( ui_state, props, bindless_manager, indices, assets, gpu_timings.averages, stats, scene_renderer.get_statistics() );
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();

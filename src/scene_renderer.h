@@ -11,6 +11,12 @@ struct Camera;
 class SceneRenderer
 {
 public:
+	struct DrawStatistics
+	{
+		std::array<uint32_t, MESH_LOD_COUNT> meshes;
+		std::array<uint32_t, MESH_LOD_COUNT> indices;
+	};
+
 	SceneRenderer( renderer::Device& device,
 				   renderer::Texture::Format output_format,
 				   BindlessManager& bindless_manager,
@@ -31,6 +37,8 @@ public:
 				 float lod_pixel_tolerance,
 				 bool use_pbr,
 				 bool use_occlusion_culling );
+
+	const auto& get_statistics() const { return _statistics; }
 
 private:
 	static constexpr auto SAMPLE_COUNT = 4;
@@ -59,6 +67,7 @@ private:
 	renderer::raii::Buffer _draw_buffers;
 	renderer::raii::Buffer _draw_visibility_buffer;
 	renderer::raii::Buffer _draw_commands_buffer;
+	std::array<renderer::raii::Buffer, renderer::MAX_FRAMES_IN_FLIGHT> _draw_statistics_buffers;
 	renderer::PipelineHandle _mesh_pipeline;
 	renderer::PipelineHandle _meshlet_pipeline;
 	renderer::PipelineHandle _compute_draws_early_pipeline;
@@ -67,6 +76,7 @@ private:
 	renderer::PipelineHandle _grid_pipeline;
 	renderer::PipelineHandle _tonemap_pipeline;
 	std::vector<MeshDraw> _scene;
+	DrawStatistics _statistics;
 	int _frames = 0;
 	bool _needs_rebuild = false;
 	bool _draw_indirect_count;

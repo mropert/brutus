@@ -66,6 +66,7 @@ namespace
 		renderer::BufferHandle commands_buffer;
 		renderer::BufferHandle commmands_count_buffer;
 		renderer::BufferHandle visibility_buffer;
+		renderer::BufferHandle statistics_buffer;
 		renderer::BufferHandle scene_constants;
 		uint32_t draws_count;
 		float lod_target;
@@ -153,10 +154,10 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		  true ) )
 	, _constant_buffers( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 											   sizeof( std::array<scene_constants, renderer::MAX_FRAMES_IN_FLIGHT> ),
-											   true ) )
+											   renderer::Buffer::CpuUsage::WRITE ) )
 	, _draw_buffers( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 										   sizeof( std::array<MeshDraw, MAX_DRAWS> ) * renderer::MAX_FRAMES_IN_FLIGHT,
-										   true ) )
+										   renderer::Buffer::CpuUsage::WRITE ) )
 	, _draw_visibility_buffer( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
 														 | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 													 MAX_DRAWS ) )
@@ -216,6 +217,14 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		renderer::Pipeline::Desc { .color_format = output_format, .push_constants_size = sizeof( renderer::BindlessSampledTexture ) },
 		{ { .path = "fullscreen.vert", .stage = renderer::ShaderStage::VERTEX },
 		  { .path = "tonemap.frag", .stage = renderer::ShaderStage::FRAGMENT } } );
+
+	for ( auto& buffer : _draw_statistics_buffers )
+	{
+		buffer = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
+										   | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+									   sizeof( DrawStatistics ),
+									   renderer::Buffer::CpuUsage::READ_WRITE );
+	}
 }
 
 void SceneRenderer::add_mesh( mesh_handle mesh, glm::vec3 translation, glm::quat rotation, glm::vec3 scale, material_handle material )
@@ -244,6 +253,12 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 							bool use_occlusion_culling )
 {
 	const auto frame_index = _frames % renderer::MAX_FRAMES_IN_FLIGHT;
+
+	if ( _frames >= renderer::MAX_FRAMES_IN_FLIGHT )
+	{
+		_draw_statistics_buffers[ frame_index ].flush();
+		memcpy( &_statistics, _draw_statistics_buffers[ frame_index ].get_mapped_address(), sizeof( DrawStatistics ) );
+	}
 
 	if ( use_occlusion_culling )
 	{
@@ -278,6 +293,14 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 	cmd.texture_barrier( _depth_texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
 	cmd.texture_barrier( _resolved_depth_texture.texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
 
+	cmd.buffer_barrier( _draw_statistics_buffers[ frame_index ],
+						renderer::ResourceState::UNDEFINED,
+						renderer::ResourceState::TRANSFER_DST );
+	cmd.fill_buffer( _draw_statistics_buffers[ frame_index ], 0, sizeof( DrawStatistics ), 0 );
+	cmd.buffer_barrier( _draw_statistics_buffers[ frame_index ],
+						renderer::ResourceState::TRANSFER_DST,
+						renderer::ResourceState::STORAGE_WRITE );
+
 	const auto draw_meshes = [ & ]( bool early )
 	{
 		//cmd.write_timestamp( timestamp_queries[ image_index ], early ? Timestamps::COMPUTE_DRAWS_EARLY : Timestamps::COMPUTE_DRAWS_LATE );
@@ -292,6 +315,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 													  .commands_buffer = _draw_commands_buffer.get_device_address() + sizeof( uint32_t ),
 													  .commmands_count_buffer = _draw_commands_buffer.get_device_address(),
 													  .visibility_buffer = _draw_visibility_buffer.get_device_address(),
+													  .statistics_buffer = _draw_statistics_buffers[ frame_index ].get_device_address(),
 													  .scene_constants = constants_address,
 													  .draws_count = static_cast<uint32_t>( _scene.size() ),
 													  .lod_target = lod_pixel_tolerance
@@ -408,6 +432,10 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		draw_meshes( false );
 	}
 
+	cmd.buffer_barrier( _draw_statistics_buffers[ frame_index ],
+						renderer::ResourceState::STORAGE_WRITE,
+						renderer::ResourceState::HOST_READ );
+
 	{
 		PROFILER_GPU_EVENT( "Draw Grid" );
 		cmd.texture_barrier( _resolved_color_texture.texture,
@@ -440,4 +468,6 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		cmd.draw( 3 );
 		cmd.end_rendering();
 	}
+
+	++_frames;
 }
