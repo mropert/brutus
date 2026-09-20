@@ -1078,12 +1078,13 @@ private:
 																 .handles.sampled_texture;
 					}
 				}
-				material.gpu_data.pbr_data.base_color.x = _asset.materials[ i ].pbrData.baseColorFactor.x();
-				material.gpu_data.pbr_data.base_color.y = _asset.materials[ i ].pbrData.baseColorFactor.y();
-				material.gpu_data.pbr_data.base_color.z = _asset.materials[ i ].pbrData.baseColorFactor.z();
-				material.gpu_data.pbr_data.base_color.w = _asset.materials[ i ].pbrData.baseColorFactor.w();
-				material.gpu_data.pbr_data.metalness = _asset.materials[ i ].pbrData.metallicFactor;
-				material.gpu_data.pbr_data.roughness = _asset.materials[ i ].pbrData.roughnessFactor;
+				material.gpu_data.base_color.x = _asset.materials[ i ].pbrData.baseColorFactor.x();
+				material.gpu_data.base_color.y = _asset.materials[ i ].pbrData.baseColorFactor.y();
+				material.gpu_data.base_color.z = _asset.materials[ i ].pbrData.baseColorFactor.z();
+				material.gpu_data.base_color.w = _asset.materials[ i ].pbrData.baseColorFactor.w();
+				material.gpu_data.metalness = _asset.materials[ i ].pbrData.metallicFactor;
+				material.gpu_data.roughness = _asset.materials[ i ].pbrData.roughnessFactor;
+				material.gpu_data.double_sided = _asset.materials[ i ].doubleSided ? 1u : 0u;
 
 				material.handle = _bindless_manager.add_buffer_entry( material.gpu_data );
 			}

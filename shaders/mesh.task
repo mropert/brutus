@@ -12,6 +12,7 @@
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 
 layout(std430, set = 1, binding = 0) readonly buffer ssbo1 { Mesh meshes[]; };
+layout(std430, set = 1, binding = 1) readonly buffer ssbo2 { Material materials[]; };
 
 layout(buffer_reference, std430) readonly buffer DrawCommandsBuffer { MeshDrawCommand commands[]; };
 
@@ -56,7 +57,11 @@ void main()
                                                                 max(draws_buffer.mesh_draws[draw_id].scale.y, draws_buffer.mesh_draws[draw_id].scale.z));
     const vec3 cone_axis = rotate_by_quaternion( meshlet.cone.xyz, draws_buffer.mesh_draws[draw_id].rotation );
 
-    bool visible = !coneCull( meshlet_center, meshlet_radius, cone_axis, meshlet.cone.w, scene_constants.camera_position );
+    bool visible = true;
+    if (materials[draws_buffer.mesh_draws[draw_id].material].double_sided == 0)
+    {
+        visible = visible && !coneCull( meshlet_center, meshlet_radius, cone_axis, meshlet.cone.w, scene_constants.camera_position );
+    }
     for ( int i = 0; i < 6; ++i )
     {
         visible = visible && dot( scene_constants.frustum[i], vec4( meshlet_center, 1 ) ) > -meshlet_radius;

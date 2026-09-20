@@ -13,21 +13,16 @@ static constexpr size_t MESH_LOD_COUNT = 6;
 
 int calc_mip_levels( renderer::Extent2D extent );
 
-struct pbr_data
-{
-	glm::vec4 base_color;
-	float metalness;
-	float roughness;
-};
-
 struct gpu_material
 {
-	pbr_data pbr_data;
+	glm::aligned_vec4 base_color;
+	float metalness;
+	float roughness;
 	renderer::BindlessSampledTexture albedo_texture;
 	renderer::BindlessSampledTexture normal_texture;
 	renderer::BindlessSampledTexture metallic_roughness_texture;
 	renderer::BindlessSampledTexture specular_texture;
-	uint32_t padding[ 2 ];
+	uint32_t double_sided;
 };
 
 struct gpu_mesh_lod
