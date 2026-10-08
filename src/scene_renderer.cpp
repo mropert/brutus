@@ -168,7 +168,6 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 	_mesh_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 								   .depth_format = DEPTH_FORMAT,
-								   .cull_mode = renderer::Pipeline::CullMode::DYNAMIC,
 								   .sample_count = SAMPLE_COUNT,
 								   .push_constants_size = sizeof( draw_meshes_constants ) },
 		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines },
@@ -179,7 +178,6 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		_meshlet_pipeline = pipelines.add(
 			renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 									   .depth_format = DEPTH_FORMAT,
-									   .cull_mode = renderer::Pipeline::CullMode::DYNAMIC,
 									   .sample_count = SAMPLE_COUNT,
 									   .push_constants_size = sizeof( draw_meshes_constants ) },
 			{ { .path = "mesh.task", .stage = renderer::ShaderStage::TASK, .defines = mesh_shaders_defines },
@@ -346,6 +344,10 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		}
 		cmd.end_rendering();
 	};
+
+	// TODO: have a better draw interface with dynamic pipeline state arguments
+	cmd.set_depth_test( true );
+	cmd.set_depth_write( true );
 
 	draw_opaques( true );
 
