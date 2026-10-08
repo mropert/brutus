@@ -13,6 +13,15 @@ static constexpr size_t MESH_LOD_COUNT = 6;
 
 int calc_mip_levels( renderer::Extent2D extent );
 
+enum class material_type : uint32_t
+{
+	OPAQUE_SINGLE = 0,
+	OPAQUE_DOUBLE,
+	ALPHA_SINGLE,
+	ALPHA_DOUBLE,
+	COUNT
+};
+
 struct gpu_material
 {
 	glm::aligned_vec4 base_color;
@@ -22,7 +31,7 @@ struct gpu_material
 	renderer::BindlessSampledTexture normal_texture;
 	renderer::BindlessSampledTexture metallic_roughness_texture;
 	renderer::BindlessSampledTexture specular_texture;
-	uint32_t double_sided;
+	material_type type;
 };
 
 struct gpu_mesh_lod

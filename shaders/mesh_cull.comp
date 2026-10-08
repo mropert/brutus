@@ -26,8 +26,8 @@ layout(buffer_reference, std430) writeonly buffer DrawStatisticsBuffer
 layout( push_constant ) uniform block
 {
     MeshDrawBuffer draws_buffer;
-    DrawCommandsBuffer commands_buffers[2];
-    DrawCommandsCountBuffer commands_count_buffers[2];
+    DrawCommandsBuffer commands_buffers[4];
+    DrawCommandsCountBuffer commands_count_buffers[4];
     VisibilityBuffer visibility_buffer;
     DrawStatisticsBuffer statistics_buffer;
     SceneConstants scene_constants;
@@ -113,7 +113,7 @@ void main()
                 lod = i;
         }
 
-        const uint bucket = materials[draws_buffer.mesh_draws[draw_id].material].double_sided;
+        const uint bucket = materials[draws_buffer.mesh_draws[draw_id].material].type;
         const uint command_id = atomicAdd( commands_count_buffers[bucket].commands_count, 1 );
         commands_buffers[bucket].commands[command_id].draw_id = draw_id;
         commands_buffers[bucket].commands[command_id].lod = lod;

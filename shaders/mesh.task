@@ -58,7 +58,8 @@ void main()
     const vec3 cone_axis = rotate_by_quaternion( meshlet.cone.xyz, draws_buffer.mesh_draws[draw_id].rotation );
 
     bool visible = true;
-    if (materials[draws_buffer.mesh_draws[draw_id].material].double_sided == 0)
+    const uint type = materials[draws_buffer.mesh_draws[draw_id].material].type;
+    if (type == 0 || type == 2)
     {
         visible = visible && !coneCull( meshlet_center, meshlet_radius, cone_axis, meshlet.cone.w, scene_constants.camera_position );
     }

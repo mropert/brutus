@@ -423,11 +423,9 @@ public:
 				prepare_meshes();
 				upload_meshes();
 			},
-			[ & ]
-			{
-				decompress_textures();
-				upload_textures();
-			} );
+			[ & ] { decompress_textures(); } );
+		// Can't upload texs while meshes are uploading, the command pool isn't thread safe...
+		upload_textures();
 		return finalize();
 	}
 
@@ -998,7 +996,8 @@ private:
 					{
 						throw renderer::Error( SDL_GetError() );
 					}
-					else if ( _images[ index ]->format == SDL_PIXELFORMAT_INDEX8 )
+					// XXX: INDEX1MSB should probably be turned into R8_UNORM
+					else if ( _images[ index ]->format == SDL_PIXELFORMAT_INDEX8 || _images[ index ]->format == SDL_PIXELFORMAT_INDEX1MSB )
 					{
 						sdl::raii::Surface converted_image( SDL_ConvertSurface( _images[ index ].get(), SDL_PIXELFORMAT_RGBA32 ) );
 						if ( !converted_image )
@@ -1084,7 +1083,21 @@ private:
 				material.gpu_data.base_color.w = _asset.materials[ i ].pbrData.baseColorFactor.w();
 				material.gpu_data.metalness = _asset.materials[ i ].pbrData.metallicFactor;
 				material.gpu_data.roughness = _asset.materials[ i ].pbrData.roughnessFactor;
-				material.gpu_data.double_sided = _asset.materials[ i ].doubleSided ? 1u : 0u;
+				switch ( _asset.materials[ i ].alphaMode )
+				{
+
+					case fastgltf::AlphaMode::Opaque:
+					case fastgltf::AlphaMode::Mask: // TODO: proper Mask support
+						material.gpu_data.type = _asset.materials[ i ].doubleSided ? material_type::OPAQUE_DOUBLE
+																				   : material_type::OPAQUE_SINGLE;
+						break;
+					case fastgltf::AlphaMode::Blend:
+						material.gpu_data.type = _asset.materials[ i ].doubleSided ? material_type::ALPHA_DOUBLE
+																				   : material_type::ALPHA_SINGLE;
+						break;
+					default:
+						throw renderer::Error( "Unsupported material alpha mode" );
+				}
 
 				material.handle = _bindless_manager.add_buffer_entry( material.gpu_data );
 			}
@@ -1133,7 +1146,7 @@ private:
 							[]( size_t i ) { return static_cast<uint32_t>( i ); } );
 			nodes.push_back( scene_node { .children = std::move( children ),
 										  .transform = std::visit( make_transform, node.transform ),
-										  .mesh = static_cast<uint32_t>( node.meshIndex.value_or( -1 ) ) } );
+										  .mesh = node.meshIndex.value_or( -1 ) } );
 		}
 
 		std::vector<uint32_t> roots;

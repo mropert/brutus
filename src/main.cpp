@@ -281,7 +281,7 @@ void draw_scene( const asset& scene, SceneRenderer& scene_renderer )
 	}
 }
 
-//#define BISTRO 1
+//#define BISTRO
 
 int main()
 {
@@ -364,6 +364,9 @@ int main()
 
 #ifdef BISTRO
 	draw_scene( assets[ 0 ], scene_renderer );
+#else
+	int x_miku = 0;
+	int z_miku = 0;
 #endif
 
 	pipelines.wait_ready();
@@ -398,8 +401,6 @@ int main()
 					   .stable_power = stable_power.is_enabled(),
 					   .mesh_shading = props.mesh_shader_support,
 					   .occlusion_culling = props.minmax_filter_support };
-	int x_miku = 0;
-	int z_miku = 0;
 
 	while ( !quit )
 	{

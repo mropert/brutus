@@ -11,6 +11,8 @@ struct Camera;
 class SceneRenderer
 {
 public:
+	static constexpr auto DRAW_BUCKETS_COUNT = std::to_underlying( material_type::COUNT );
+
 	struct DrawStatistics
 	{
 		std::array<uint32_t, MESH_LOD_COUNT> meshes;
@@ -45,6 +47,26 @@ private:
 	static constexpr auto COLOR_FORMAT = renderer::Texture::Format::R16G16B16A16_SFLOAT;
 	static constexpr auto DEPTH_FORMAT = renderer::Texture::Format::D32_SFLOAT;
 
+	void compute_draws( const BindlessManager& bindless_manager,
+						const renderer::PipelineManager& pipelines,
+						renderer::CommandBuffer& cmd,
+						renderer::BufferHandle constants_address,
+						renderer::BufferHandle draw_buffer_address,
+						renderer::BufferHandle stats_buffer_address,
+						float lod_pixel_tolerance,
+						bool early ) const;
+	void draw_opaque_meshlets( const BindlessManager& bindless_manager,
+							   const renderer::PipelineManager& pipelines,
+							   renderer::CommandBuffer& cmd,
+							   renderer::BufferHandle constants_address,
+							   renderer::BufferHandle draw_buffer_address ) const;
+	void draw_opaque_meshes( const BindlessManager& bindless_manager,
+							 const renderer::PipelineManager& pipelines,
+							 renderer::CommandBuffer& cmd,
+							 const renderer::Buffer* index_buffer,
+							 renderer::BufferHandle constants_address,
+							 renderer::BufferHandle draw_buffer_address ) const;
+
 	struct MeshDraw
 	{
 		glm::vec3 translation;
@@ -66,7 +88,7 @@ private:
 	renderer::raii::Buffer _constant_buffers;
 	renderer::raii::Buffer _draw_buffers;
 	renderer::raii::Buffer _draw_visibility_buffer;
-	std::array<renderer::raii::Buffer, 2> _draw_commands_buffers;
+	std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT> _draw_commands_buffers;
 	std::array<renderer::raii::Buffer, renderer::MAX_FRAMES_IN_FLIGHT> _draw_statistics_buffers;
 	renderer::PipelineHandle _mesh_pipeline;
 	renderer::PipelineHandle _meshlet_pipeline;

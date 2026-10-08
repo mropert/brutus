@@ -100,14 +100,11 @@ void main()
 {
     const uint albedo_index = materials[inMaterial].albedo_index;
     // If albedo is missing just display normal as a debug fallback
-    if (albedo_index == 0)
+    if (albedo_index == -1)
     {
         outFragColor = vec4(inNormal, 1.0);
         return;
     }
-
-    //outFragColor = vec4(normalize(inNormal), 1);
-    //return;
 
     const vec3 albedo = texture(sampler2D(textures[materials[inMaterial].albedo_index], samplers[0]), inUV).xyz * materials[inMaterial].baseColor.xyz;
     vec3 N;
