@@ -31,7 +31,7 @@ namespace
 		VkDrawIndexedIndirectCommand draw_cmd;
 		VkDrawMeshTasksIndirectCommandEXT mesh_cmd;
 	};
-	static constexpr auto MAX_DRAWS = 1024 * 1024;
+	static constexpr auto MAX_DRAWS = 65536;
 	struct DrawCommands
 	{
 		uint32_t count;
@@ -63,8 +63,8 @@ namespace
 	struct compute_draws_constants
 	{
 		renderer::BufferHandle draws_buffer;
-		renderer::BufferHandle commands_buffer;
-		renderer::BufferHandle commmands_count_buffer;
+		std::array<renderer::BufferHandle, 2> commands_buffers;
+		std::array<renderer::BufferHandle, 2> commands_count_buffers;
 		renderer::BufferHandle visibility_buffer;
 		renderer::BufferHandle statistics_buffer;
 		renderer::BufferHandle scene_constants;
@@ -161,10 +161,13 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 	, _draw_visibility_buffer( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
 														 | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 													 MAX_DRAWS ) )
-	, _draw_commands_buffer( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::INDIRECT_BUFFER
-													   | renderer::Buffer::Usage::TRANSFER_DST
-													   | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-												   sizeof( DrawCommands ) ) )
+	, _draw_commands_buffers(
+		  { device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::INDIRECT_BUFFER
+									  | renderer::Buffer::Usage::TRANSFER_DST | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+								  sizeof( DrawCommands ) ),
+			device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::INDIRECT_BUFFER
+									  | renderer::Buffer::Usage::TRANSFER_DST | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+								  sizeof( DrawCommands ) ) } )
 	, _draw_indirect_count( device.get_properties().draw_indirect_count_support )
 {
 	const std::vector<renderer::ShaderSource::Define> mesh_shaders_defines { { "MESH_LOD_COUNT", std::to_string( MESH_LOD_COUNT ) } };
@@ -172,7 +175,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 	_mesh_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 								   .depth_format = DEPTH_FORMAT,
-								   .cull_mode = renderer::Pipeline::CullMode::NONE,
+								   .cull_mode = renderer::Pipeline::CullMode::DYNAMIC,
 								   .sample_count = SAMPLE_COUNT,
 								   .push_constants_size = sizeof( draw_meshes_constants ) },
 		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines },
@@ -183,7 +186,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		_meshlet_pipeline = pipelines.add(
 			renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 									   .depth_format = DEPTH_FORMAT,
-									   .cull_mode = renderer::Pipeline::CullMode::NONE,
+									   .cull_mode = renderer::Pipeline::CullMode::DYNAMIC,
 									   .sample_count = SAMPLE_COUNT,
 									   .push_constants_size = sizeof( draw_meshes_constants ) },
 			{ { .path = "mesh.task", .stage = renderer::ShaderStage::TASK, .defines = mesh_shaders_defines },
@@ -193,7 +196,6 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 
 	std::vector<renderer::ShaderSource::Define> compute_shader_defines;
 	compute_shader_defines.emplace_back( "LATE", "false" );
-	compute_shader_defines.emplace_back( "EMIT_EMPTY", device.get_properties().draw_indirect_count_support ? "false" : "true" );
 	std::copy( begin( mesh_shaders_defines ), end( mesh_shaders_defines ), std::back_inserter( compute_shader_defines ) );
 
 	_compute_draws_early_pipeline = pipelines.add(
@@ -231,6 +233,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 
 void SceneRenderer::add_mesh( mesh_handle mesh, glm::vec3 translation, glm::quat rotation, glm::vec3 scale, material_handle material )
 {
+	assert( _scene.size() < MAX_DRAWS );
 	_scene.push_back( MeshDraw { .translation = translation, .mesh = mesh, .rotation = rotation, .scale = scale, .material = material } );
 	_needs_rebuild = true;
 }
@@ -308,24 +311,35 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		//cmd.write_timestamp( timestamp_queries[ image_index ], early ? Timestamps::COMPUTE_DRAWS_EARLY : Timestamps::COMPUTE_DRAWS_LATE );
 		{
 			PROFILER_GPU_EVENT( "Compute Draws" );
-			cmd.buffer_barrier( _draw_commands_buffer, renderer::ResourceState::INDIRECT_ARGUMENT, renderer::ResourceState::TRANSFER_DST );
-			cmd.fill_buffer( _draw_commands_buffer, 0, sizeof( uint32_t ), 0 );
-			cmd.buffer_barrier( _draw_commands_buffer, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ_WRITE );
+			compute_draws_constants constants { .draws_buffer = draw_buffer_address,
+												.visibility_buffer = _draw_visibility_buffer.get_device_address(),
+												.statistics_buffer = _draw_statistics_buffers[ frame_index ].get_device_address(),
+												.scene_constants = constants_address,
+												.draws_count = static_cast<uint32_t>( _scene.size() ),
+												.lod_target = lod_pixel_tolerance / ( _extent.height / ( 2 * std::tan( 70.f * 0.5f ) ) ),
+												.depth_pyramid = _depth_pyramid.handles.sampled_texture };
+
+			for ( size_t i = 0; i < _draw_commands_buffers.size(); ++i )
+			{
+				cmd.buffer_barrier( _draw_commands_buffers[ i ],
+									renderer::ResourceState::INDIRECT_ARGUMENT,
+									renderer::ResourceState::TRANSFER_DST );
+				cmd.fill_buffer( _draw_commands_buffers[ i ], 0, _draw_commands_buffers[ i ].get_size(), 0 );
+				cmd.buffer_barrier( _draw_commands_buffers[ i ],
+									renderer::ResourceState::TRANSFER_DST,
+									renderer::ResourceState::STORAGE_READ_WRITE );
+				constants.commands_buffers[ i ] = _draw_commands_buffers[ i ].get_device_address() + sizeof( uint32_t );
+				constants.commands_count_buffers[ i ] = _draw_commands_buffers[ i ].get_device_address();
+			}
 			const auto pipeline = early ? pipelines.get( _compute_draws_early_pipeline ) : pipelines.get( _compute_draws_late_pipeline );
 			cmd.bind_pipeline( pipeline, bindless_manager );
-			const compute_draws_constants constants { .draws_buffer = draw_buffer_address,
-													  .commands_buffer = _draw_commands_buffer.get_device_address() + sizeof( uint32_t ),
-													  .commmands_count_buffer = _draw_commands_buffer.get_device_address(),
-													  .visibility_buffer = _draw_visibility_buffer.get_device_address(),
-													  .statistics_buffer = _draw_statistics_buffers[ frame_index ].get_device_address(),
-													  .scene_constants = constants_address,
-													  .draws_count = static_cast<uint32_t>( _scene.size() ),
-													  .lod_target = lod_pixel_tolerance
-														  / ( _extent.height / ( 2 * std::tan( 70.f * 0.5f ) ) ),
-													  .depth_pyramid = _depth_pyramid.handles.sampled_texture };
+
 			cmd.push_constants( pipeline, constants );
 			cmd.dispatch( calc_group_count( static_cast<uint32_t>( _scene.size() ) ), 1, 1 );
-			cmd.buffer_barrier( _draw_commands_buffer, renderer::ResourceState::STORAGE_WRITE, renderer::ResourceState::INDIRECT_ARGUMENT );
+			for ( const auto& buffer : _draw_commands_buffers )
+			{
+				cmd.buffer_barrier( buffer, renderer::ResourceState::STORAGE_WRITE, renderer::ResourceState::INDIRECT_ARGUMENT );
+			}
 			cmd.buffer_barrier( _draw_visibility_buffer,
 								renderer::ResourceState::STORAGE_READ_WRITE,
 								renderer::ResourceState::STORAGE_READ_WRITE );
@@ -353,42 +367,47 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		{
 			PROFILER_GPU_EVENT( "Draw Meshlets" );
 			cmd.bind_pipeline( pipelines.get( _meshlet_pipeline ), bindless_manager );
-			const draw_meshes_constants constants { .scene_constants = constants_address,
-													.draws_buffer = draw_buffer_address,
-													.commands_buffer = _draw_commands_buffer.get_device_address() + sizeof( uint32_t ) };
-			cmd.push_constants( pipelines.get( _meshlet_pipeline ), constants );
-			cmd.draw_mesh_tasks_indirect( _draw_commands_buffer,
-										  sizeof( uint32_t ) + offsetof( gpu_draw_command, mesh_cmd ),
-										  _draw_commands_buffer,
-										  0,
-										  static_cast<uint32_t>( _scene.size() ),
-										  sizeof( gpu_draw_command ) );
+			draw_meshes_constants constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
+			for ( size_t i = 0; i < _draw_commands_buffers.size(); ++i )
+			{
+				cmd.set_cull_mode( i == 0 ? renderer::Pipeline::CullMode::BACK : renderer::Pipeline::CullMode::NONE );
+				constants.commands_buffer = _draw_commands_buffers[ i ].get_device_address() + sizeof( uint32_t );
+				cmd.push_constants( pipelines.get( _meshlet_pipeline ), constants );
+				cmd.draw_mesh_tasks_indirect( _draw_commands_buffers[ i ],
+											  sizeof( uint32_t ) + offsetof( gpu_draw_command, mesh_cmd ),
+											  _draw_commands_buffers[ i ],
+											  0,
+											  static_cast<uint32_t>( _scene.size() ),
+											  sizeof( gpu_draw_command ) );
+			}
 		}
 		else
 		{
 			PROFILER_GPU_EVENT( "Draw Meshes" );
 			cmd.bind_pipeline( pipelines.get( _mesh_pipeline ), bindless_manager );
 			cmd.bind_index_buffer( *index_buffer );
-			const draw_meshes_constants constants { .scene_constants = constants_address,
-													.draws_buffer = draw_buffer_address,
-													.commands_buffer = _draw_commands_buffer.get_device_address() + sizeof( uint32_t ) };
-
-			cmd.push_constants( pipelines.get( _mesh_pipeline ), constants );
-			if ( _draw_indirect_count )
+			draw_meshes_constants constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
+			for ( size_t i = 0; i < _draw_commands_buffers.size(); ++i )
 			{
-				cmd.draw_indexed_indirect( _draw_commands_buffer,
-										   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
-										   _draw_commands_buffer,
-										   0,
-										   static_cast<uint32_t>( _scene.size() ),
-										   sizeof( gpu_draw_command ) );
-			}
-			else
-			{
-				cmd.draw_indexed_indirect( _draw_commands_buffer,
-										   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
-										   static_cast<uint32_t>( _scene.size() ),
-										   sizeof( gpu_draw_command ) );
+				cmd.set_cull_mode( i == 0 ? renderer::Pipeline::CullMode::BACK : renderer::Pipeline::CullMode::NONE );
+				constants.commands_buffer = _draw_commands_buffers[ i ].get_device_address() + sizeof( uint32_t );
+				cmd.push_constants( pipelines.get( _mesh_pipeline ), constants );
+				if ( _draw_indirect_count )
+				{
+					cmd.draw_indexed_indirect( _draw_commands_buffers[ i ],
+											   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+											   _draw_commands_buffers[ i ],
+											   0,
+											   static_cast<uint32_t>( _scene.size() ),
+											   sizeof( gpu_draw_command ) );
+				}
+				else
+				{
+					cmd.draw_indexed_indirect( _draw_commands_buffers[ i ],
+											   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+											   static_cast<uint32_t>( _scene.size() ),
+											   sizeof( gpu_draw_command ) );
+				}
 			}
 		}
 		cmd.end_rendering();

@@ -66,7 +66,7 @@ private:
 	renderer::raii::Buffer _constant_buffers;
 	renderer::raii::Buffer _draw_buffers;
 	renderer::raii::Buffer _draw_visibility_buffer;
-	renderer::raii::Buffer _draw_commands_buffer;
+	std::array<renderer::raii::Buffer, 2> _draw_commands_buffers;
 	std::array<renderer::raii::Buffer, renderer::MAX_FRAMES_IN_FLIGHT> _draw_statistics_buffers;
 	renderer::PipelineHandle _mesh_pipeline;
 	renderer::PipelineHandle _meshlet_pipeline;

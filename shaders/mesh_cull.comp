@@ -12,6 +12,7 @@ layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 layout(set = 0, binding = 0) uniform texture2D textures[1024];
 layout(set = 0, binding = 2) uniform sampler samplers[8];
 layout(std430, set = 1, binding = 0) readonly buffer ssbo1 { Mesh meshes[]; };
+layout(std430, set = 1, binding = 1) readonly buffer ssbo2 { Material materials[]; };
 
 layout(buffer_reference, std430) writeonly buffer DrawCommandsBuffer { MeshDrawCommand commands[]; };
 layout(buffer_reference, std430) buffer DrawCommandsCountBuffer { uint commands_count; };
@@ -25,8 +26,8 @@ layout(buffer_reference, std430) writeonly buffer DrawStatisticsBuffer
 layout( push_constant ) uniform block
 {
     MeshDrawBuffer draws_buffer;
-    DrawCommandsBuffer commands_buffer;
-    DrawCommandsCountBuffer commmands_count_buffer;
+    DrawCommandsBuffer commands_buffers[2];
+    DrawCommandsCountBuffer commands_count_buffers[2];
     VisibilityBuffer visibility_buffer;
     DrawStatisticsBuffer statistics_buffer;
     SceneConstants scene_constants;
@@ -112,26 +113,22 @@ void main()
                 lod = i;
         }
 
-        const uint command_id = atomicAdd( commmands_count_buffer.commands_count, 1 );
-        commands_buffer.commands[command_id].draw_id = draw_id;
-        commands_buffer.commands[command_id].lod = lod;
+        const uint bucket = materials[draws_buffer.mesh_draws[draw_id].material].double_sided;
+        const uint command_id = atomicAdd( commands_count_buffers[bucket].commands_count, 1 );
+        commands_buffers[bucket].commands[command_id].draw_id = draw_id;
+        commands_buffers[bucket].commands[command_id].lod = lod;
         const uint index_count = meshes[mesh_id].lods[lod].indices_count;
-        commands_buffer.commands[command_id].index_count = index_count;
-        commands_buffer.commands[command_id].instance_count = 1;
-        commands_buffer.commands[command_id].first_index = meshes[mesh_id].lods[lod].indices_offset;
-        commands_buffer.commands[command_id].vertex_offset = 0;
-        commands_buffer.commands[command_id].first_instance = command_id;
-        commands_buffer.commands[command_id].group_count_x = ( meshes[mesh_id].lods[lod].meshlets_count + 32 - 1 ) / 32;
-        commands_buffer.commands[command_id].group_count_y = 1;
-        commands_buffer.commands[command_id].group_count_z = 1;
+        commands_buffers[bucket].commands[command_id].index_count = index_count;
+        commands_buffers[bucket].commands[command_id].instance_count = 1;
+        commands_buffers[bucket].commands[command_id].first_index = meshes[mesh_id].lods[lod].indices_offset;
+        commands_buffers[bucket].commands[command_id].vertex_offset = 0;
+        commands_buffers[bucket].commands[command_id].first_instance = command_id;
+        commands_buffers[bucket].commands[command_id].group_count_x = ( meshes[mesh_id].lods[lod].meshlets_count + 32 - 1 ) / 32;
+        commands_buffers[bucket].commands[command_id].group_count_y = 1;
+        commands_buffers[bucket].commands[command_id].group_count_z = 1;
 
         atomicAdd( statistics_buffer.meshes[lod], 1 );
         atomicAdd( statistics_buffer.indices[lod], index_count );
-    }
-    else if ( EMIT_EMPTY )
-    {
-        const uint command_id = atomicAdd( commmands_count_buffer.commands_count, 1 );
-        commands_buffer.commands[command_id].instance_count = 0;
     }
 
     if ( LATE )

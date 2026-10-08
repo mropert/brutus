@@ -191,7 +191,7 @@ void main()
     }
     else
     {
-        color = albedo * (NdotL + ambient_factor);
+        color = albedo * (NdotL + scene_constants.sky_to_sun) * scene_constants.main_light.w * 0.5;
     }
 
     outFragColor = vec4(color, 1.0);
