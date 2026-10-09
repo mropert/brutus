@@ -106,7 +106,12 @@ void main()
         return;
     }
 
-    const vec3 albedo = texture(sampler2D(textures[materials[inMaterial].albedo_index], samplers[0]), inUV).xyz * materials[inMaterial].baseColor.xyz;
+    const vec4 albedo = texture(sampler2D(textures[materials[inMaterial].albedo_index], samplers[0]), inUV) * materials[inMaterial].baseColor;
+    if ( USE_ALPHA && albedo.a < 0.5 )
+    {
+        discard;
+    }
+
     vec3 N;
     if ( materials[inMaterial].normal_index != -1 )
     {
@@ -155,7 +160,7 @@ void main()
         
         const float NDF = DistributionGGX(N, H, roughness);
         const float G   = GeometrySmith(N, V, L, roughness);
-        const vec3 F0 = mix(vec3(0.04), albedo, metalness) * specular_factor;
+        const vec3 F0 = mix(vec3(0.04), albedo.rgb, metalness) * specular_factor;
         const vec3 F = fresnelSchlick(HdotV, F0);
 
         const vec3 numerator    = NDF * G * F;
@@ -164,7 +169,7 @@ void main()
 
         // add to outgoing radiance Lo
         const vec3 kD = (1 - F) * (1 - metalness);
-        const vec3 Lo = (kD * albedo / PI + specular) * radiance * NdotL;
+        const vec3 Lo = (kD * albedo.rgb / PI + specular) * radiance * NdotL;
 
         // Ambient / fake-IBL: no cubemap yet, so approximate the environment with a
         // hemisphere (sky above, ground below). These colors ARE the environment radiance.
@@ -180,7 +185,7 @@ void main()
         const vec3 F_amb   = fresnelSchlickRoughness(NdotV, F0, roughness);
         const vec3 kD_amb  = (1.0 - F_amb) * (1.0 - metalness);
         const vec2 envBRDF = EnvBRDFApprox(NdotV, roughness);
-        const vec3 diffuse_ambient  = irradiance * albedo;
+        const vec3 diffuse_ambient  = irradiance * albedo.rgb;
         const vec3 specular_ambient = prefiltered * (F0 * envBRDF.x + envBRDF.y);
         const vec3 ambient = kD_amb * diffuse_ambient + specular_ambient;// * ao;
 
@@ -188,8 +193,8 @@ void main()
     }
     else
     {
-        color = albedo * (NdotL + scene_constants.sky_to_sun) * scene_constants.main_light.w * 0.5;
+        color = albedo.rgb * (NdotL + scene_constants.sky_to_sun) * scene_constants.main_light.w * 0.5;
     }
 
-    outFragColor = vec4(color, 1.0);
+    outFragColor = vec4(color, albedo.a);
 }

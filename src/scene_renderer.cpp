@@ -163,12 +163,32 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 													 MAX_DRAWS ) )
 	, _draw_indirect_count( device.get_properties().draw_indirect_count_support )
 {
-	const std::vector<renderer::ShaderSource::Define> mesh_shaders_defines { { "MESH_LOD_COUNT", std::to_string( MESH_LOD_COUNT ) } };
+	const std::vector<renderer::ShaderSource::Define> mesh_shaders_defines { { "MESH_LOD_COUNT", std::to_string( MESH_LOD_COUNT ) },
+																			 { "USE_ALPHA", "false" } };
+	const std::vector<renderer::ShaderSource::Define> mesh_alpha_shaders_defines { { "MESH_LOD_COUNT", std::to_string( MESH_LOD_COUNT ) },
+																				   { "USE_ALPHA", "true" } };
 
 	_mesh_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 								   .depth_format = DEPTH_FORMAT,
 								   .sample_count = SAMPLE_COUNT,
+								   .push_constants_size = sizeof( draw_meshes_constants ) },
+		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines },
+		  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_shaders_defines } } );
+
+	_mesh_alpha_clip_pipeline = pipelines.add(
+		renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
+								   .depth_format = DEPTH_FORMAT,
+								   .sample_count = SAMPLE_COUNT,
+								   .push_constants_size = sizeof( draw_meshes_constants ) },
+		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines },
+		  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_alpha_shaders_defines } } );
+
+	_mesh_alpha_blend_pipeline = pipelines.add(
+		renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
+								   .depth_format = DEPTH_FORMAT,
+								   .sample_count = SAMPLE_COUNT,
+								   .alpha_blend = true,
 								   .push_constants_size = sizeof( draw_meshes_constants ) },
 		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines },
 		  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_shaders_defines } } );
@@ -179,6 +199,25 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 			renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 									   .depth_format = DEPTH_FORMAT,
 									   .sample_count = SAMPLE_COUNT,
+									   .push_constants_size = sizeof( draw_meshes_constants ) },
+			{ { .path = "mesh.task", .stage = renderer::ShaderStage::TASK, .defines = mesh_shaders_defines },
+			  { .path = "mesh.mesh", .stage = renderer::ShaderStage::MESH, .defines = mesh_shaders_defines },
+			  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_shaders_defines } } );
+
+		_meshlet_alpha_clip_pipeline = pipelines.add(
+			renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
+									   .depth_format = DEPTH_FORMAT,
+									   .sample_count = SAMPLE_COUNT,
+									   .push_constants_size = sizeof( draw_meshes_constants ) },
+			{ { .path = "mesh.task", .stage = renderer::ShaderStage::TASK, .defines = mesh_shaders_defines },
+			  { .path = "mesh.mesh", .stage = renderer::ShaderStage::MESH, .defines = mesh_shaders_defines },
+			  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_alpha_shaders_defines } } );
+
+		_meshlet_alpha_blend_pipeline = pipelines.add(
+			renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
+									   .depth_format = DEPTH_FORMAT,
+									   .sample_count = SAMPLE_COUNT,
+									   .alpha_blend = true,
 									   .push_constants_size = sizeof( draw_meshes_constants ) },
 			{ { .path = "mesh.task", .stage = renderer::ShaderStage::TASK, .defines = mesh_shaders_defines },
 			  { .path = "mesh.mesh", .stage = renderer::ShaderStage::MESH, .defines = mesh_shaders_defines },
@@ -263,6 +302,11 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		memcpy( &_statistics, _draw_statistics_buffers[ frame_index ].get_mapped_address(), sizeof( DrawStatistics ) );
 	}
 
+	if ( index_buffer )
+	{
+		cmd.bind_index_buffer( *index_buffer );
+	}
+
 	if ( use_occlusion_culling )
 	{
 		if ( _needs_rebuild )
@@ -304,52 +348,24 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 						renderer::ResourceState::TRANSFER_DST,
 						renderer::ResourceState::STORAGE_WRITE );
 
-	const auto draw_opaques = [ & ]( bool early )
-	{
-		//cmd.write_timestamp( timestamp_queries[ image_index ], early ? Timestamps::COMPUTE_DRAWS_EARLY : Timestamps::COMPUTE_DRAWS_LATE );
-		compute_draws( bindless_manager,
-					   pipelines,
-					   cmd,
-					   constants_address,
-					   draw_buffer_address,
-					   _draw_statistics_buffers[ frame_index ].get_device_address(),
-					   lod_pixel_tolerance,
-					   early );
 
-		renderer::RenderAttachment color_attachment { .target = _color_texture_view };
-		if ( early )
-		{
-			color_attachment.clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } };
-		}
-		renderer::RenderAttachment depth_attachment { .target = _depth_texture_view };
-		if ( early )
-		{
-			depth_attachment.clear_value = { { 0.f } };
-			depth_attachment.resolve_target = _resolved_depth_texture.handles.view;
-		}
+	//cmd.write_timestamp( timestamp_queries[ image_index ], early ? Timestamps::COMPUTE_DRAWS_EARLY : Timestamps::COMPUTE_DRAWS_LATE );
+	compute_draws( bindless_manager,
+				   pipelines,
+				   cmd,
+				   constants_address,
+				   draw_buffer_address,
+				   _draw_statistics_buffers[ frame_index ].get_device_address(),
+				   lod_pixel_tolerance,
+				   true );
 
-		cmd.begin_rendering( { .color_target = color_attachment, .depth_target = depth_attachment } );
+	cmd.begin_rendering( { .color_target = { .target = _color_texture_view, .clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } } },
+						   .depth_target = { .target = _depth_texture_view,
+											 .resolve_target = _resolved_depth_texture.handles.view,
+											 .clear_value = { { 0.f } } } } );
+	draw_opaques( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address, index_buffer == nullptr );
+	cmd.end_rendering();
 
-		cmd.set_viewport( _extent );
-		cmd.set_scissor( _extent );
-
-		//cmd.write_timestamp( timestamp_queries[ image_index ], early ? Timestamps::DRAW_MESHES_EARLY : Timestamps::DRAW_MESHES_LATE );
-		if ( !index_buffer )
-		{
-			draw_opaque_meshlets( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
-		}
-		else
-		{
-			draw_opaque_meshlets( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
-		}
-		cmd.end_rendering();
-	};
-
-	// TODO: have a better draw interface with dynamic pipeline state arguments
-	cmd.set_depth_test( true );
-	cmd.set_depth_write( true );
-
-	draw_opaques( true );
 
 	if ( use_occlusion_culling )
 	{
@@ -386,8 +402,30 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 			}
 		}
 
-		draw_opaques( false );
+		compute_draws( bindless_manager,
+					   pipelines,
+					   cmd,
+					   constants_address,
+					   draw_buffer_address,
+					   _draw_statistics_buffers[ frame_index ].get_device_address(),
+					   lod_pixel_tolerance,
+					   false );
+
+		cmd.begin_rendering( { .color_target = { .target = _color_texture_view }, .depth_target = { .target = _depth_texture_view } } );
+		draw_opaques( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address, index_buffer == nullptr );
+		cmd.end_rendering();
 	}
+
+	cmd.begin_rendering( { .color_target = { .target = _color_texture_view }, .depth_target = { .target = _depth_texture_view } } );
+	if ( !index_buffer )
+	{
+		draw_transparent_meshlets( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
+	}
+	else
+	{
+		draw_transparent_meshlets( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
+	}
+	cmd.end_rendering();
 
 	cmd.buffer_barrier( _draw_statistics_buffers[ frame_index ],
 						renderer::ResourceState::STORAGE_WRITE,
@@ -403,6 +441,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 
 		cmd.set_viewport( _extent );
 		cmd.set_scissor( _extent );
+		cmd.set_depth_write( true );
 		//cmd.write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_GRID );
 		cmd.bind_pipeline( pipelines.get( _grid_pipeline ), bindless_manager );
 		cmd.push_constants( pipelines.get( _grid_pipeline ), grid_constants { .scene_constants = constants_address } );
@@ -471,6 +510,29 @@ void SceneRenderer::compute_draws( const BindlessManager& bindless_manager,
 	cmd.buffer_barrier( _draw_visibility_buffer, renderer::ResourceState::STORAGE_READ_WRITE, renderer::ResourceState::STORAGE_READ_WRITE );
 }
 
+void SceneRenderer::draw_opaques( const BindlessManager& bindless_manager,
+								  const renderer::PipelineManager& pipelines,
+								  renderer::CommandBuffer& cmd,
+								  renderer::BufferHandle constants_address,
+								  renderer::BufferHandle draw_buffer_address,
+								  bool use_mesh_shader ) const
+{
+	cmd.set_viewport( _extent );
+	cmd.set_scissor( _extent );
+	cmd.set_depth_test( true );
+	cmd.set_depth_write( true );
+
+	//cmd.write_timestamp( timestamp_queries[ image_index ], early ? Timestamps::DRAW_MESHES_EARLY : Timestamps::DRAW_MESHES_LATE );
+	if ( use_mesh_shader )
+	{
+		draw_opaque_meshlets( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
+	}
+	else
+	{
+		draw_opaque_meshes( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
+	}
+}
+
 void SceneRenderer::draw_opaque_meshlets( const BindlessManager& bindless_manager,
 										  const renderer::PipelineManager& pipelines,
 										  renderer::CommandBuffer& cmd,
@@ -478,6 +540,7 @@ void SceneRenderer::draw_opaque_meshlets( const BindlessManager& bindless_manage
 										  renderer::BufferHandle draw_buffer_address ) const
 {
 	PROFILER_GPU_EVENT( "Draw Meshlets" );
+	cmd.set_depth_write( true );
 	cmd.bind_pipeline( pipelines.get( _meshlet_pipeline ), bindless_manager );
 	draw_meshes_constants constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
 	for ( int i = 0; i < 2; ++i )
@@ -498,13 +561,12 @@ void SceneRenderer::draw_opaque_meshlets( const BindlessManager& bindless_manage
 void SceneRenderer::draw_opaque_meshes( const BindlessManager& bindless_manager,
 										const renderer::PipelineManager& pipelines,
 										renderer::CommandBuffer& cmd,
-										const renderer::Buffer* index_buffer,
 										renderer::BufferHandle constants_address,
 										renderer::BufferHandle draw_buffer_address ) const
 {
 	PROFILER_GPU_EVENT( "Draw Meshes" );
+	cmd.set_depth_write( true );
 	cmd.bind_pipeline( pipelines.get( _mesh_pipeline ), bindless_manager );
-	cmd.bind_index_buffer( *index_buffer );
 	draw_meshes_constants constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
 	for ( int i = 0; i < 2; ++i )
 	{
@@ -527,6 +589,75 @@ void SceneRenderer::draw_opaque_meshes( const BindlessManager& bindless_manager,
 									   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
 									   static_cast<uint32_t>( _scene.size() ),
 									   sizeof( gpu_draw_command ) );
+		}
+	}
+}
+
+void SceneRenderer::draw_transparent_meshlets( const BindlessManager& bindless_manager,
+											   const renderer::PipelineManager& pipelines,
+											   renderer::CommandBuffer& cmd,
+											   renderer::BufferHandle constants_address,
+											   renderer::BufferHandle draw_buffer_address ) const
+{
+	PROFILER_GPU_EVENT( "Draw Transparent Meshlets" );
+	draw_meshes_constants constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
+	for ( int pass = 0; pass < 2; ++pass )
+	{
+		const auto pipeline = pipelines.get( pass == 0 ? _meshlet_alpha_clip_pipeline : _meshlet_alpha_blend_pipeline );
+		cmd.bind_pipeline( pipeline, bindless_manager );
+		cmd.set_depth_write( pass == 0 );
+		for ( int i = 0; i < 2; ++i )
+		{
+			const auto bucket = std::to_underlying( material_type::ALPHA_SINGLE );
+			cmd.set_cull_mode( i == 0 ? renderer::Pipeline::CullMode::BACK : renderer::Pipeline::CullMode::NONE );
+			constants.commands_buffer = _draw_commands_buffers[ bucket + i ].get_device_address() + sizeof( uint32_t );
+			cmd.push_constants( pipeline, constants );
+			cmd.draw_mesh_tasks_indirect( _draw_commands_buffers[ bucket + i ],
+										  sizeof( uint32_t ) + offsetof( gpu_draw_command, mesh_cmd ),
+										  _draw_commands_buffers[ bucket + i ],
+										  0,
+										  static_cast<uint32_t>( _scene.size() ),
+										  sizeof( gpu_draw_command ) );
+		}
+	}
+}
+
+void SceneRenderer::draw_transparent_meshes( const BindlessManager& bindless_manager,
+											 const renderer::PipelineManager& pipelines,
+											 renderer::CommandBuffer& cmd,
+											 renderer::BufferHandle constants_address,
+											 renderer::BufferHandle draw_buffer_address ) const
+{
+	PROFILER_GPU_EVENT( "Draw Transparent Meshes" );
+	draw_meshes_constants constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
+	for ( int pass = 0; pass < 2; ++pass )
+	{
+		const auto pipeline = pipelines.get( pass == 0 ? _mesh_alpha_clip_pipeline : _mesh_alpha_blend_pipeline );
+		cmd.bind_pipeline( pipeline, bindless_manager );
+		cmd.set_depth_write( pass == 0 );
+
+		for ( int i = 0; i < 2; ++i )
+		{
+			const auto bucket = std::to_underlying( material_type::ALPHA_SINGLE );
+			cmd.set_cull_mode( i == 0 ? renderer::Pipeline::CullMode::BACK : renderer::Pipeline::CullMode::NONE );
+			constants.commands_buffer = _draw_commands_buffers[ bucket + i ].get_device_address() + sizeof( uint32_t );
+			cmd.push_constants( pipeline, constants );
+			if ( _draw_indirect_count )
+			{
+				cmd.draw_indexed_indirect( _draw_commands_buffers[ bucket + i ],
+										   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+										   _draw_commands_buffers[ bucket + i ],
+										   0,
+										   static_cast<uint32_t>( _scene.size() ),
+										   sizeof( gpu_draw_command ) );
+			}
+			else
+			{
+				cmd.draw_indexed_indirect( _draw_commands_buffers[ i ],
+										   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+										   static_cast<uint32_t>( _scene.size() ),
+										   sizeof( gpu_draw_command ) );
+			}
 		}
 	}
 }

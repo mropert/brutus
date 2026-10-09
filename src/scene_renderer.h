@@ -55,6 +55,12 @@ private:
 						renderer::BufferHandle stats_buffer_address,
 						float lod_pixel_tolerance,
 						bool early ) const;
+	void draw_opaques( const BindlessManager& bindless_manager,
+					   const renderer::PipelineManager& pipelines,
+					   renderer::CommandBuffer& cmd,
+					   renderer::BufferHandle constants_address,
+					   renderer::BufferHandle draw_buffer_address,
+					   bool use_mesh_shader ) const;
 	void draw_opaque_meshlets( const BindlessManager& bindless_manager,
 							   const renderer::PipelineManager& pipelines,
 							   renderer::CommandBuffer& cmd,
@@ -63,9 +69,19 @@ private:
 	void draw_opaque_meshes( const BindlessManager& bindless_manager,
 							 const renderer::PipelineManager& pipelines,
 							 renderer::CommandBuffer& cmd,
-							 const renderer::Buffer* index_buffer,
 							 renderer::BufferHandle constants_address,
 							 renderer::BufferHandle draw_buffer_address ) const;
+
+	void draw_transparent_meshlets( const BindlessManager& bindless_manager,
+									const renderer::PipelineManager& pipelines,
+									renderer::CommandBuffer& cmd,
+									renderer::BufferHandle constants_address,
+									renderer::BufferHandle draw_buffer_address ) const;
+	void draw_transparent_meshes( const BindlessManager& bindless_manager,
+								  const renderer::PipelineManager& pipelines,
+								  renderer::CommandBuffer& cmd,
+								  renderer::BufferHandle constants_address,
+								  renderer::BufferHandle draw_buffer_address ) const;
 
 	struct MeshDraw
 	{
@@ -91,7 +107,11 @@ private:
 	std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT> _draw_commands_buffers;
 	std::array<renderer::raii::Buffer, renderer::MAX_FRAMES_IN_FLIGHT> _draw_statistics_buffers;
 	renderer::PipelineHandle _mesh_pipeline;
+	renderer::PipelineHandle _mesh_alpha_clip_pipeline;
+	renderer::PipelineHandle _mesh_alpha_blend_pipeline;
 	renderer::PipelineHandle _meshlet_pipeline;
+	renderer::PipelineHandle _meshlet_alpha_clip_pipeline;
+	renderer::PipelineHandle _meshlet_alpha_blend_pipeline;
 	renderer::PipelineHandle _compute_draws_early_pipeline;
 	renderer::PipelineHandle _compute_draws_late_pipeline;
 	renderer::PipelineHandle _depth_pyramid_pipeline;
