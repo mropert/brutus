@@ -12,6 +12,7 @@ class SceneRenderer
 {
 public:
 	static constexpr auto DRAW_BUCKETS_COUNT = std::to_underlying( material_type::COUNT );
+	static constexpr float FOV = 70.f;
 
 	struct DrawStatistics
 	{
@@ -37,6 +38,7 @@ public:
 				 glm::vec4 main_light,
 				 float sky_illumination,
 				 float lod_pixel_tolerance,
+				 float shadow_distance,
 				 bool use_pbr,
 				 bool use_occlusion_culling );
 
@@ -52,8 +54,10 @@ private:
 						renderer::CommandBuffer& cmd,
 						renderer::BufferHandle constants_address,
 						renderer::BufferHandle draw_buffer_address,
+						const renderer::Buffer& visibility_buffer,
 						renderer::BufferHandle stats_buffer_address,
-						float lod_pixel_tolerance,
+						const std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT>& draw_commands,
+						float lod_target,
 						bool early ) const;
 	void draw_opaques( const BindlessManager& bindless_manager,
 					   const renderer::PipelineManager& pipelines,
@@ -83,6 +87,15 @@ private:
 								  renderer::BufferHandle constants_address,
 								  renderer::BufferHandle draw_buffer_address ) const;
 
+	void draw_shadowmap( const BindlessManager& bindless_manager,
+						 const renderer::PipelineManager& pipelines,
+						 renderer::CommandBuffer& cmd,
+						 renderer::BufferHandle draw_buffer_address,
+						 renderer::BufferHandle stats_buffer_address,
+						 const Camera& camera,
+						 glm::vec3 main_light,
+						 float shadow_distance );
+
 	struct MeshDraw
 	{
 		glm::vec3 translation;
@@ -101,17 +114,23 @@ private:
 	renderer::BindlessTexture _resolved_color_texture;
 	renderer::BindlessTexture _resolved_depth_texture;
 	renderer::BindlessTexture _depth_pyramid;
+	renderer::BindlessTexture _shadowmap;
 	renderer::raii::Buffer _constant_buffers;
+	renderer::raii::Buffer _shadowmap_constant_buffers;
 	renderer::raii::Buffer _draw_buffers;
 	renderer::raii::Buffer _draw_visibility_buffer;
+	renderer::raii::Buffer _shadowmap_visibility_buffer;
 	std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT> _draw_commands_buffers;
+	std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT> _shadowmap_draw_commands_buffers;
 	std::array<renderer::raii::Buffer, renderer::MAX_FRAMES_IN_FLIGHT> _draw_statistics_buffers;
 	renderer::PipelineHandle _mesh_pipeline;
 	renderer::PipelineHandle _mesh_alpha_clip_pipeline;
 	renderer::PipelineHandle _mesh_alpha_blend_pipeline;
+	renderer::PipelineHandle _shadowmap_mesh_pipeline;
 	renderer::PipelineHandle _meshlet_pipeline;
 	renderer::PipelineHandle _meshlet_alpha_clip_pipeline;
 	renderer::PipelineHandle _meshlet_alpha_blend_pipeline;
+	renderer::PipelineHandle _shadowmap_meshlet_pipeline;
 	renderer::PipelineHandle _compute_draws_early_pipeline;
 	renderer::PipelineHandle _compute_draws_late_pipeline;
 	renderer::PipelineHandle _depth_pyramid_pipeline;
@@ -122,4 +141,5 @@ private:
 	int _frames = 0;
 	bool _needs_rebuild = false;
 	bool _draw_indirect_count;
+	glm::mat4 _shadow_mvp;
 };

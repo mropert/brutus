@@ -112,23 +112,40 @@ void main()
         discard;
     }
 
-    vec3 N;
+    const vec3 L = normalize(-scene_constants.main_light.xyz);
+    vec3 N = normalize(inNormal);
+    const float facing = gl_FrontFacing ? 1.0 : -1.0;
+
+    // Shadow
+    float shadow = 1.0;
+    if ( scene_constants.shadow_map != -1 )
+    {
+        const float NdotL_geo = dot(N * facing, L);
+        if ( NdotL_geo > 0.0 )
+        {
+            const vec4 shadow_pos  = scene_constants.shadow_view_projection_matrix * vec4(inFragPos, 1.0);
+            const vec3 shadow_ndc = shadow_pos.xyz / shadow_pos.w;
+            const vec2 shadow_uv  = vec2(shadow_ndc.x * 0.5 + 0.5, 0.5 - shadow_ndc.y * 0.5);
+            if ( all(greaterThanEqual(shadow_uv, vec2(0))) && all(lessThanEqual(shadow_uv, vec2(1))) && shadow_ndc.z >= 0 && shadow_ndc.z <= 1.0 )
+            {
+                const float shadow_bias = max(0.0005 * (1.0 - dot(N * facing, L)), 0.0005);
+                shadow = texture(sampler2DShadow(textures[scene_constants.shadow_map], samplers[2]), vec3(shadow_uv, shadow_ndc.z - shadow_bias));
+                const vec2  edge = min(shadow_uv, 1.0 - shadow_uv);
+                const float fade = smoothstep(0.0, 0.1, min(edge.x, edge.y));
+                shadow = mix(1.0, shadow, fade);
+            }
+        }
+    }
+
     if ( materials[inMaterial].normal_index != -1 )
     {
         const vec3 normalDisplacement = (texture(sampler2D(textures[materials[inMaterial].normal_index], samplers[0]), inUV).xyz * 2.0) - 1.0;
-        const vec3 normal = normalize(inNormal);
         const vec3 tangent = normalize(inTangent.xyz);
-        const mat3 TBN = mat3(tangent,  cross(normal, tangent * inTangent.w), normalize(inNormal));
+        const mat3 TBN = mat3(tangent,  cross(N, tangent * inTangent.w), normalize(inNormal));
         N = normalize(TBN * normalDisplacement);
     }
-    else
-    {
-        N = normalize(inNormal);
-    }
+    N *= facing;
 
-    N = gl_FrontFacing ? N : -N;
-
-    const vec3 L = normalize(-scene_constants.main_light.xyz);
     const float NdotL = max(dot(N, L), 0.0);
     const float ambient_factor = 0.1;
     vec3 color;
@@ -169,7 +186,7 @@ void main()
 
         // add to outgoing radiance Lo
         const vec3 kD = (1 - F) * (1 - metalness);
-        const vec3 Lo = (kD * albedo.rgb / PI + specular) * radiance * NdotL;
+        const vec3 Lo = (kD * albedo.rgb / PI + specular) * radiance * NdotL * shadow;
 
         // Ambient / fake-IBL: no cubemap yet, so approximate the environment with a
         // hemisphere (sky above, ground below). These colors ARE the environment radiance.
@@ -193,7 +210,7 @@ void main()
     }
     else
     {
-        color = albedo.rgb * (NdotL + scene_constants.sky_to_sun) * scene_constants.main_light.w * 0.5;
+        color = albedo.rgb * (NdotL * shadow + scene_constants.sky_to_sun) * scene_constants.main_light.w * 0.5;
     }
 
     outFragColor = vec4(color, albedo.a);

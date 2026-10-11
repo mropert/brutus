@@ -103,7 +103,11 @@ void main()
 
     if ( visible && ( !LATE || !was_visible ) )
     {
-        const float dist = max(distance(scene_constants.camera_position, mesh_center) - mesh_radius, 0.0);
+        float dist = 1;
+        if ( scene_constants.projection_matrix[3][3] == 0.f )
+        {
+            dist = max(distance(scene_constants.camera_position, mesh_center) - mesh_radius, 0.0);
+        }
         const float threshold = dist * lod_target / mesh_scale;
 
         int lod = 0;

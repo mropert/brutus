@@ -86,6 +86,7 @@ struct ui_data
 	int lod_pixel_tolerance = 1;
 	float sun_intensity = 4.5f;
 	float sky_to_sun = 0.06f;
+	float shadow_distance = 25.f;
 	bool paused = false;
 	bool vsync;
 	bool stable_power;
@@ -221,6 +222,7 @@ void draw_ui( ui_data& data,
 		ImGui::SeparatorText( "Settings" );
 		ImGui::SliderFloat( "Sun intensity", &data.sun_intensity, 1.f, 10.f );
 		ImGui::SliderFloat( "Sky intensity", &data.sky_to_sun, 0.01f, 0.3f );
+		ImGui::SliderFloat( "Shadow distance", &data.shadow_distance, 0.f, 100.f );
 		if ( ImGui::Button( data.paused ? "Unpause" : "Pause" ) )
 		{
 			data.paused = !data.paused;
@@ -530,6 +532,7 @@ int main()
 							   main_light,
 							   sky_illumination,
 							   static_cast<float>( ui_state.lod_pixel_tolerance ),
+							   ui_state.shadow_distance,
 							   ui_state.pbr,
 							   occlusion_culling );
 
