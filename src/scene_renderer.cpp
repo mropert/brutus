@@ -441,7 +441,8 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 						_draw_statistics_buffer.get_device_address(),
 						camera,
 						main_light,
-						shadow_distance );
+						shadow_distance,
+						index_buffer == nullptr );
 	}
 
 	{
@@ -802,7 +803,8 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 									renderer::BufferHandle stats_buffer_address,
 									const Camera& camera,
 									glm::vec3 main_light,
-									float shadow_distance )
+									float shadow_distance,
+									bool use_mesh_shader )
 {
 	const auto frame_index = _frames % renderer::MAX_FRAMES_IN_FLIGHT;
 	const auto shadowmap_resolution = _shadowmap.texture.get_extent().width;
@@ -842,20 +844,41 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 	cmd.set_scissor( _shadowmap.texture.get_extent() );
 	cmd.set_depth_test( true );
 	cmd.set_depth_write( true );
-	cmd.bind_pipeline( pipelines.get( _shadowmap_meshlet_pipeline ), bindless_manager );
+	const auto& pipeline = pipelines.get( use_mesh_shader ? _shadowmap_meshlet_pipeline : _shadowmap_mesh_pipeline );
+	cmd.bind_pipeline( pipeline, bindless_manager );
 	draw_meshes_constants draw_constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
 	for ( int i = 0; i < 2; ++i )
 	{
 		const auto bucket = std::to_underlying( material_type::OPAQUE_SINGLE );
+		const auto& commands = _shadowmap_draw_commands_buffers[ bucket + i ];
 		cmd.set_cull_mode( i == 0 ? renderer::Pipeline::CullMode::BACK : renderer::Pipeline::CullMode::NONE );
-		draw_constants.commands_buffer = _shadowmap_draw_commands_buffers[ bucket + i ].get_device_address() + sizeof( uint32_t );
-		cmd.push_constants( pipelines.get( _shadowmap_meshlet_pipeline ), draw_constants );
-		cmd.draw_mesh_tasks_indirect( _shadowmap_draw_commands_buffers[ bucket + i ],
-									  sizeof( uint32_t ) + offsetof( gpu_draw_command, mesh_cmd ),
-									  _shadowmap_draw_commands_buffers[ bucket + i ],
-									  0,
-									  static_cast<uint32_t>( _scene.size() ),
-									  sizeof( gpu_draw_command ) );
+		draw_constants.commands_buffer = commands.get_device_address() + sizeof( uint32_t );
+		cmd.push_constants( pipeline, draw_constants );
+		if ( use_mesh_shader )
+		{
+			cmd.draw_mesh_tasks_indirect( commands,
+										  sizeof( uint32_t ) + offsetof( gpu_draw_command, mesh_cmd ),
+										  commands,
+										  0,
+										  static_cast<uint32_t>( _scene.size() ),
+										  sizeof( gpu_draw_command ) );
+		}
+		else if ( _draw_indirect_count )
+		{
+			cmd.draw_indexed_indirect( commands,
+									   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+									   commands,
+									   0,
+									   static_cast<uint32_t>( _scene.size() ),
+									   sizeof( gpu_draw_command ) );
+		}
+		else
+		{
+			cmd.draw_indexed_indirect( commands,
+									   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+									   static_cast<uint32_t>( _scene.size() ),
+									   sizeof( gpu_draw_command ) );
+		}
 	}
 	cmd.end_rendering();
 	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::DEPTH_ATTACHMENT, renderer::ResourceState::FRAGMENT_SHADER_READ );

@@ -94,7 +94,8 @@ private:
 						 renderer::BufferHandle stats_buffer_address,
 						 const Camera& camera,
 						 glm::vec3 main_light,
-						 float shadow_distance );
+						 float shadow_distance,
+						 bool use_mesh_shader );
 
 	struct MeshDraw
 	{
