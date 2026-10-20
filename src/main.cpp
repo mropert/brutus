@@ -285,7 +285,7 @@ void draw_scene( const asset& scene, SceneRenderer& scene_renderer )
 
 //#define BISTRO
 
-int main()
+int main( int argc, char** argv )
 {
 	constexpr bool profile_startup = true;
 
@@ -299,14 +299,17 @@ int main()
 	tbb_observer observer { };
 	observer.observe();
 
-	gpu_stable_power::Context stable_power;
+	using namespace std::literals;
+	const bool is_benchmark = argc == 2 && argv[ 1 ] == "benchmark"sv;
+
+	gpu_stable_power::Context stable_power( is_benchmark );
 
 	PROFILER_SCOPE_PUSH( create_device, "create_device" );
 	renderer::Device device( "Brutus-NG [Vulkan]" );
 	const auto props = device.get_properties();
 	PROFILER_SCOPE_POP( create_device );
 
-	bool vsync = true;
+	bool vsync = !is_benchmark;
 #ifdef __APPLE__
 	constexpr auto swapchain_format = renderer::Texture::Format::B8G8R8A8_SRGB;
 #else
@@ -403,6 +406,17 @@ int main()
 					   .stable_power = stable_power.is_enabled(),
 					   .mesh_shading = props.mesh_shader_support,
 					   .occlusion_culling = props.minmax_filter_support };
+
+	if ( is_benchmark )
+	{
+		time_of_day = 4.f;
+		ui_state.x_miku = 100;
+		ui_state.z_miku = 100;
+		ui_state.paused = true;
+		camera.position = { -7.5234f, 2.5384f, 4.8755f };
+		camera.pitch = -0.2960f;
+		camera.yaw = 0.7039f;
+	}
 
 	while ( !quit )
 	{
