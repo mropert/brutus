@@ -552,6 +552,7 @@ int main( int argc, char** argv )
 
 		{
 			PROFILER_GPU_EVENT( "Draw UI" );
+			const auto label = command_buffer->debug_label( "UI" );
 			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_UI );
 			command_buffer->begin_rendering( { .color_target = { .target = swapchain_image_view } } );
 			ImGui::Render();

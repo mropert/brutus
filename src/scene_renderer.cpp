@@ -433,6 +433,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 
 	if ( shadow_distance > 0.f )
 	{
+		const auto label = cmd.debug_label( "Shadow Map" );
 		draw_shadowmap( bindless_manager,
 						pipelines,
 						cmd,
@@ -455,28 +456,33 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 	}
 	const auto constants_address = _constant_buffers.get_device_address() + ( frame_index * sizeof( scene_constants ) );
 
-	cmd.texture_barrier( _color_texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::COLOR_ATTACHMENT );
-	cmd.texture_barrier( _depth_texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
-	cmd.texture_barrier( _resolved_depth_texture.texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
+	{
+		const auto label = cmd.debug_label( "Opaque Early" );
+		cmd.texture_barrier( _color_texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::COLOR_ATTACHMENT );
+		cmd.texture_barrier( _depth_texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
+		cmd.texture_barrier( _resolved_depth_texture.texture,
+							 renderer::ResourceState::UNDEFINED,
+							 renderer::ResourceState::DEPTH_ATTACHMENT );
 
-	//cmd.write_timestamp( timestamp_queries[ image_index ], early ? Timestamps::COMPUTE_DRAWS_EARLY : Timestamps::COMPUTE_DRAWS_LATE );
-	compute_draws( bindless_manager,
-				   pipelines,
-				   cmd,
-				   constants_address,
-				   draw_buffer_address,
-				   _draw_visibility_buffer,
-				   _draw_statistics_buffers[ frame_index ].get_device_address(),
-				   _draw_commands_buffers,
-				   lod_pixel_tolerance / ( _extent.height / ( 2 * std::tan( FOV * 0.5f ) ) ),
-				   true );
+		//cmd.write_timestamp( timestamp_queries[ image_index ], early ? Timestamps::COMPUTE_DRAWS_EARLY : Timestamps::COMPUTE_DRAWS_LATE );
+		compute_draws( bindless_manager,
+					   pipelines,
+					   cmd,
+					   constants_address,
+					   draw_buffer_address,
+					   _draw_visibility_buffer,
+					   _draw_statistics_buffers[ frame_index ].get_device_address(),
+					   _draw_commands_buffers,
+					   lod_pixel_tolerance / ( _extent.height / ( 2 * std::tan( FOV * 0.5f ) ) ),
+					   true );
 
-	cmd.begin_rendering( { .color_target = { .target = _color_texture_view, .clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } } },
-						   .depth_target = { .target = _depth_texture_view,
-											 .resolve_target = _resolved_depth_texture.handles.view,
-											 .clear_value = { { 0.f } } } } );
-	draw_opaques( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address, index_buffer == nullptr );
-	cmd.end_rendering();
+		cmd.begin_rendering( { .color_target = { .target = _color_texture_view, .clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } } },
+							   .depth_target = { .target = _depth_texture_view,
+												 .resolve_target = _resolved_depth_texture.handles.view,
+												 .clear_value = { { 0.f } } } } );
+		draw_opaques( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address, index_buffer == nullptr );
+		cmd.end_rendering();
+	}
 
 
 	if ( use_occlusion_culling )
@@ -488,6 +494,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		{
 			//cmd.write_timestamp( timestamp_queries[ image_index ], Timestamps::DEPTH_PYRAMID );
 			PROFILER_GPU_EVENT( "Depth Pyramid" );
+			const auto label = cmd.debug_label( "Depth Pyramid" );
 			cmd.bind_pipeline( pipelines.get( _depth_pyramid_pipeline ), bindless_manager );
 			auto extent = _depth_pyramid_extent;
 			for ( size_t mip = 0; mip < _depth_pyramid.mips.size(); ++mip )
@@ -514,6 +521,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 			}
 		}
 
+		const auto label = cmd.debug_label( "Opaque Late" );
 		compute_draws( bindless_manager,
 					   pipelines,
 					   cmd,
@@ -530,16 +538,19 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		cmd.end_rendering();
 	}
 
-	cmd.begin_rendering( { .color_target = { .target = _color_texture_view }, .depth_target = { .target = _depth_texture_view } } );
-	if ( !index_buffer )
 	{
-		draw_transparent_meshlets( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
+		const auto label = cmd.debug_label( "Transparents" );
+		cmd.begin_rendering( { .color_target = { .target = _color_texture_view }, .depth_target = { .target = _depth_texture_view } } );
+		if ( !index_buffer )
+		{
+			draw_transparent_meshlets( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
+		}
+		else
+		{
+			draw_transparent_meshlets( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
+		}
+		cmd.end_rendering();
 	}
-	else
-	{
-		draw_transparent_meshlets( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
-	}
-	cmd.end_rendering();
 
 	cmd.buffer_barrier( _draw_statistics_buffers[ frame_index ],
 						renderer::ResourceState::STORAGE_WRITE,
@@ -547,6 +558,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 
 	{
 		PROFILER_GPU_EVENT( "Draw Grid" );
+		const auto label = cmd.debug_label( "Grid" );
 		cmd.texture_barrier( _resolved_color_texture.texture,
 							 renderer::ResourceState::UNDEFINED,
 							 renderer::ResourceState::COLOR_ATTACHMENT );
@@ -565,6 +577,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 
 	{
 		PROFILER_GPU_EVENT( "Tonemap" );
+		const auto label = cmd.debug_label( "Tonemap" );
 		//cmd.write_timestamp( timestamp_queries[ image_index ], Timestamps::BLIT );
 		cmd.texture_barrier( _resolved_color_texture.texture,
 							 renderer::ResourceState::COLOR_ATTACHMENT,
@@ -594,6 +607,7 @@ void SceneRenderer::compute_draws( const BindlessManager& bindless_manager,
 								   bool early ) const
 {
 	PROFILER_GPU_EVENT( "Compute Draws" );
+	const auto label = cmd.debug_label( "Culling" );
 	compute_draws_constants constants { .draws_buffer = draw_buffer_address,
 										.visibility_buffer = visibility_buffer.get_device_address(),
 										.statistics_buffer = stats_buffer_address,
@@ -633,6 +647,7 @@ void SceneRenderer::draw_opaques( const BindlessManager& bindless_manager,
 								  renderer::BufferHandle draw_buffer_address,
 								  bool use_mesh_shader ) const
 {
+	const auto label = cmd.debug_label( "Draw" );
 	cmd.set_viewport( _extent );
 	cmd.set_scissor( _extent );
 	cmd.set_depth_test( true );
@@ -819,6 +834,7 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
 
 	PROFILER_GPU_EVENT( "Draw Shadows" );
+	const auto label = cmd.debug_label( "Draw" );
 	cmd.begin_rendering( { .depth_target = { .target = _shadowmap.handles.view, .clear_value = { { 1.f } } } } );
 	cmd.set_viewport( _shadowmap.texture.get_extent() );
 	cmd.set_scissor( _shadowmap.texture.get_extent() );
