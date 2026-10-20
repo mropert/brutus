@@ -232,6 +232,10 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 	, _shadowmap_visibility_buffer( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
 															  | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 														  MAX_DRAWS ) )
+	, _draw_statistics_buffer( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_SRC
+														 | renderer::Buffer::Usage::TRANSFER_DST
+														 | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+													 sizeof( DrawStatistics ) ) )
 	, _draw_indirect_count( device.get_properties().draw_indirect_count_support )
 {
 	const std::vector<renderer::ShaderSource::Define> mesh_shaders_defines { { "MESH_LOD_COUNT", std::to_string( MESH_LOD_COUNT ) },
@@ -352,10 +356,9 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 									   sizeof( DrawCommands ) );
 	}
 
-	for ( auto& buffer : _draw_statistics_buffers )
+	for ( auto& buffer : _draw_statistics_readback_buffers )
 	{
-		buffer = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
-										   | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+		buffer = device.create_buffer( renderer::Buffer::Usage::TRANSFER_DST,
 									   sizeof( DrawStatistics ),
 									   renderer::Buffer::CpuUsage::READ_WRITE );
 	}
@@ -392,8 +395,8 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 
 	if ( _frames >= renderer::MAX_FRAMES_IN_FLIGHT )
 	{
-		_draw_statistics_buffers[ frame_index ].flush();
-		memcpy( &_statistics, _draw_statistics_buffers[ frame_index ].get_mapped_address(), sizeof( DrawStatistics ) );
+		_draw_statistics_readback_buffers[ frame_index ].flush();
+		memcpy( &_statistics, _draw_statistics_readback_buffers[ frame_index ].get_mapped_address(), sizeof( DrawStatistics ) );
 	}
 
 	if ( index_buffer )
@@ -419,13 +422,10 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		_needs_rebuild = true;
 	}
 
-	cmd.buffer_barrier( _draw_statistics_buffers[ frame_index ],
-						renderer::ResourceState::UNDEFINED,
-						renderer::ResourceState::TRANSFER_DST );
-	cmd.fill_buffer( _draw_statistics_buffers[ frame_index ], 0, sizeof( DrawStatistics ), 0 );
-	cmd.buffer_barrier( _draw_statistics_buffers[ frame_index ],
-						renderer::ResourceState::TRANSFER_DST,
-						renderer::ResourceState::STORAGE_WRITE );
+	// Previous frame copied it to its readback buffer
+	cmd.buffer_barrier( _draw_statistics_buffer, renderer::ResourceState::TRANSFER_SRC, renderer::ResourceState::TRANSFER_DST );
+	cmd.fill_buffer( _draw_statistics_buffer, 0, sizeof( DrawStatistics ), 0 );
+	cmd.buffer_barrier( _draw_statistics_buffer, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ_WRITE );
 
 	using Draws = std::array<MeshDraw, MAX_DRAWS>;
 	memcpy( static_cast<Draws*>( _draw_buffers.get_mapped_address() ) + frame_index, _scene.data(), sizeof( MeshDraw ) * _scene.size() );
@@ -438,7 +438,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 						pipelines,
 						cmd,
 						draw_buffer_address,
-						_draw_statistics_buffers[ frame_index ].get_device_address(),
+						_draw_statistics_buffer.get_device_address(),
 						camera,
 						main_light,
 						shadow_distance );
@@ -471,7 +471,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 					   constants_address,
 					   draw_buffer_address,
 					   _draw_visibility_buffer,
-					   _draw_statistics_buffers[ frame_index ].get_device_address(),
+					   _draw_statistics_buffer.get_device_address(),
 					   _draw_commands_buffers,
 					   lod_pixel_tolerance / ( _extent.height / ( 2 * std::tan( FOV * 0.5f ) ) ),
 					   true );
@@ -528,7 +528,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 					   constants_address,
 					   draw_buffer_address,
 					   _draw_visibility_buffer,
-					   _draw_statistics_buffers[ frame_index ].get_device_address(),
+					   _draw_statistics_buffer.get_device_address(),
 					   _draw_commands_buffers,
 					   lod_pixel_tolerance / ( _extent.height / ( 2 * std::tan( FOV * 0.5f ) ) ),
 					   false );
@@ -552,8 +552,10 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		cmd.end_rendering();
 	}
 
-	cmd.buffer_barrier( _draw_statistics_buffers[ frame_index ],
-						renderer::ResourceState::STORAGE_WRITE,
+	cmd.buffer_barrier( _draw_statistics_buffer, renderer::ResourceState::STORAGE_READ_WRITE, renderer::ResourceState::TRANSFER_SRC );
+	cmd.copy_buffer( _draw_statistics_buffer, 0, sizeof( DrawStatistics ), _draw_statistics_readback_buffers[ frame_index ] );
+	cmd.buffer_barrier( _draw_statistics_readback_buffers[ frame_index ],
+						renderer::ResourceState::TRANSFER_DST,
 						renderer::ResourceState::HOST_READ );
 
 	{

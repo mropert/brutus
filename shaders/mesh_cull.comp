@@ -17,11 +17,15 @@ layout(std430, set = 1, binding = 1) readonly buffer ssbo2 { Material materials[
 layout(buffer_reference, std430) writeonly buffer DrawCommandsBuffer { MeshDrawCommand commands[]; };
 layout(buffer_reference, std430) buffer DrawCommandsCountBuffer { uint commands_count; };
 layout(buffer_reference, std430) buffer VisibilityBuffer { uint8_t draws[]; };
-layout(buffer_reference, std430) writeonly buffer DrawStatisticsBuffer
+layout(buffer_reference, std430) buffer DrawStatisticsBuffer
 {
     uint meshes[MESH_LOD_COUNT];
     uint indices[MESH_LOD_COUNT];
 };
+
+// Statistics are accumulated per workgroup then flushed once, to limit global atomics
+shared uint group_meshes[MESH_LOD_COUNT];
+shared uint group_indices[MESH_LOD_COUNT];
 
 layout( push_constant ) uniform block
 {
@@ -59,12 +63,8 @@ bool projectSphere(vec3 c, float r, float znear, float P00, float P11, out vec4 
 	return true;
 }
 
-void main()
+void cull_draw(uint draw_id)
 {
-    const uint draw_id = gl_GlobalInvocationID.x;
-    if ( draw_id >= draws_count )
-        return;
-
     const bool was_visible = uint(visibility_buffer.draws[draw_id]) == 1;
     if (!LATE && !was_visible)
 		return;
@@ -131,12 +131,35 @@ void main()
         commands_buffers[bucket].commands[command_id].group_count_y = 1;
         commands_buffers[bucket].commands[command_id].group_count_z = 1;
 
-        atomicAdd( statistics_buffer.meshes[lod], 1 );
-        atomicAdd( statistics_buffer.indices[lod], index_count );
+        atomicAdd( group_meshes[lod], 1 );
+        atomicAdd( group_indices[lod], index_count );
     }
 
     if ( LATE )
     {
         visibility_buffer.draws[draw_id] = uint8_t( visible ? 1 : 0 );
+    }
+}
+
+void main()
+{
+    if ( gl_LocalInvocationIndex < MESH_LOD_COUNT )
+    {
+        group_meshes[gl_LocalInvocationIndex] = 0;
+        group_indices[gl_LocalInvocationIndex] = 0;
+    }
+    barrier();
+
+    const uint draw_id = gl_GlobalInvocationID.x;
+    if ( draw_id < draws_count )
+    {
+        cull_draw( draw_id );
+    }
+    barrier();
+
+    if ( gl_LocalInvocationIndex < MESH_LOD_COUNT && group_meshes[gl_LocalInvocationIndex] != 0 )
+    {
+        atomicAdd( statistics_buffer.meshes[gl_LocalInvocationIndex], group_meshes[gl_LocalInvocationIndex] );
+        atomicAdd( statistics_buffer.indices[gl_LocalInvocationIndex], group_indices[gl_LocalInvocationIndex] );
     }
 }

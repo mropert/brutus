@@ -122,7 +122,8 @@ private:
 	renderer::raii::Buffer _shadowmap_visibility_buffer;
 	std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT> _draw_commands_buffers;
 	std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT> _shadowmap_draw_commands_buffers;
-	std::array<renderer::raii::Buffer, renderer::MAX_FRAMES_IN_FLIGHT> _draw_statistics_buffers;
+	renderer::raii::Buffer _draw_statistics_buffer; // GPU only, accumulated by culling
+	std::array<renderer::raii::Buffer, renderer::MAX_FRAMES_IN_FLIGHT> _draw_statistics_readback_buffers;
 	renderer::PipelineHandle _mesh_pipeline;
 	renderer::PipelineHandle _mesh_alpha_clip_pipeline;
 	renderer::PipelineHandle _mesh_alpha_blend_pipeline;
