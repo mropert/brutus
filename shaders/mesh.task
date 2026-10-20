@@ -27,9 +27,20 @@ shared uint meshlets_count;
 
 taskPayloadSharedEXT MeshletTaskPayload payload;
 
+// Meshlet backface cone culling, using meshoptimizer's cone axis/cutoff.
+// Convention: projection_matrix[3][3] is 0 for perspective and 1 for orthographic projections (same check as mesh_cull.comp).
+// - Perspective: the view direction depends on where the meshlet is relative to the camera position.
+// - Orthographic (eg: directional light shadow maps): all view rays are parallel to the camera forward axis,
+//   so the test only depends on that direction (the meshlet bounding sphere doesn't matter).
+//   Note that camera_position is the main camera in shadow passes, it must not be used there.
 bool coneCull(vec3 center, float radius, vec3 cone_axis, float cone_cutoff, vec3 camera_position)
 {
 	return dot(center - camera_position, cone_axis) >= cone_cutoff * length(center - camera_position) + radius;
+}
+
+bool coneCullOrthographic(vec3 cone_axis, float cone_cutoff, vec3 view_direction)
+{
+	return dot(view_direction, cone_axis) >= cone_cutoff;
 }
 
 void main()
@@ -61,7 +72,18 @@ void main()
     const uint type = materials[draws_buffer.mesh_draws[draw_id].material].type;
     if (type == 0 || type == 2)
     {
-        visible = visible && !coneCull( meshlet_center, meshlet_radius, cone_axis, meshlet.cone.w, scene_constants.camera_position );
+        // Uniform across the whole draw, so the branch doesn't diverge
+        const bool orthographic = scene_constants.projection_matrix[3][3] != 0.0;
+        if (orthographic)
+        {
+            // View space looks down -Z
+            const vec3 view_direction = -scene_constants.inverse_view_matrix[2].xyz;
+            visible = visible && !coneCullOrthographic( cone_axis, meshlet.cone.w, view_direction );
+        }
+        else
+        {
+            visible = visible && !coneCull( meshlet_center, meshlet_radius, cone_axis, meshlet.cone.w, scene_constants.camera_position );
+        }
     }
     for ( int i = 0; i < 6; ++i )
     {
