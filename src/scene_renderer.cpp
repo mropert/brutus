@@ -24,6 +24,12 @@ namespace
 		return r;
 	}
 
+	// Material draw buckets come in pairs: single sided first, then double sided
+	renderer::Pipeline::CullMode bucket_cull_mode( int index_in_pair )
+	{
+		return index_in_pair == 0 ? renderer::Pipeline::CullMode::BACK : renderer::Pipeline::CullMode::NONE;
+	}
+
 	// Not used on CPU side, only there for buffer sizing
 	struct gpu_draw_command
 	{
@@ -575,9 +581,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		cmd.begin_rendering( { .color_target = { .target = _color_texture_view, .resolve_target = _resolved_color_texture.handles.view },
 							   .depth_target = { .target = _depth_texture_view } } );
 
-		cmd.set_viewport( _extent );
-		cmd.set_scissor( _extent );
-		cmd.set_depth_write( true );
+		cmd.set_dynamic_state( { .viewport = _extent } );
 		//cmd.write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_GRID );
 		cmd.bind_pipeline( pipelines.get( _grid_pipeline ), bindless_manager );
 		cmd.push_constants( pipelines.get( _grid_pipeline ), grid_constants { .scene_constants = constants_address } );
@@ -594,8 +598,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 							 renderer::ResourceState::FRAGMENT_SHADER_READ );
 		cmd.texture_barrier( output_texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::COLOR_ATTACHMENT );
 		cmd.begin_rendering( { .color_target = { .target = output_texture_view } } );
-		cmd.set_viewport( output_texture.get_extent() );
-		cmd.set_scissor( output_texture.get_extent() );
+		cmd.set_dynamic_state( { .viewport = output_texture.get_extent(), .depth_test = false, .depth_write = false } );
 		cmd.bind_pipeline( pipelines.get( _tonemap_pipeline ), bindless_manager );
 		cmd.push_constants( pipelines.get( _tonemap_pipeline ), _resolved_color_texture.handles.sampled_texture );
 		cmd.draw( 3 );
@@ -658,10 +661,6 @@ void SceneRenderer::draw_opaques( const BindlessManager& bindless_manager,
 								  bool use_mesh_shader ) const
 {
 	const auto label = cmd.debug_label( "Draw" );
-	cmd.set_viewport( _extent );
-	cmd.set_scissor( _extent );
-	cmd.set_depth_test( true );
-	cmd.set_depth_write( true );
 
 	//cmd.write_timestamp( timestamp_queries[ image_index ], early ? Timestamps::DRAW_MESHES_EARLY : Timestamps::DRAW_MESHES_LATE );
 	if ( use_mesh_shader )
@@ -681,13 +680,12 @@ void SceneRenderer::draw_opaque_meshlets( const BindlessManager& bindless_manage
 										  renderer::BufferHandle draw_buffer_address ) const
 {
 	PROFILER_GPU_EVENT( "Draw Meshlets" );
-	cmd.set_depth_write( true );
 	cmd.bind_pipeline( pipelines.get( _meshlet_pipeline ), bindless_manager );
 	draw_meshes_constants constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
 	for ( int i = 0; i < 2; ++i )
 	{
 		const auto bucket = std::to_underlying( material_type::OPAQUE_SINGLE );
-		cmd.set_cull_mode( i == 0 ? renderer::Pipeline::CullMode::BACK : renderer::Pipeline::CullMode::NONE );
+		cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ) } );
 		constants.commands_buffer = _draw_commands_buffers[ bucket + i ].get_device_address() + sizeof( uint32_t );
 		cmd.push_constants( pipelines.get( _meshlet_pipeline ), constants );
 		cmd.draw_mesh_tasks_indirect( _draw_commands_buffers[ bucket + i ],
@@ -706,13 +704,12 @@ void SceneRenderer::draw_opaque_meshes( const BindlessManager& bindless_manager,
 										renderer::BufferHandle draw_buffer_address ) const
 {
 	PROFILER_GPU_EVENT( "Draw Meshes" );
-	cmd.set_depth_write( true );
 	cmd.bind_pipeline( pipelines.get( _mesh_pipeline ), bindless_manager );
 	draw_meshes_constants constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
 	for ( int i = 0; i < 2; ++i )
 	{
 		const auto bucket = std::to_underlying( material_type::OPAQUE_SINGLE );
-		cmd.set_cull_mode( i == 0 ? renderer::Pipeline::CullMode::BACK : renderer::Pipeline::CullMode::NONE );
+		cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ) } );
 		constants.commands_buffer = _draw_commands_buffers[ bucket + i ].get_device_address() + sizeof( uint32_t );
 		cmd.push_constants( pipelines.get( _mesh_pipeline ), constants );
 		if ( _draw_indirect_count )
@@ -746,11 +743,10 @@ void SceneRenderer::draw_transparent_meshlets( const BindlessManager& bindless_m
 	{
 		const auto pipeline = pipelines.get( pass == 0 ? _meshlet_alpha_clip_pipeline : _meshlet_alpha_blend_pipeline );
 		cmd.bind_pipeline( pipeline, bindless_manager );
-		cmd.set_depth_write( pass == 0 );
 		for ( int i = 0; i < 2; ++i )
 		{
 			const auto bucket = std::to_underlying( material_type::ALPHA_SINGLE );
-			cmd.set_cull_mode( i == 0 ? renderer::Pipeline::CullMode::BACK : renderer::Pipeline::CullMode::NONE );
+			cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ), .depth_write = pass == 0 } );
 			constants.commands_buffer = _draw_commands_buffers[ bucket + i ].get_device_address() + sizeof( uint32_t );
 			cmd.push_constants( pipeline, constants );
 			cmd.draw_mesh_tasks_indirect( _draw_commands_buffers[ bucket + i ],
@@ -775,12 +771,11 @@ void SceneRenderer::draw_transparent_meshes( const BindlessManager& bindless_man
 	{
 		const auto pipeline = pipelines.get( pass == 0 ? _mesh_alpha_clip_pipeline : _mesh_alpha_blend_pipeline );
 		cmd.bind_pipeline( pipeline, bindless_manager );
-		cmd.set_depth_write( pass == 0 );
 
 		for ( int i = 0; i < 2; ++i )
 		{
 			const auto bucket = std::to_underlying( material_type::ALPHA_SINGLE );
-			cmd.set_cull_mode( i == 0 ? renderer::Pipeline::CullMode::BACK : renderer::Pipeline::CullMode::NONE );
+			cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ), .depth_write = pass == 0 } );
 			constants.commands_buffer = _draw_commands_buffers[ bucket + i ].get_device_address() + sizeof( uint32_t );
 			cmd.push_constants( pipeline, constants );
 			if ( _draw_indirect_count )
@@ -847,10 +842,6 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 	PROFILER_GPU_EVENT( "Draw Shadows" );
 	const auto label = cmd.debug_label( "Draw" );
 	cmd.begin_rendering( { .depth_target = { .target = _shadowmap.handles.view, .clear_value = { { 1.f } } } } );
-	cmd.set_viewport( _shadowmap.texture.get_extent() );
-	cmd.set_scissor( _shadowmap.texture.get_extent() );
-	cmd.set_depth_test( true );
-	cmd.set_depth_write( true );
 	const auto& pipeline = pipelines.get( use_mesh_shader ? _shadowmap_meshlet_pipeline : _shadowmap_mesh_pipeline );
 	cmd.bind_pipeline( pipeline, bindless_manager );
 	draw_meshes_constants draw_constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
@@ -858,7 +849,7 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 	{
 		const auto bucket = std::to_underlying( material_type::OPAQUE_SINGLE );
 		const auto& commands = _shadowmap_draw_commands_buffers[ bucket + i ];
-		cmd.set_cull_mode( i == 0 ? renderer::Pipeline::CullMode::BACK : renderer::Pipeline::CullMode::NONE );
+		cmd.set_dynamic_state( { .viewport = _shadowmap.texture.get_extent(), .cull_mode = bucket_cull_mode( i ) } );
 		draw_constants.commands_buffer = commands.get_device_address() + sizeof( uint32_t );
 		cmd.push_constants( pipeline, draw_constants );
 		if ( use_mesh_shader )
