@@ -3,6 +3,7 @@
 #include <SDL3/SDL.h>
 #include <array>
 #include <chrono>
+#include <format>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/type_aligned.hpp>
@@ -149,7 +150,8 @@ void draw_ui( ui_data& data,
 			  std::span<const asset> assets,
 			  std::span<const float> gpu_timings,
 			  const renderer::Statistics& stats,
-			  const SceneRenderer::DrawStatistics& scene_stats )
+			  const SceneRenderer::DrawStatistics& scene_stats,
+			  const Camera& camera )
 {
 	PROFILER_SCOPE();
 	ImGui::Begin( "Vulkan renderer" );
@@ -219,6 +221,22 @@ void draw_ui( ui_data& data,
 				}
 			}
 			ImGui::EndTable();
+		}
+
+		ImGui::SeparatorText( "Camera" );
+		ImGui::Text( "Position: %.4f, %.4f, %.4f", camera.position.x, camera.position.y, camera.position.z );
+		ImGui::Text( "Pitch: %.4f, yaw: %.4f", camera.pitch, camera.yaw );
+		// Same form as the benchmark camera setup, to reproduce a view
+		if ( ImGui::Button( "Copy camera" ) )
+		{
+			const auto setup = std::format(
+				"camera.position = {{ {:.4f}f, {:.4f}f, {:.4f}f }};\ncamera.pitch = {:.4f}f;\ncamera.yaw = {:.4f}f;",
+				camera.position.x,
+				camera.position.y,
+				camera.position.z,
+				camera.pitch,
+				camera.yaw );
+			ImGui::SetClipboardText( setup.c_str() );
 		}
 
 		ImGui::SeparatorText( "Settings" );
@@ -528,7 +546,7 @@ int main( int argc, char** argv )
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
-		draw_ui( ui_state, props, bindless_manager, indices, assets, gpu_timings.averages, stats, scene_renderer.get_statistics() );
+		draw_ui( ui_state, props, bindless_manager, indices, assets, gpu_timings.averages, stats, scene_renderer.get_statistics(), camera );
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
