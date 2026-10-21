@@ -207,5 +207,5 @@ void main()
 		color = albedo.rgb * ( NdotL * shadow + scene_constants.sky_to_sun ) * scene_constants.main_light.w * 0.5;
 	}
 
-	outFragColor = vec4( color, albedo.a );
+	outFragColor = vec4( color * get_shadow_cascade_tint( scene_constants, inFragPos ), albedo.a );
 }

@@ -100,5 +100,6 @@ void main()
 	const float ambient = PushConstants.scene_constants.sky_to_sun;
 	const float lighting = ( NdotL * shadow + ambient ) / ( NdotL + ambient );
 
-	outFragColor = vec4( mix( PushConstants.grid_color, color, alpha ) * lighting, 1 );
+	const vec3 tint = get_shadow_cascade_tint( PushConstants.scene_constants, inWorldPos );
+	outFragColor = vec4( mix( PushConstants.grid_color, color, alpha ) * lighting * tint, 1 );
 }

@@ -18,4 +18,5 @@ layout( buffer_reference, std430 ) readonly buffer SceneConstants
 	vec2 viewport_size; // In pixels
 	float shadow_distance; // View depth up to which the main light casts shadows
 	uint shadow_cascade_count;
+	uint show_shadow_cascades;
 };

@@ -103,6 +103,7 @@ namespace
 		glm::aligned_vec2 viewport_size; // In pixels
 		float shadow_distance = 0.f; // View depth up to which the main light casts shadows
 		uint32_t shadow_cascade_count = 0;
+		uint32_t show_shadow_cascades = 0;
 	};
 	static_assert( SceneRenderer::SHADOW_CASCADE_MAX == 4, "shadow_cascade_splits holds one split per vec4 component" );
 
@@ -304,6 +305,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 	_shadowmap_mesh_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .depth_format = SHADOW_DEPTH_FORMAT,
 								   .depth_compare_op = renderer::CompareOp::LESS,
+								   .depth_clamp = true,
 								   .push_constants_size = sizeof( draw_meshes_constants ) },
 		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines } } );
 
@@ -341,6 +343,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		_shadowmap_meshlet_pipeline = pipelines.add(
 			renderer::Pipeline::Desc { .depth_format = SHADOW_DEPTH_FORMAT,
 									   .depth_compare_op = renderer::CompareOp::LESS,
+									   .depth_clamp = true,
 									   .push_constants_size = sizeof( draw_meshes_constants ) },
 			{ { .path = "mesh.task", .stage = renderer::ShaderStage::TASK, .defines = mesh_shaders_defines },
 			  { .path = "mesh.mesh", .stage = renderer::ShaderStage::MESH, .defines = mesh_shaders_defines } } );
@@ -428,6 +431,8 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 							float sky_illumination,
 							float lod_pixel_tolerance,
 							float shadow_distance,
+							uint32_t shadow_cascade_count,
+							bool show_shadow_cascades,
 							bool use_pbr,
 							bool use_occlusion_culling )
 {
@@ -471,27 +476,30 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 	memcpy( static_cast<Draws*>( _draw_buffers.get_mapped_address() ) + frame_index, _scene.data(), sizeof( MeshDraw ) * _scene.size() );
 	const auto draw_buffer_address = _draw_buffers.get_device_address() + ( frame_index * sizeof( Draws ) );
 
-	if ( shadow_distance > 0.f )
+	ShadowCascades shadow_cascades;
+	if ( shadow_cascade_count > 0 )
 	{
 		const auto label = cmd.debug_label( "Shadow Map" );
-		draw_shadowmap( bindless_manager,
-						pipelines,
-						cmd,
-						draw_buffer_address,
-						_draw_statistics_buffer.get_device_address(),
-						camera,
-						main_light,
-						shadow_distance,
-						index_buffer == nullptr );
+		shadow_cascades = draw_shadowmap( bindless_manager,
+										  pipelines,
+										  cmd,
+										  draw_buffer_address,
+										  _draw_statistics_buffer.get_device_address(),
+										  camera,
+										  main_light,
+										  shadow_distance,
+										  std::min( shadow_cascade_count, SHADOW_CASCADE_MAX ),
+										  index_buffer == nullptr );
 	}
 
 	{
 		auto constants = build_scene_constants( camera, _extent, main_light, sky_illumination );
-		if ( shadow_distance > 0.f )
+		if ( shadow_cascades.count > 0 )
 		{
-			constants.shadow_view_projection_matrices = _shadow_view_projections;
-			constants.shadow_cascade_splits = _shadow_cascade_splits;
-			constants.shadow_cascade_count = _shadow_cascade_count;
+			constants.shadow_view_projection_matrices = shadow_cascades.view_projections;
+			constants.shadow_cascade_splits = shadow_cascades.splits;
+			constants.shadow_cascade_count = shadow_cascades.count;
+			constants.show_shadow_cascades = show_shadow_cascades ? 1 : 0;
 			constants.shadow_map = _shadowmap.handles.sampled_texture;
 			constants.shadow_distance = shadow_distance;
 		}
@@ -829,20 +837,22 @@ void SceneRenderer::draw_transparent_meshes( const BindlessManager& bindless_man
 	}
 }
 
-void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
-									const renderer::PipelineManager& pipelines,
-									renderer::CommandBuffer& cmd,
-									renderer::BufferHandle draw_buffer_address,
-									renderer::BufferHandle stats_buffer_address,
-									const Camera& camera,
-									glm::vec3 main_light,
-									float shadow_distance,
-									bool use_mesh_shader )
+SceneRenderer::ShadowCascades SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
+															 const renderer::PipelineManager& pipelines,
+															 renderer::CommandBuffer& cmd,
+															 renderer::BufferHandle draw_buffer_address,
+															 renderer::BufferHandle stats_buffer_address,
+															 const Camera& camera,
+															 glm::vec3 main_light,
+															 float shadow_distance,
+															 uint32_t cascade_count,
+															 bool use_mesh_shader )
 {
 	const auto frame_index = _frames % renderer::MAX_FRAMES_IN_FLIGHT;
 	const auto shadowmap_resolution = _shadowmap.texture.get_extent().width;
 	constexpr float shadow_near_depth = 0.1f;
-	_shadow_cascade_splits = compute_shadow_cascade_splits( _shadow_cascade_count, shadow_near_depth, shadow_distance );
+	ShadowCascades cascades { .splits = compute_shadow_cascade_splits( cascade_count, shadow_near_depth, shadow_distance ),
+							  .count = cascade_count };
 
 	if ( _frames == 0 )
 	{
@@ -854,17 +864,17 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 	const auto& pipeline = pipelines.get( use_mesh_shader ? _shadowmap_meshlet_pipeline : _shadowmap_mesh_pipeline );
 
 	static constexpr std::array<const char*, SHADOW_CASCADE_MAX> cascade_labels { "Cascade 0", "Cascade 1", "Cascade 2", "Cascade 3" };
-	for ( size_t cascade = 0; cascade < _shadow_cascade_count; ++cascade )
+	for ( size_t cascade = 0; cascade < cascade_count; ++cascade )
 	{
 		const auto cascade_label = cmd.debug_label( cascade_labels[ cascade ] );
-		const float near_depth = cascade == 0 ? shadow_near_depth : _shadow_cascade_splits[ static_cast<glm::length_t>( cascade - 1 ) ];
+		const float near_depth = cascade == 0 ? shadow_near_depth : cascades.splits[ static_cast<glm::length_t>( cascade - 1 ) ];
 		const auto constants = build_scene_shadow_constants( camera,
 															 shadowmap_resolution,
 															 main_light,
 															 near_depth,
-															 _shadow_cascade_splits[ static_cast<glm::length_t>( cascade ) ],
+															 cascades.splits[ static_cast<glm::length_t>( cascade ) ],
 															 _extent );
-		_shadow_view_projections[ cascade ] = constants.view_projection_matrix;
+		cascades.view_projections[ cascade ] = constants.view_projection_matrix;
 		const auto constants_index = frame_index * SHADOW_CASCADE_MAX + cascade;
 		memcpy( static_cast<scene_constants*>( _shadowmap_constant_buffers.get_mapped_address() ) + constants_index,
 				&constants,
@@ -926,4 +936,5 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 		cmd.end_rendering();
 	}
 	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::DEPTH_ATTACHMENT, renderer::ResourceState::FRAGMENT_SHADER_READ );
+	return cascades;
 }

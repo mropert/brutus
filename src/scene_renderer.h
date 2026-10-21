@@ -40,6 +40,8 @@ public:
 				 float sky_illumination,
 				 float lod_pixel_tolerance,
 				 float shadow_distance,
+				 uint32_t shadow_cascade_count,
+				 bool show_shadow_cascades,
 				 bool use_pbr,
 				 bool use_occlusion_culling );
 
@@ -89,15 +91,23 @@ private:
 								  renderer::BufferHandle constants_address,
 								  renderer::BufferHandle draw_buffer_address ) const;
 
-	void draw_shadowmap( const BindlessManager& bindless_manager,
-						 const renderer::PipelineManager& pipelines,
-						 renderer::CommandBuffer& cmd,
-						 renderer::BufferHandle draw_buffer_address,
-						 renderer::BufferHandle stats_buffer_address,
-						 const Camera& camera,
-						 glm::vec3 main_light,
-						 float shadow_distance,
-						 bool use_mesh_shader );
+	struct ShadowCascades
+	{
+		std::array<glm::mat4, SHADOW_CASCADE_MAX> view_projections;
+		glm::vec4 splits; // Far view depth of each cascade
+		uint32_t count = 0;
+	};
+
+	ShadowCascades draw_shadowmap( const BindlessManager& bindless_manager,
+								   const renderer::PipelineManager& pipelines,
+								   renderer::CommandBuffer& cmd,
+								   renderer::BufferHandle draw_buffer_address,
+								   renderer::BufferHandle stats_buffer_address,
+								   const Camera& camera,
+								   glm::vec3 main_light,
+								   float shadow_distance,
+								   uint32_t cascade_count,
+								   bool use_mesh_shader );
 
 	struct MeshDraw
 	{
@@ -146,7 +156,4 @@ private:
 	int _frames = 0;
 	bool _needs_rebuild = false;
 	bool _draw_indirect_count;
-	uint32_t _shadow_cascade_count = 1;
-	std::array<glm::mat4, SHADOW_CASCADE_MAX> _shadow_view_projections;
-	glm::vec4 _shadow_cascade_splits; // Far view depth of each cascade
 };

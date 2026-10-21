@@ -87,6 +87,8 @@ struct ui_data
 	float sun_intensity = 4.5f;
 	float sky_to_sun = 0.06f;
 	float shadow_distance = 25.f;
+	int shadow_cascades = SceneRenderer::SHADOW_CASCADE_MAX;
+	bool show_shadow_cascades = false;
 	bool paused = false;
 	bool vsync;
 	bool stable_power;
@@ -222,7 +224,9 @@ void draw_ui( ui_data& data,
 		ImGui::SeparatorText( "Settings" );
 		ImGui::SliderFloat( "Sun intensity", &data.sun_intensity, 1.f, 10.f );
 		ImGui::SliderFloat( "Sky intensity", &data.sky_to_sun, 0.01f, 0.3f );
-		ImGui::SliderFloat( "Shadow distance", &data.shadow_distance, 0.f, 100.f );
+		ImGui::SliderFloat( "Shadow distance", &data.shadow_distance, 5.f, 100.f, "%.3f", ImGuiSliderFlags_AlwaysClamp );
+		ImGui::SliderInt( "Shadow cascades", &data.shadow_cascades, 0, SceneRenderer::SHADOW_CASCADE_MAX );
+		ImGui::Checkbox( "Show shadow cascades", &data.show_shadow_cascades );
 		if ( ImGui::Button( data.paused ? "Unpause" : "Pause" ) )
 		{
 			data.paused = !data.paused;
@@ -547,6 +551,8 @@ int main( int argc, char** argv )
 							   sky_illumination,
 							   static_cast<float>( ui_state.lod_pixel_tolerance ),
 							   ui_state.shadow_distance,
+							   static_cast<uint32_t>( ui_state.shadow_cascades ),
+							   ui_state.show_shadow_cascades,
 							   ui_state.pbr,
 							   occlusion_culling );
 
