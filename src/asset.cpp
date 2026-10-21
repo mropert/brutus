@@ -803,6 +803,11 @@ private:
 			constexpr std::array<float, MESH_LOD_COUNT - 1> lod_indices_factor { { 0.5f, 0.25f, 0.12f, 0.05f, 0.01f } };
 			constexpr std::array<float, MESH_LOD_COUNT - 1> lod_error_factor { { 0.005f, 0.01f, 0.02f, 0.04f, 0.08f } };
 			std::vector<uint32_t> buffer( upload_data.indices.size() );
+			// Simplification errors (targets and results) are relative to the mesh extents, but LOD selection compares them
+			// against world space distances (in mesh units, before instance scale) so convert results to absolute
+			const float error_scale = meshopt_simplifyScale( &upload_data.vertices.front().position.x,
+															 upload_data.vertices.size(),
+															 sizeof( mesh_vertex ) );
 			for ( size_t lod = 0; lod < upload_data.indices_per_lod.size(); ++lod )
 			{
 				const float attr_weights[ 3 ] = { 0.5f, 0.5f, 0.5f };
@@ -822,6 +827,7 @@ private:
 					lod_error_factor[ lod ],
 					0,
 					&upload_data.error_per_lod[ lod ] );
+				upload_data.error_per_lod[ lod ] *= error_scale;
 
 				meshopt_optimizeVertexCache( buffer.data(), buffer.data(), size, upload_data.vertices.size() );
 				upload_data.indices_per_lod[ lod ] = static_cast<uint32_t>( size );
