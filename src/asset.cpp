@@ -375,18 +375,28 @@ class asset_load_job
 		mesh_attribute indices;
 	};
 
+	// LODs simplified from a LOD 0 index buffer stored elsewhere
+	struct lod_chain
+	{
+		std::vector<uint32_t> indices; // LOD 1+ indices, packed
+		std::array<uint32_t, MESH_LOD_COUNT - 1> indices_per_lod;
+		std::array<float, MESH_LOD_COUNT - 1> error_per_lod;
+		std::array<uint32_t, MESH_LOD_COUNT> meshlets_per_lod; // Including LOD 0
+	};
+
 	struct mesh_upload_data
 	{
 		std::vector<mesh_vertex> vertices;
 		std::span<const uint32_t> indices;
-		std::vector<uint32_t> lod_indices;
-		std::array<uint32_t, MESH_LOD_COUNT - 1> indices_per_lod;
-		std::array<float, MESH_LOD_COUNT> error_per_lod;
+		lod_chain lods;
+		// Depth-only rendering (shadows): vertices are only distinguished by position and LODs ignore attributes
+		std::vector<uint32_t> shadow_indices;
+		lod_chain shadow_lods;
 		std::vector<uint32_t> expanded_indices;
+		// Meshlets of all LODs, regular ones first then shadow ones
 		std::vector<gpu_meshlet> meshlets;
 		std::vector<uint32_t> meshlet_vertices;
 		std::vector<uint8_t> meshlet_triangles;
-		std::vector<uint32_t> meshlets_per_lod;
 	};
 
 	enum class texture_usage
@@ -800,102 +810,166 @@ private:
 
 		{
 			PROFILER_SCOPE_N( "lod_generation" );
-			constexpr std::array<float, MESH_LOD_COUNT - 1> lod_indices_factor { { 0.5f, 0.25f, 0.12f, 0.05f, 0.01f } };
-			constexpr std::array<float, MESH_LOD_COUNT - 1> lod_error_factor { { 0.005f, 0.01f, 0.02f, 0.04f, 0.08f } };
-			std::vector<uint32_t> buffer( upload_data.indices.size() );
-			// Simplification errors (targets and results) are relative to the mesh extents, but LOD selection compares them
-			// against world space distances (in mesh units, before instance scale) so convert results to absolute
-			const float error_scale = meshopt_simplifyScale( &upload_data.vertices.front().position.x,
-															 upload_data.vertices.size(),
-															 sizeof( mesh_vertex ) );
-			for ( size_t lod = 0; lod < upload_data.indices_per_lod.size(); ++lod )
-			{
-				const float attr_weights[ 3 ] = { 0.5f, 0.5f, 0.5f };
-				const auto size = meshopt_simplifyWithAttributes(
-					buffer.data(),
-					upload_data.indices.data(),
-					upload_data.indices.size(),
-					&upload_data.vertices.front().position.x,
-					upload_data.vertices.size(),
-					sizeof( mesh_vertex ),
-					&upload_data.vertices.front().normal.x,
-					sizeof( mesh_vertex ),
-					attr_weights,
-					3,
-					nullptr,
-					static_cast<size_t>( parsed_mesh.indices.length * lod_indices_factor[ lod ] ),
-					lod_error_factor[ lod ],
-					0,
-					&upload_data.error_per_lod[ lod ] );
-				upload_data.error_per_lod[ lod ] *= error_scale;
+			generate_lods( upload_data.vertices, upload_data.indices, upload_data.lods, true );
+		}
 
-				meshopt_optimizeVertexCache( buffer.data(), buffer.data(), size, upload_data.vertices.size() );
-				upload_data.indices_per_lod[ lod ] = static_cast<uint32_t>( size );
-				upload_data.lod_indices.insert( end( upload_data.lod_indices ), buffer.data(), buffer.data() + size );
+		{
+			PROFILER_SCOPE_N( "shadow_lod_generation" );
+			// Simplify from the original indices: merging vertices by position first creates non-manifold edges (eg: duplicated
+			// back faces) which stop the simplifier early. Attribute seams don't matter for depth-only rendering though, so every
+			// LOD is remapped afterwards to only distinguish vertices by position (fewer unique vertices to transform)
+			generate_lods( upload_data.vertices, upload_data.indices, upload_data.shadow_lods, false );
+			upload_data.shadow_indices.assign( begin( upload_data.indices ), end( upload_data.indices ) );
+			remap_to_shadow_indices( upload_data.vertices, upload_data.shadow_indices );
+			size_t lod_offset = 0;
+			for ( const auto lod_index_count : upload_data.shadow_lods.indices_per_lod )
+			{
+				remap_to_shadow_indices( upload_data.vertices,
+										 std::span( upload_data.shadow_lods.indices ).subspan( lod_offset, lod_index_count ) );
+				lod_offset += lod_index_count;
 			}
 		}
 
 		{
 			PROFILER_SCOPE_N( "meshlet_generation" );
-			std::vector<meshopt_Meshlet> meshlet_buffer;
-			size_t index_offset = 0;
-			for ( int lod = 0; lod < MESH_LOD_COUNT; ++lod )
+			build_meshlets( upload_data, upload_data.indices, upload_data.lods );
+			build_meshlets( upload_data, upload_data.shadow_indices, upload_data.shadow_lods );
+		}
+	}
+
+	// Simplify lod0_indices into the LODs 1+ of the chain
+	// Attributes (normals) are only taken into account if use_attributes is set, which is meant for regular (shaded) rendering
+	static void
+	generate_lods( std::span<const mesh_vertex> vertices, std::span<const uint32_t> lod0_indices, lod_chain& chain, bool use_attributes )
+	{
+		constexpr std::array<float, MESH_LOD_COUNT - 1> lod_indices_factor { { 0.5f, 0.25f, 0.12f, 0.05f, 0.01f } };
+		constexpr std::array<float, MESH_LOD_COUNT - 1> lod_error_factor { { 0.005f, 0.01f, 0.02f, 0.04f, 0.08f } };
+		std::vector<uint32_t> buffer( lod0_indices.size() );
+		// Simplification errors (targets and results) are relative to the mesh extents, but LOD selection compares them
+		// against world space distances (in mesh units, before instance scale) so convert results to absolute
+		const float error_scale = meshopt_simplifyScale( &vertices.front().position.x, vertices.size(), sizeof( mesh_vertex ) );
+		for ( size_t lod = 0; lod < chain.indices_per_lod.size(); ++lod )
+		{
+			const auto target_index_count = static_cast<size_t>( lod0_indices.size() * lod_indices_factor[ lod ] );
+			size_t size = 0;
+			if ( use_attributes )
 			{
-				const auto indices_ptr = lod == 0 ? upload_data.indices.data() : upload_data.lod_indices.data() + index_offset;
-				const auto indices_count = lod == 0 ? upload_data.indices.size() : upload_data.indices_per_lod[ lod - 1 ];
-				index_offset += lod == 0 ? 0 : indices_count;
+				const float attr_weights[ 3 ] = { 0.5f, 0.5f, 0.5f };
+				size = meshopt_simplifyWithAttributes( buffer.data(),
+													   lod0_indices.data(),
+													   lod0_indices.size(),
+													   &vertices.front().position.x,
+													   vertices.size(),
+													   sizeof( mesh_vertex ),
+													   &vertices.front().normal.x,
+													   sizeof( mesh_vertex ),
+													   attr_weights,
+													   3,
+													   nullptr,
+													   target_index_count,
+													   lod_error_factor[ lod ],
+													   0,
+													   &chain.error_per_lod[ lod ] );
+			}
+			else
+			{
+				size = meshopt_simplify( buffer.data(),
+										 lod0_indices.data(),
+										 lod0_indices.size(),
+										 &vertices.front().position.x,
+										 vertices.size(),
+										 sizeof( mesh_vertex ),
+										 target_index_count,
+										 lod_error_factor[ lod ],
+										 0,
+										 &chain.error_per_lod[ lod ] );
+			}
+			chain.error_per_lod[ lod ] *= error_scale;
 
-				if ( indices_count > 0 )
+			meshopt_optimizeVertexCache( buffer.data(), buffer.data(), size, vertices.size() );
+			chain.indices_per_lod[ lod ] = static_cast<uint32_t>( size );
+			chain.indices.insert( end( chain.indices ), buffer.data(), buffer.data() + size );
+		}
+	}
+
+	// Remap indices in place so vertices are only distinguished by their position, then optimize for vertex cache again
+	static void remap_to_shadow_indices( std::span<const mesh_vertex> vertices, std::span<uint32_t> indices )
+	{
+		if ( indices.empty() )
+		{
+			return;
+		}
+		meshopt_generateShadowIndexBuffer( indices.data(),
+										   indices.data(),
+										   indices.size(),
+										   &vertices.front().position.x,
+										   vertices.size(),
+										   sizeof( glm::vec3 ),
+										   sizeof( mesh_vertex ) );
+		meshopt_optimizeVertexCache( indices.data(), indices.data(), indices.size(), vertices.size() );
+	}
+
+	// Build meshlets for every LOD of the chain (starting with lod0_indices) and append them to the mesh meshlets
+	static void build_meshlets( mesh_upload_data& upload_data, std::span<const uint32_t> lod0_indices, lod_chain& chain )
+	{
+		std::vector<meshopt_Meshlet> meshlet_buffer;
+		size_t index_offset = 0;
+		for ( int lod = 0; lod < MESH_LOD_COUNT; ++lod )
+		{
+			const auto indices_ptr = lod == 0 ? lod0_indices.data() : chain.indices.data() + index_offset;
+			const auto indices_count = lod == 0 ? lod0_indices.size() : chain.indices_per_lod[ lod - 1 ];
+			index_offset += lod == 0 ? 0 : indices_count;
+
+			if ( indices_count > 0 )
+			{
+				auto max_meshlets = meshopt_buildMeshletsBound( indices_count, 64, 96 );
+				meshlet_buffer.resize( max_meshlets );
+				const auto vertices_offset = upload_data.meshlet_vertices.size();
+				upload_data.meshlet_vertices.resize( upload_data.meshlet_vertices.size() + indices_count );
+				const auto triangles_offset = upload_data.meshlet_triangles.size();
+				upload_data.meshlet_triangles.resize( upload_data.meshlet_triangles.size() + indices_count + max_meshlets * 3 );
+
+				const auto meshlet_count = meshopt_buildMeshlets( meshlet_buffer.data(),
+																  upload_data.meshlet_vertices.data() + vertices_offset,
+																  upload_data.meshlet_triangles.data() + triangles_offset,
+																  indices_ptr,
+																  indices_count,
+																  &upload_data.vertices.front().position.x,
+																  upload_data.vertices.size(),
+																  sizeof( mesh_vertex ),
+																  64,
+																  96,
+																  0.f );
+
+				chain.meshlets_per_lod[ lod ] = static_cast<uint32_t>( meshlet_count );
+				const auto& last = meshlet_buffer[ meshlet_count - 1 ];
+
+				upload_data.meshlet_vertices.resize( vertices_offset + last.vertex_offset + last.vertex_count );
+				upload_data.meshlet_triangles.resize( triangles_offset + last.triangle_offset + last.triangle_count * 3 );
+
+				for ( const auto& meshlet : std::span( meshlet_buffer.data(), meshlet_count ) )
 				{
-					auto max_meshlets = meshopt_buildMeshletsBound( indices_count, 64, 96 );
-					meshlet_buffer.resize( max_meshlets );
-					const auto vertices_offset = upload_data.meshlet_vertices.size();
-					upload_data.meshlet_vertices.resize( upload_data.meshlet_vertices.size() + indices_count );
-					const auto triangles_offset = upload_data.meshlet_triangles.size();
-					upload_data.meshlet_triangles.resize( upload_data.meshlet_triangles.size() + indices_count + max_meshlets * 3 );
-
-					const auto meshlet_count = meshopt_buildMeshlets( meshlet_buffer.data(),
-																	  upload_data.meshlet_vertices.data() + vertices_offset,
-																	  upload_data.meshlet_triangles.data() + triangles_offset,
-																	  indices_ptr,
-																	  indices_count,
+					const size_t vertex_index = meshlet.vertex_offset + vertices_offset;
+					const size_t triangle_index = meshlet.triangle_offset + triangles_offset;
+					const auto bounds = meshopt_computeMeshletBounds( upload_data.meshlet_vertices.data() + vertex_index,
+																	  upload_data.meshlet_triangles.data() + triangle_index,
+																	  meshlet.triangle_count,
 																	  &upload_data.vertices.front().position.x,
 																	  upload_data.vertices.size(),
-																	  sizeof( mesh_vertex ),
-																	  64,
-																	  96,
-																	  0.f );
+																	  sizeof( mesh_vertex ) );
 
-					upload_data.meshlets_per_lod.push_back( static_cast<uint32_t>( meshlet_count ) );
-					const auto& last = meshlet_buffer[ meshlet_count - 1 ];
-
-					upload_data.meshlet_vertices.resize( vertices_offset + last.vertex_offset + last.vertex_count );
-					upload_data.meshlet_triangles.resize( triangles_offset + last.triangle_offset + last.triangle_count * 3 );
-
-					for ( const auto& meshlet : std::span( meshlet_buffer.data(), meshlet_count ) )
-					{
-						const size_t vertex_index = meshlet.vertex_offset + vertices_offset;
-						const size_t triangle_index = meshlet.triangle_offset + triangles_offset;
-						const auto bounds = meshopt_computeMeshletBounds( upload_data.meshlet_vertices.data() + vertex_index,
-																		  upload_data.meshlet_triangles.data() + triangle_index,
-																		  meshlet.triangle_count,
-																		  &upload_data.vertices.front().position.x,
-																		  upload_data.vertices.size(),
-																		  sizeof( mesh_vertex ) );
-
-						upload_data.meshlets.emplace_back(
-							static_cast<uint32_t>( vertex_index ),
-							static_cast<uint32_t>( triangle_index ),
-							meshlet.vertex_count,
-							meshlet.triangle_count,
-							glm::vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ),
-							glm::vec4( bounds.cone_axis[ 0 ], bounds.cone_axis[ 1 ], bounds.cone_axis[ 2 ], bounds.cone_cutoff ) );
-					}
+					upload_data.meshlets.emplace_back(
+						static_cast<uint32_t>( vertex_index ),
+						static_cast<uint32_t>( triangle_index ),
+						meshlet.vertex_count,
+						meshlet.triangle_count,
+						glm::vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ),
+						glm::vec4( bounds.cone_axis[ 0 ], bounds.cone_axis[ 1 ], bounds.cone_axis[ 2 ], bounds.cone_cutoff ) );
 				}
-				else
-				{
-					upload_data.meshlets_per_lod.push_back( 0 );
-				}
+			}
+			else
+			{
+				chain.meshlets_per_lod[ lod ] = 0;
 			}
 		}
 	}
@@ -927,20 +1001,9 @@ private:
 		mesh.gpu_data.bounding_sphere.z = bounds.center[ 2 ];
 		mesh.gpu_data.bounding_sphere.w = bounds.radius;
 
-		// Index buffer
-		auto index_offset = _index_buffer.size.fetch_add( upload_data.indices.size() + upload_data.lod_indices.size() );
-		_mesh_upload.queue( upload_data.indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
-		mesh.gpu_data.lods[ 0 ].indices_offset = static_cast<uint32_t>( index_offset );
-		mesh.gpu_data.lods[ 0 ].indices_count = static_cast<uint32_t>( upload_data.indices.size() );
-
-		index_offset += mesh.gpu_data.lods[ 0 ].indices_count;
-		_mesh_upload.queue( upload_data.lod_indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
-		for ( size_t lod = 1; lod < mesh.gpu_data.lods.size(); ++lod )
-		{
-			mesh.gpu_data.lods[ lod ].indices_offset = mesh.gpu_data.lods[ lod - 1 ].indices_offset
-				+ mesh.gpu_data.lods[ lod - 1 ].indices_count;
-			mesh.gpu_data.lods[ lod ].indices_count = upload_data.indices_per_lod[ lod - 1 ];
-		}
+		// Index buffer + LOD descriptors, shadow meshlets are stored after the regular ones
+		const auto shadow_meshlets_offset = upload_lods( upload_data.indices, upload_data.lods, 0, mesh.gpu_data.lods );
+		upload_lods( upload_data.shadow_indices, upload_data.shadow_lods, shadow_meshlets_offset, mesh.gpu_data.shadow_lods );
 
 		// Data buffer (vertices + meshlets)
 		auto data_buffer_size = upload_data.vertices.size() * sizeof( mesh_vertex );
@@ -960,17 +1023,6 @@ private:
 		_mesh_upload.queue( upload_data.meshlets, mesh.data_buffer, offset );
 		offset += upload_data.meshlets.size() * sizeof( gpu_meshlet );
 
-		for ( int lod = 0; lod < MESH_LOD_COUNT; ++lod )
-		{
-			mesh.gpu_data.lods[ lod ].error = lod == 0 ? 0.f : upload_data.error_per_lod[ lod - 1 ];
-			mesh.gpu_data.lods[ lod ].meshlets_count = upload_data.meshlets_per_lod[ lod ];
-			if ( lod > 0 )
-			{
-				mesh.gpu_data.lods[ lod ].meshlets_offset = mesh.gpu_data.lods[ lod - 1 ].meshlets_offset
-					+ mesh.gpu_data.lods[ lod - 1 ].meshlets_count;
-			}
-		}
-
 		mesh.gpu_data.meshlet_vertices = mesh.data_buffer.get_device_address() + offset;
 		_mesh_upload.queue( upload_data.meshlet_vertices, mesh.data_buffer, offset );
 		offset += upload_data.meshlet_vertices.size() * sizeof( uint32_t );
@@ -981,6 +1033,36 @@ private:
 
 		mesh.handle = _bindless_manager.add_buffer_entry( mesh.gpu_data );
 		mesh.material_index = *_asset.meshes[ mesh_index ].primitives[ 0 ].materialIndex;
+	}
+
+	// Upload the chain indices (LOD 0 first) to the index buffer and fill the matching LOD descriptors
+	// Meshlets of the chain are expected to be contiguous, starting at first_meshlet
+	// Returns the meshlet offset following the chain
+	uint32_t upload_lods( std::span<const uint32_t> lod0_indices,
+						  const lod_chain& chain,
+						  uint32_t first_meshlet,
+						  std::array<gpu_mesh_lod, MESH_LOD_COUNT>& lods )
+	{
+		auto index_offset = static_cast<uint32_t>( _index_buffer.size.fetch_add( lod0_indices.size() + chain.indices.size() ) );
+		_mesh_upload.queue( lod0_indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
+		if ( !chain.indices.empty() )
+		{
+			_mesh_upload.queue( chain.indices, _index_buffer.buffer, ( index_offset + lod0_indices.size() ) * sizeof( uint32_t ) );
+		}
+
+		auto meshlet_offset = first_meshlet;
+		for ( size_t lod = 0; lod < MESH_LOD_COUNT; ++lod )
+		{
+			lods[ lod ] = gpu_mesh_lod { .indices_offset = index_offset,
+										 .indices_count = lod == 0 ? static_cast<uint32_t>( lod0_indices.size() )
+																   : chain.indices_per_lod[ lod - 1 ],
+										 .meshlets_offset = meshlet_offset,
+										 .meshlets_count = chain.meshlets_per_lod[ lod ],
+										 .error = lod == 0 ? 0.f : chain.error_per_lod[ lod - 1 ] };
+			index_offset += lods[ lod ].indices_count;
+			meshlet_offset += lods[ lod ].meshlets_count;
+		}
+		return meshlet_offset;
 	}
 
 	void decompress_textures()

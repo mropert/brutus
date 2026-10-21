@@ -23,6 +23,12 @@ layout( push_constant, std430 ) uniform block
     DrawCommandsBuffer commands_buffer;
 };
 
+// Shadow passes use their own (depth-only) LOD chain, uniform for the whole draw
+MeshLOD get_mesh_lod(uint mesh_id, uint lod)
+{
+    return scene_constants.shadow_pass != 0 ? meshes[mesh_id].shadow_lods[lod] : meshes[mesh_id].lods[lod];
+}
+
 shared uint meshlets_count;
 
 taskPayloadSharedEXT MeshletTaskPayload payload;
@@ -52,12 +58,13 @@ void main()
     const uint lod = commands_buffer.commands[gl_DrawIDARB].lod;
     const uint mesh_id = draws_buffer.mesh_draws[draw_id].mesh;
 
-    if ( gl_GlobalInvocationID.x >= meshes[mesh_id].lods[lod].meshlets_count )
+    const MeshLOD mesh_lod = get_mesh_lod(mesh_id, lod);
+    if ( gl_GlobalInvocationID.x >= mesh_lod.meshlets_count )
     {
         return;
     }
 
-    const uint meshlet_id = gl_GlobalInvocationID.x + meshes[mesh_id].lods[lod].meshlets_offset;
+    const uint meshlet_id = gl_GlobalInvocationID.x + mesh_lod.meshlets_offset;
     const Meshlet meshlet = meshes[mesh_id].mb.meshlets[meshlet_id];
 
     const vec3 meshlet_center = rotate_by_quaternion( meshlet.bounding_sphere.xyz, draws_buffer.mesh_draws[draw_id].rotation )

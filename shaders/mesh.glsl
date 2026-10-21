@@ -56,6 +56,7 @@ struct Mesh
 {
     vec4 bounding_sphere;
     MeshLOD lods[MESH_LOD_COUNT];
+    MeshLOD shadow_lods[MESH_LOD_COUNT]; // For depth-only rendering, only geometric error is considered
     VertexBuffer vb;
     MeshletBuffer mb;
     MeshletVertexBuffer mvb;

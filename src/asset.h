@@ -57,6 +57,7 @@ struct gpu_mesh
 {
 	glm::aligned_vec4 bounding_sphere; // z is radius
 	std::array<gpu_mesh_lod, MESH_LOD_COUNT> lods;
+	std::array<gpu_mesh_lod, MESH_LOD_COUNT> shadow_lods; // For depth-only rendering, only geometric error is considered
 	renderer::BufferHandle vertices;
 	renderer::BufferHandle meshlets;
 	renderer::BufferHandle meshlet_vertices;

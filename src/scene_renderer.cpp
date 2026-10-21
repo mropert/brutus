@@ -92,6 +92,7 @@ namespace
 		glm::aligned_vec4 main_light;
 		float sky_to_sun;
 		renderer::BindlessSampledTexture shadow_map;
+		uint32_t shadow_pass = 0; // Non-zero when rendering a shadow map: use shadow (depth-only) LODs
 	};
 
 	scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D extent, glm::vec4 main_light, float sky_to_sun )
@@ -167,7 +168,8 @@ namespace
 									.view_matrix = view,
 									.inverse_view_matrix = glm::inverse( view ),
 									.camera_position = camera.position,
-									.main_light = { 0.f, 0.f, 0.f, -1.f } };
+									.main_light = { 0.f, 0.f, 0.f, -1.f },
+									.shadow_pass = 1 };
 
 		const auto transposed_vp = glm::transpose( constants.view_projection_matrix );
 		constants.frustum[ 0 ] = normalize_plane( transposed_vp[ 3 ] + transposed_vp[ 0 ] ); // x + w < 0

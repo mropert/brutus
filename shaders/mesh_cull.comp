@@ -40,6 +40,12 @@ layout( push_constant ) uniform block
     uint depth_pyramid;
 };
 
+// Shadow passes use their own (depth-only) LOD chain, uniform for the whole dispatch
+MeshLOD get_mesh_lod(uint mesh_id, uint lod)
+{
+    return scene_constants.shadow_pass != 0 ? meshes[mesh_id].shadow_lods[lod] : meshes[mesh_id].lods[lod];
+}
+
 // 2D Polyhedral Bounds of a Clipped, Perspective-Projected 3D Sphere. Michael Mara, Morgan McGuire. 2013
 bool projectSphere(vec3 c, float r, float znear, float P00, float P11, out vec4 aabb)
 {
@@ -113,21 +119,22 @@ void cull_draw(uint draw_id)
         int lod = 0;
         for (int i = 1; i < MESH_LOD_COUNT; ++i)
         {
-            if (meshes[mesh_id].lods[i].error < threshold)
+            if (get_mesh_lod(mesh_id, i).error < threshold)
                 lod = i;
         }
+        const MeshLOD mesh_lod = get_mesh_lod(mesh_id, lod);
 
         const uint bucket = materials[draws_buffer.mesh_draws[draw_id].material].type;
         const uint command_id = atomicAdd( commands_count_buffers[bucket].commands_count, 1 );
         commands_buffers[bucket].commands[command_id].draw_id = draw_id;
         commands_buffers[bucket].commands[command_id].lod = lod;
-        const uint index_count = meshes[mesh_id].lods[lod].indices_count;
+        const uint index_count = mesh_lod.indices_count;
         commands_buffers[bucket].commands[command_id].index_count = index_count;
         commands_buffers[bucket].commands[command_id].instance_count = 1;
-        commands_buffers[bucket].commands[command_id].first_index = meshes[mesh_id].lods[lod].indices_offset;
+        commands_buffers[bucket].commands[command_id].first_index = mesh_lod.indices_offset;
         commands_buffers[bucket].commands[command_id].vertex_offset = 0;
         commands_buffers[bucket].commands[command_id].first_instance = command_id;
-        commands_buffers[bucket].commands[command_id].group_count_x = ( meshes[mesh_id].lods[lod].meshlets_count + 32 - 1 ) / 32;
+        commands_buffers[bucket].commands[command_id].group_count_x = ( mesh_lod.meshlets_count + 32 - 1 ) / 32;
         commands_buffers[bucket].commands[command_id].group_count_y = 1;
         commands_buffers[bucket].commands[command_id].group_count_z = 1;
 
