@@ -91,7 +91,8 @@ namespace
 		glm::mat4 projection_matrix;
 		glm::mat4 view_matrix;
 		glm::mat4 inverse_view_matrix;
-		glm::mat4 shadow_view_projection_matrix;
+		std::array<glm::mat4, SceneRenderer::SHADOW_CASCADE_MAX> shadow_view_projection_matrices;
+		glm::aligned_vec4 shadow_cascade_splits; // Far view depth of each cascade
 		std::array<glm::aligned_vec4, 6> frustum;
 		glm::vec3 camera_position;
 		uint32_t pbr;
@@ -101,7 +102,9 @@ namespace
 		uint32_t shadow_pass = 0; // Non-zero when rendering a shadow map: use shadow (depth-only) LODs
 		glm::aligned_vec2 viewport_size; // In pixels
 		float shadow_distance = 0.f; // View depth up to which the main light casts shadows
+		uint32_t shadow_cascade_count = 0;
 	};
+	static_assert( SceneRenderer::SHADOW_CASCADE_MAX == 4, "shadow_cascade_splits holds one split per vec4 component" );
 
 	scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D extent, glm::vec4 main_light, float sky_to_sun )
 	{
@@ -133,10 +136,26 @@ namespace
 		return constants;
 	}
 
+	// Practical split scheme: blends uniform and logarithmic splits, lambda = 1 is fully logarithmic. Unused splits are far_depth.
+	glm::vec4 compute_shadow_cascade_splits( uint32_t count, float near_depth, float far_depth, float lambda = 0.75f )
+	{
+		glm::vec4 splits( far_depth );
+		for ( size_t i = 1; i < count; ++i )
+		{
+			const float t = static_cast<float>( i ) / static_cast<float>( count );
+			const float uniform_split = near_depth + ( far_depth - near_depth ) * t;
+			const float log_split = near_depth * std::pow( far_depth / near_depth, t );
+			splits[ static_cast<glm::length_t>( i - 1 ) ] = glm::mix( uniform_split, log_split, lambda );
+		}
+		return splits;
+	}
+
+	// Fits a shadow map to the [near_depth, far_depth] slice of the camera frustum
 	scene_constants build_scene_shadow_constants( const Camera& camera,
 												  uint32_t resolution,
 												  glm::vec3 light_direction,
-												  float shadow_distance,
+												  float near_depth,
+												  float far_depth,
 												  renderer::Extent2D scene_extent )
 	{
 		const glm::mat4 inverse_camera_view = glm::inverse( camera.calc_view_matrix() );
@@ -145,7 +164,7 @@ namespace
 		const float tanX = tanY * aspect_ratio;
 		std::vector<glm::vec3> bounds;
 		bounds.reserve( 8 );
-		for ( float d : { 0.1f, shadow_distance } )
+		for ( float d : { near_depth, far_depth } )
 			for ( float y : { -1.f, 1.f } )
 				for ( float x : { -1.f, 1.f } )
 					bounds.emplace_back( inverse_camera_view * glm::vec4( x * tanX * d, y * tanY * d, -d, 1.f ) ); // camera looks down -Z
@@ -227,13 +246,14 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 	, _shadowmap( bindless_manager.add_texture(
 		  device.create_texture( renderer::Texture::Desc { .format = renderer::Texture::Format::D32_SFLOAT,
 														   .usage = usage::DEPTH_STENCIL_ATTACHMENT | usage::SAMPLED,
-														   .extent = { .width = 2048, .height = 2048 } } ) ) )
+														   .extent = { .width = 2048, .height = 2048 },
+														   .layers = SHADOW_CASCADE_MAX } ) ) )
 	, _constant_buffers( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 											   sizeof( std::array<scene_constants, renderer::MAX_FRAMES_IN_FLIGHT> ),
 											   renderer::Buffer::CpuUsage::WRITE ) )
 	, _shadowmap_constant_buffers(
 		  device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-								sizeof( std::array<scene_constants, renderer::MAX_FRAMES_IN_FLIGHT> ),
+								sizeof( std::array<scene_constants, renderer::MAX_FRAMES_IN_FLIGHT * SHADOW_CASCADE_MAX> ),
 								renderer::Buffer::CpuUsage::WRITE ) )
 	, _draw_buffers( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 										   sizeof( std::array<MeshDraw, MAX_DRAWS> ) * renderer::MAX_FRAMES_IN_FLIGHT,
@@ -374,6 +394,14 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 									   sizeof( DrawStatistics ),
 									   renderer::Buffer::CpuUsage::READ_WRITE );
 	}
+
+	for ( size_t layer = 0; layer < SHADOW_CASCADE_MAX; ++layer )
+	{
+		_shadowmap_layer_views[ layer ] = device.create_texture_view( _shadowmap.texture,
+																	  renderer::TextureView::Aspect::DEPTH,
+																	  -1,
+																	  static_cast<int>( layer ) );
+	}
 }
 
 void SceneRenderer::add_mesh( mesh_handle mesh, glm::vec3 translation, glm::quat rotation, glm::vec3 scale, material_handle material )
@@ -461,7 +489,9 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		auto constants = build_scene_constants( camera, _extent, main_light, sky_illumination );
 		if ( shadow_distance > 0.f )
 		{
-			constants.shadow_view_projection_matrix = _shadow_mvp;
+			constants.shadow_view_projection_matrices = _shadow_view_projections;
+			constants.shadow_cascade_splits = _shadow_cascade_splits;
+			constants.shadow_cascade_count = _shadow_cascade_count;
 			constants.shadow_map = _shadowmap.handles.sampled_texture;
 			constants.shadow_distance = shadow_distance;
 		}
@@ -635,7 +665,8 @@ void SceneRenderer::compute_draws( const BindlessManager& bindless_manager,
 
 	for ( size_t i = 0; i < draw_commands.size(); ++i )
 	{
-		cmd.buffer_barrier( draw_commands[ i ], renderer::ResourceState::INDIRECT_ARGUMENT, renderer::ResourceState::TRANSFER_DST );
+		// Previous draws read commands both as indirect arguments and from shaders
+		cmd.buffer_barrier( draw_commands[ i ], renderer::ResourceState::ANY_BUFFER_READ, renderer::ResourceState::TRANSFER_DST );
 		cmd.fill_buffer( draw_commands[ i ], 0, draw_commands[ i ].get_size(), 0 );
 		cmd.buffer_barrier( draw_commands[ i ], renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ_WRITE );
 		constants.commands_buffers[ i ] = draw_commands[ i ].get_device_address() + sizeof( uint32_t );
@@ -810,12 +841,8 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 {
 	const auto frame_index = _frames % renderer::MAX_FRAMES_IN_FLIGHT;
 	const auto shadowmap_resolution = _shadowmap.texture.get_extent().width;
-	const auto constants = build_scene_shadow_constants( camera, shadowmap_resolution, main_light, shadow_distance, _extent );
-	_shadow_mvp = constants.view_projection_matrix;
-	memcpy( static_cast<scene_constants*>( _shadowmap_constant_buffers.get_mapped_address() ) + frame_index,
-			&constants,
-			sizeof( constants ) );
-	const auto constants_address = _shadowmap_constant_buffers.get_device_address() + ( frame_index * sizeof( scene_constants ) );
+	constexpr float shadow_near_depth = 0.1f;
+	_shadow_cascade_splits = compute_shadow_cascade_splits( _shadow_cascade_count, shadow_near_depth, shadow_distance );
 
 	if ( _frames == 0 )
 	{
@@ -823,61 +850,80 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 		cmd.buffer_barrier( _shadowmap_visibility_buffer, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ );
 	}
 
-	const float texel_world_size = 2.f / ( constants.projection_matrix[ 0 ][ 0 ] * shadowmap_resolution );
-	const float lod_target = texel_world_size * 2.f;
-
-	compute_draws( bindless_manager,
-				   pipelines,
-				   cmd,
-				   constants_address,
-				   draw_buffer_address,
-				   _shadowmap_visibility_buffer,
-				   stats_buffer_address,
-				   _shadowmap_draw_commands_buffers,
-				   lod_target,
-				   true );
-
 	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
-
-	PROFILER_GPU_EVENT( "Draw Shadows" );
-	const auto label = cmd.debug_label( "Draw" );
-	cmd.begin_rendering( { .depth_target = { .target = _shadowmap.handles.view, .clear_value = { { 1.f } } } } );
 	const auto& pipeline = pipelines.get( use_mesh_shader ? _shadowmap_meshlet_pipeline : _shadowmap_mesh_pipeline );
-	cmd.bind_pipeline( pipeline, bindless_manager );
-	draw_meshes_constants draw_constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
-	for ( int i = 0; i < 2; ++i )
+
+	static constexpr std::array<const char*, SHADOW_CASCADE_MAX> cascade_labels { "Cascade 0", "Cascade 1", "Cascade 2", "Cascade 3" };
+	for ( size_t cascade = 0; cascade < _shadow_cascade_count; ++cascade )
 	{
-		const auto bucket = std::to_underlying( material_type::OPAQUE_SINGLE );
-		const auto& commands = _shadowmap_draw_commands_buffers[ bucket + i ];
-		cmd.set_dynamic_state( { .viewport = _shadowmap.texture.get_extent(), .cull_mode = bucket_cull_mode( i ) } );
-		draw_constants.commands_buffer = commands.get_device_address() + sizeof( uint32_t );
-		cmd.push_constants( pipeline, draw_constants );
-		if ( use_mesh_shader )
+		const auto cascade_label = cmd.debug_label( cascade_labels[ cascade ] );
+		const float near_depth = cascade == 0 ? shadow_near_depth : _shadow_cascade_splits[ static_cast<glm::length_t>( cascade - 1 ) ];
+		const auto constants = build_scene_shadow_constants( camera,
+															 shadowmap_resolution,
+															 main_light,
+															 near_depth,
+															 _shadow_cascade_splits[ static_cast<glm::length_t>( cascade ) ],
+															 _extent );
+		_shadow_view_projections[ cascade ] = constants.view_projection_matrix;
+		const auto constants_index = frame_index * SHADOW_CASCADE_MAX + cascade;
+		memcpy( static_cast<scene_constants*>( _shadowmap_constant_buffers.get_mapped_address() ) + constants_index,
+				&constants,
+				sizeof( constants ) );
+		const auto constants_address = _shadowmap_constant_buffers.get_device_address() + ( constants_index * sizeof( scene_constants ) );
+
+		const float texel_world_size = 2.f / ( constants.projection_matrix[ 0 ][ 0 ] * shadowmap_resolution );
+		const float lod_target = texel_world_size * 2.f;
+
+		compute_draws( bindless_manager,
+					   pipelines,
+					   cmd,
+					   constants_address,
+					   draw_buffer_address,
+					   _shadowmap_visibility_buffer,
+					   stats_buffer_address,
+					   _shadowmap_draw_commands_buffers,
+					   lod_target,
+					   true );
+
+		PROFILER_GPU_EVENT( "Draw Shadows" );
+		const auto label = cmd.debug_label( "Draw" );
+		cmd.begin_rendering( { .depth_target = { .target = _shadowmap_layer_views[ cascade ], .clear_value = { { 1.f } } } } );
+		cmd.bind_pipeline( pipeline, bindless_manager );
+		draw_meshes_constants draw_constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
+		for ( int i = 0; i < 2; ++i )
 		{
-			cmd.draw_mesh_tasks_indirect( commands,
-										  sizeof( uint32_t ) + offsetof( gpu_draw_command, mesh_cmd ),
-										  commands,
-										  0,
-										  static_cast<uint32_t>( _scene.size() ),
-										  sizeof( gpu_draw_command ) );
+			const auto bucket = std::to_underlying( material_type::OPAQUE_SINGLE );
+			const auto& commands = _shadowmap_draw_commands_buffers[ bucket + i ];
+			cmd.set_dynamic_state( { .viewport = _shadowmap.texture.get_extent(), .cull_mode = bucket_cull_mode( i ) } );
+			draw_constants.commands_buffer = commands.get_device_address() + sizeof( uint32_t );
+			cmd.push_constants( pipeline, draw_constants );
+			if ( use_mesh_shader )
+			{
+				cmd.draw_mesh_tasks_indirect( commands,
+											  sizeof( uint32_t ) + offsetof( gpu_draw_command, mesh_cmd ),
+											  commands,
+											  0,
+											  static_cast<uint32_t>( _scene.size() ),
+											  sizeof( gpu_draw_command ) );
+			}
+			else if ( _draw_indirect_count )
+			{
+				cmd.draw_indexed_indirect( commands,
+										   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+										   commands,
+										   0,
+										   static_cast<uint32_t>( _scene.size() ),
+										   sizeof( gpu_draw_command ) );
+			}
+			else
+			{
+				cmd.draw_indexed_indirect( commands,
+										   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+										   static_cast<uint32_t>( _scene.size() ),
+										   sizeof( gpu_draw_command ) );
+			}
 		}
-		else if ( _draw_indirect_count )
-		{
-			cmd.draw_indexed_indirect( commands,
-									   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
-									   commands,
-									   0,
-									   static_cast<uint32_t>( _scene.size() ),
-									   sizeof( gpu_draw_command ) );
-		}
-		else
-		{
-			cmd.draw_indexed_indirect( commands,
-									   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
-									   static_cast<uint32_t>( _scene.size() ),
-									   sizeof( gpu_draw_command ) );
-		}
+		cmd.end_rendering();
 	}
-	cmd.end_rendering();
 	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::DEPTH_ATTACHMENT, renderer::ResourceState::FRAGMENT_SHADER_READ );
 }

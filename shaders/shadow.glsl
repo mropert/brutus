@@ -1,6 +1,9 @@
 // Main light shadow lookup
 // Requires constants.glsl and the bindless textures/samplers declarations
 
+// Array textures (cascades) alias the bindless textures binding
+layout( set = 0, binding = 0 ) uniform texture2DArray textures_2d_array[ 1024 ];
+
 // Fraction of the shadow distance over which shadows fade out
 const float SHADOW_FADE_RANGE = 0.1;
 
@@ -29,7 +32,14 @@ float compute_shadow( SceneConstants constants, vec3 world_pos, vec3 normal, vec
 		return 1.0;
 	}
 
-	const vec4 shadow_pos = constants.shadow_view_projection_matrix * vec4( world_pos, 1.0 );
+	// Cascades are fitted to consecutive view depth slices
+	uint cascade = 0;
+	while ( cascade + 1 < constants.shadow_cascade_count && view_depth > constants.shadow_cascade_splits[ cascade ] )
+	{
+		++cascade;
+	}
+
+	const vec4 shadow_pos = constants.shadow_view_projection_matrices[ cascade ] * vec4( world_pos, 1.0 );
 	const vec3 shadow_ndc = shadow_pos.xyz / shadow_pos.w;
 	const vec2 shadow_uv = vec2( shadow_ndc.x * 0.5 + 0.5, 0.5 - shadow_ndc.y * 0.5 );
 	if ( any( lessThan( shadow_uv, vec2( 0.0 ) ) ) || any( greaterThan( shadow_uv, vec2( 1.0 ) ) ) || shadow_ndc.z < 0.0
@@ -39,7 +49,7 @@ float compute_shadow( SceneConstants constants, vec3 world_pos, vec3 normal, vec
 	}
 
 	const float shadow_bias = max( 0.0005 * ( 1.0 - NdotL ), 0.0005 );
-	const float shadow = texture( sampler2DShadow( textures[ constants.shadow_map ], samplers[ 2 ] ),
-								  vec3( shadow_uv, shadow_ndc.z - shadow_bias ) );
+	const float shadow = texture( sampler2DArrayShadow( textures_2d_array[ constants.shadow_map ], samplers[ 2 ] ),
+								  vec4( shadow_uv, cascade, shadow_ndc.z - shadow_bias ) );
 	return mix( 1.0, shadow, fade );
 }

@@ -13,6 +13,7 @@ class SceneRenderer
 public:
 	static constexpr auto DRAW_BUCKETS_COUNT = std::to_underlying( material_type::COUNT );
 	static constexpr float FOV = 70.f;
+	static constexpr uint32_t SHADOW_CASCADE_MAX = 4;
 
 	struct DrawStatistics
 	{
@@ -115,7 +116,8 @@ private:
 	renderer::BindlessTexture _resolved_color_texture;
 	renderer::BindlessTexture _resolved_depth_texture;
 	renderer::BindlessTexture _depth_pyramid;
-	renderer::BindlessTexture _shadowmap;
+	renderer::BindlessTexture _shadowmap; // One layer per cascade
+	std::array<renderer::raii::TextureView, SHADOW_CASCADE_MAX> _shadowmap_layer_views;
 	renderer::raii::Buffer _constant_buffers;
 	renderer::raii::Buffer _shadowmap_constant_buffers;
 	renderer::raii::Buffer _draw_buffers;
@@ -143,5 +145,7 @@ private:
 	int _frames = 0;
 	bool _needs_rebuild = false;
 	bool _draw_indirect_count;
-	glm::mat4 _shadow_mvp;
+	uint32_t _shadow_cascade_count = 1;
+	std::array<glm::mat4, SHADOW_CASCADE_MAX> _shadow_view_projections;
+	glm::vec4 _shadow_cascade_splits; // Far view depth of each cascade
 };
