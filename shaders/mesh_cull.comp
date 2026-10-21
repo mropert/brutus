@@ -1,172 +1,192 @@
 #version 450
 #extension GL_EXT_buffer_reference : require
-#extension GL_EXT_shader_8bit_storage: require
+#extension GL_EXT_shader_8bit_storage : require
 #extension GL_GOOGLE_include_directive : require
 
 #include "constants.glsl"
 #include "math.glsl"
 #include "mesh.glsl"
 
-layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+layout( local_size_x = 32, local_size_y = 1, local_size_z = 1 ) in;
 
-layout(set = 0, binding = 0) uniform texture2D textures[1024];
-layout(set = 0, binding = 2) uniform sampler samplers[8];
-layout(std430, set = 1, binding = 0) readonly buffer ssbo1 { Mesh meshes[]; };
-layout(std430, set = 1, binding = 1) readonly buffer ssbo2 { Material materials[]; };
-
-layout(buffer_reference, std430) writeonly buffer DrawCommandsBuffer { MeshDrawCommand commands[]; };
-layout(buffer_reference, std430) buffer DrawCommandsCountBuffer { uint commands_count; };
-layout(buffer_reference, std430) buffer VisibilityBuffer { uint8_t draws[]; };
-layout(buffer_reference, std430) buffer DrawStatisticsBuffer
+layout( set = 0, binding = 0 ) uniform texture2D textures[ 1024 ];
+layout( set = 0, binding = 2 ) uniform sampler samplers[ 8 ];
+layout( std430, set = 1, binding = 0 ) readonly buffer ssbo1
 {
-    uint meshes[MESH_LOD_COUNT];
-    uint indices[MESH_LOD_COUNT];
+	Mesh meshes[];
+};
+layout( std430, set = 1, binding = 1 ) readonly buffer ssbo2
+{
+	Material materials[];
+};
+
+layout( buffer_reference, std430 ) writeonly buffer DrawCommandsBuffer
+{
+	MeshDrawCommand commands[];
+};
+layout( buffer_reference, std430 ) buffer DrawCommandsCountBuffer
+{
+	uint commands_count;
+};
+layout( buffer_reference, std430 ) buffer VisibilityBuffer
+{
+	uint8_t draws[];
+};
+layout( buffer_reference, std430 ) buffer DrawStatisticsBuffer
+{
+	uint meshes[ MESH_LOD_COUNT ];
+	uint indices[ MESH_LOD_COUNT ];
 };
 
 // Statistics are accumulated per workgroup then flushed once, to limit global atomics
-shared uint group_meshes[MESH_LOD_COUNT];
-shared uint group_indices[MESH_LOD_COUNT];
+shared uint group_meshes[ MESH_LOD_COUNT ];
+shared uint group_indices[ MESH_LOD_COUNT ];
 
 layout( push_constant ) uniform block
 {
-    MeshDrawBuffer draws_buffer;
-    DrawCommandsBuffer commands_buffers[4];
-    DrawCommandsCountBuffer commands_count_buffers[4];
-    VisibilityBuffer visibility_buffer;
-    DrawStatisticsBuffer statistics_buffer;
-    SceneConstants scene_constants;
-    uint draws_count;
-    float lod_target;
-    uint depth_pyramid;
+	MeshDrawBuffer draws_buffer;
+	DrawCommandsBuffer commands_buffers[ 4 ];
+	DrawCommandsCountBuffer commands_count_buffers[ 4 ];
+	VisibilityBuffer visibility_buffer;
+	DrawStatisticsBuffer statistics_buffer;
+	SceneConstants scene_constants;
+	uint draws_count;
+	float lod_target;
+	uint depth_pyramid;
 };
 
 // Shadow passes use their own (depth-only) LOD chain, uniform for the whole dispatch
-MeshLOD get_mesh_lod(uint mesh_id, uint lod)
+MeshLOD get_mesh_lod( uint mesh_id, uint lod )
 {
-    return scene_constants.shadow_pass != 0 ? meshes[mesh_id].shadow_lods[lod] : meshes[mesh_id].lods[lod];
+	return scene_constants.shadow_pass != 0 ? meshes[ mesh_id ].shadow_lods[ lod ] : meshes[ mesh_id ].lods[ lod ];
 }
 
 // 2D Polyhedral Bounds of a Clipped, Perspective-Projected 3D Sphere. Michael Mara, Morgan McGuire. 2013
-bool projectSphere(vec3 c, float r, float znear, float P00, float P11, out vec4 aabb)
+bool projectSphere( vec3 c, float r, float znear, float P00, float P11, out vec4 aabb )
 {
-	if (c.z < r + znear)
+	if ( c.z < r + znear )
 		return false;
 
 	vec3 cr = c * r;
 	float czr2 = c.z * c.z - r * r;
 
-	float vx = sqrt(c.x * c.x + czr2);
-	float minx = (vx * c.x - cr.z) / (vx * c.z + cr.x);
-	float maxx = (vx * c.x + cr.z) / (vx * c.z - cr.x);
+	float vx = sqrt( c.x * c.x + czr2 );
+	float minx = ( vx * c.x - cr.z ) / ( vx * c.z + cr.x );
+	float maxx = ( vx * c.x + cr.z ) / ( vx * c.z - cr.x );
 
-	float vy = sqrt(c.y * c.y + czr2);
-	float miny = (vy * c.y - cr.z) / (vy * c.z + cr.y);
-	float maxy = (vy * c.y + cr.z) / (vy * c.z - cr.y);
+	float vy = sqrt( c.y * c.y + czr2 );
+	float miny = ( vy * c.y - cr.z ) / ( vy * c.z + cr.y );
+	float maxy = ( vy * c.y + cr.z ) / ( vy * c.z - cr.y );
 
-	aabb = vec4(minx * P00, miny * P11, maxx * P00, maxy * P11);
-	aabb = aabb.xwzy * vec4(0.5f, -0.5f, 0.5f, -0.5f) + vec4(0.5f); // clip space -> uv space
+	aabb = vec4( minx * P00, miny * P11, maxx * P00, maxy * P11 );
+	aabb = aabb.xwzy * vec4( 0.5f, -0.5f, 0.5f, -0.5f ) + vec4( 0.5f ); // clip space -> uv space
 
 	return true;
 }
 
-void cull_draw(uint draw_id)
+void cull_draw( uint draw_id )
 {
-    const bool was_visible = uint(visibility_buffer.draws[draw_id]) == 1;
-    if (!LATE && !was_visible)
+	const bool was_visible = uint( visibility_buffer.draws[ draw_id ] ) == 1;
+	if ( !LATE && !was_visible )
 		return;
 
-    const uint mesh_id = draws_buffer.mesh_draws[draw_id].mesh;
-    const vec3 mesh_center = rotate_by_quaternion( meshes[mesh_id].bounding_sphere.xyz, draws_buffer.mesh_draws[draw_id].rotation ) 
-                                                * draws_buffer.mesh_draws[draw_id].scale
-                                                + draws_buffer.mesh_draws[draw_id].translation;
-    const float mesh_scale = max(draws_buffer.mesh_draws[draw_id].scale.x,
-                                max(draws_buffer.mesh_draws[draw_id].scale.y, draws_buffer.mesh_draws[draw_id].scale.z));
-    const float mesh_radius = meshes[mesh_id].bounding_sphere.w * mesh_scale;
-    bool visible = true;    
-    for ( int i = 0; i < 6; ++i )
-    {
-        visible = visible && dot( scene_constants.frustum[i], vec4( mesh_center, 1 ) ) > -mesh_radius;
-    }
+	const uint mesh_id = draws_buffer.mesh_draws[ draw_id ].mesh;
+	const vec3 mesh_center = rotate_by_quaternion( meshes[ mesh_id ].bounding_sphere.xyz, draws_buffer.mesh_draws[ draw_id ].rotation )
+			* draws_buffer.mesh_draws[ draw_id ].scale
+		+ draws_buffer.mesh_draws[ draw_id ].translation;
+	const float mesh_scale = max( draws_buffer.mesh_draws[ draw_id ].scale.x,
+								  max( draws_buffer.mesh_draws[ draw_id ].scale.y, draws_buffer.mesh_draws[ draw_id ].scale.z ) );
+	const float mesh_radius = meshes[ mesh_id ].bounding_sphere.w * mesh_scale;
+	bool visible = true;
+	for ( int i = 0; i < 6; ++i )
+	{
+		visible = visible && dot( scene_constants.frustum[ i ], vec4( mesh_center, 1 ) ) > -mesh_radius;
+	}
 
 	if ( LATE && visible )
 	{
 		vec4 aabb;
-        const vec3 center = (scene_constants.view_matrix * vec4(mesh_center, 1)).xyz * vec3(1, 1, -1);
-        const float znear = scene_constants.projection_matrix[3][2];
-        const uint pyramidWidth = 1024;
-        const uint pyramidHeight = 1024;
-		if (projectSphere(center, mesh_radius, znear, scene_constants.projection_matrix[0][0], scene_constants.projection_matrix[1][1], aabb))
+		const vec3 center = ( scene_constants.view_matrix * vec4( mesh_center, 1 ) ).xyz * vec3( 1, 1, -1 );
+		const float znear = scene_constants.projection_matrix[ 3 ][ 2 ];
+		const uint pyramidWidth = 1024;
+		const uint pyramidHeight = 1024;
+		if ( projectSphere( center,
+							mesh_radius,
+							znear,
+							scene_constants.projection_matrix[ 0 ][ 0 ],
+							scene_constants.projection_matrix[ 1 ][ 1 ],
+							aabb ) )
 		{
-			const float width = (aabb.z - aabb.x) * pyramidWidth;
-			const float height = (aabb.w - aabb.y) * pyramidHeight;
-			const float level = ceil(log2(max(width, height)));
-			const float depth = textureLod(sampler2D(textures[depth_pyramid], samplers[1]), (aabb.xy + aabb.zw) * 0.5, level).x;
-			const float depthSphere = znear / (center.z - mesh_radius);
+			const float width = ( aabb.z - aabb.x ) * pyramidWidth;
+			const float height = ( aabb.w - aabb.y ) * pyramidHeight;
+			const float level = ceil( log2( max( width, height ) ) );
+			const float depth = textureLod( sampler2D( textures[ depth_pyramid ], samplers[ 1 ] ), ( aabb.xy + aabb.zw ) * 0.5, level ).x;
+			const float depthSphere = znear / ( center.z - mesh_radius );
 
 			visible = visible && depthSphere > depth;
 		}
 	}
 
-    if ( visible && ( !LATE || !was_visible ) )
-    {
-        float dist = 1;
-        if ( scene_constants.projection_matrix[3][3] == 0.f )
-        {
-            dist = max(distance(scene_constants.camera_position, mesh_center) - mesh_radius, 0.0);
-        }
-        const float threshold = dist * lod_target / mesh_scale;
+	if ( visible && ( !LATE || !was_visible ) )
+	{
+		float dist = 1;
+		if ( scene_constants.projection_matrix[ 3 ][ 3 ] == 0.f )
+		{
+			dist = max( distance( scene_constants.camera_position, mesh_center ) - mesh_radius, 0.0 );
+		}
+		const float threshold = dist * lod_target / mesh_scale;
 
-        int lod = 0;
-        for (int i = 1; i < MESH_LOD_COUNT; ++i)
-        {
-            if (get_mesh_lod(mesh_id, i).error < threshold)
-                lod = i;
-        }
-        const MeshLOD mesh_lod = get_mesh_lod(mesh_id, lod);
+		int lod = 0;
+		for ( int i = 1; i < MESH_LOD_COUNT; ++i )
+		{
+			if ( get_mesh_lod( mesh_id, i ).error < threshold )
+				lod = i;
+		}
+		const MeshLOD mesh_lod = get_mesh_lod( mesh_id, lod );
 
-        const uint bucket = materials[draws_buffer.mesh_draws[draw_id].material].type;
-        const uint command_id = atomicAdd( commands_count_buffers[bucket].commands_count, 1 );
-        commands_buffers[bucket].commands[command_id].draw_id = draw_id;
-        commands_buffers[bucket].commands[command_id].lod = lod;
-        const uint index_count = mesh_lod.indices_count;
-        commands_buffers[bucket].commands[command_id].index_count = index_count;
-        commands_buffers[bucket].commands[command_id].instance_count = 1;
-        commands_buffers[bucket].commands[command_id].first_index = mesh_lod.indices_offset;
-        commands_buffers[bucket].commands[command_id].vertex_offset = 0;
-        commands_buffers[bucket].commands[command_id].first_instance = command_id;
-        commands_buffers[bucket].commands[command_id].group_count_x = ( mesh_lod.meshlets_count + 32 - 1 ) / 32;
-        commands_buffers[bucket].commands[command_id].group_count_y = 1;
-        commands_buffers[bucket].commands[command_id].group_count_z = 1;
+		const uint bucket = materials[ draws_buffer.mesh_draws[ draw_id ].material ].type;
+		const uint command_id = atomicAdd( commands_count_buffers[ bucket ].commands_count, 1 );
+		commands_buffers[ bucket ].commands[ command_id ].draw_id = draw_id;
+		commands_buffers[ bucket ].commands[ command_id ].lod = lod;
+		const uint index_count = mesh_lod.indices_count;
+		commands_buffers[ bucket ].commands[ command_id ].index_count = index_count;
+		commands_buffers[ bucket ].commands[ command_id ].instance_count = 1;
+		commands_buffers[ bucket ].commands[ command_id ].first_index = mesh_lod.indices_offset;
+		commands_buffers[ bucket ].commands[ command_id ].vertex_offset = 0;
+		commands_buffers[ bucket ].commands[ command_id ].first_instance = command_id;
+		commands_buffers[ bucket ].commands[ command_id ].group_count_x = ( mesh_lod.meshlets_count + 32 - 1 ) / 32;
+		commands_buffers[ bucket ].commands[ command_id ].group_count_y = 1;
+		commands_buffers[ bucket ].commands[ command_id ].group_count_z = 1;
 
-        atomicAdd( group_meshes[lod], 1 );
-        atomicAdd( group_indices[lod], index_count );
-    }
+		atomicAdd( group_meshes[ lod ], 1 );
+		atomicAdd( group_indices[ lod ], index_count );
+	}
 
-    if ( LATE )
-    {
-        visibility_buffer.draws[draw_id] = uint8_t( visible ? 1 : 0 );
-    }
+	if ( LATE )
+	{
+		visibility_buffer.draws[ draw_id ] = uint8_t( visible ? 1 : 0 );
+	}
 }
 
 void main()
 {
-    if ( gl_LocalInvocationIndex < MESH_LOD_COUNT )
-    {
-        group_meshes[gl_LocalInvocationIndex] = 0;
-        group_indices[gl_LocalInvocationIndex] = 0;
-    }
-    barrier();
+	if ( gl_LocalInvocationIndex < MESH_LOD_COUNT )
+	{
+		group_meshes[ gl_LocalInvocationIndex ] = 0;
+		group_indices[ gl_LocalInvocationIndex ] = 0;
+	}
+	barrier();
 
-    const uint draw_id = gl_GlobalInvocationID.x;
-    if ( draw_id < draws_count )
-    {
-        cull_draw( draw_id );
-    }
-    barrier();
+	const uint draw_id = gl_GlobalInvocationID.x;
+	if ( draw_id < draws_count )
+	{
+		cull_draw( draw_id );
+	}
+	barrier();
 
-    if ( gl_LocalInvocationIndex < MESH_LOD_COUNT && group_meshes[gl_LocalInvocationIndex] != 0 )
-    {
-        atomicAdd( statistics_buffer.meshes[gl_LocalInvocationIndex], group_meshes[gl_LocalInvocationIndex] );
-        atomicAdd( statistics_buffer.indices[gl_LocalInvocationIndex], group_indices[gl_LocalInvocationIndex] );
-    }
+	if ( gl_LocalInvocationIndex < MESH_LOD_COUNT && group_meshes[ gl_LocalInvocationIndex ] != 0 )
+	{
+		atomicAdd( statistics_buffer.meshes[ gl_LocalInvocationIndex ], group_meshes[ gl_LocalInvocationIndex ] );
+		atomicAdd( statistics_buffer.indices[ gl_LocalInvocationIndex ], group_indices[ gl_LocalInvocationIndex ] );
+	}
 }

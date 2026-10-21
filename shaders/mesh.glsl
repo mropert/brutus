@@ -1,86 +1,106 @@
-struct Vertex {
-    vec3 position;
-    float uv_x;
-    vec3 normal;
-    float uv_y;
-    vec4 tangent;
+struct Vertex
+{
+	vec3 position;
+	float uv_x;
+	vec3 normal;
+	float uv_y;
+	vec4 tangent;
 };
 
 struct Material
 {
-    vec4 baseColor;
-    float metalness;
-    float roughness;
-    uint albedo_index;
-    uint normal_index;
-    uint metallic_roughness_index;
-    uint specular_index;
-    uint type;
+	vec4 baseColor;
+	float metalness;
+	float roughness;
+	uint albedo_index;
+	uint normal_index;
+	uint metallic_roughness_index;
+	uint specular_index;
+	uint type;
 };
 
 struct MeshLOD
 {
-    uint indices_offset;
-    uint indices_count;
-    uint meshlets_offset;
-    uint meshlets_count;
-    float error;
+	uint indices_offset;
+	uint indices_count;
+	uint meshlets_offset;
+	uint meshlets_count;
+	float error;
 };
 
-struct Meshlet {
-    uint vertex_offset;
-    uint triangle_offset;
-    uint vertex_count;
-    uint triangle_count;
-    vec4 bounding_sphere;
-    vec4 cone;
+struct Meshlet
+{
+	uint vertex_offset;
+	uint triangle_offset;
+	uint vertex_count;
+	uint triangle_count;
+	vec4 bounding_sphere;
+	vec4 cone;
 };
 
 struct MeshDraw
 {
-    vec3 translation;
-    uint mesh;
-    vec4 rotation;
-    vec3 scale;
-    uint material;
+	vec3 translation;
+	uint mesh;
+	vec4 rotation;
+	vec3 scale;
+	uint material;
 };
 
-layout(buffer_reference, std430) readonly buffer VertexBuffer { Vertex vertices[]; };
-layout(buffer_reference, std430) readonly buffer MaterialBuffer { Material materials[]; };
-layout(buffer_reference, std430) readonly buffer MeshletBuffer { Meshlet meshlets[]; };
-layout(buffer_reference, std430) readonly buffer MeshletVertexBuffer { uint meshlet_vertices[]; };
-layout(buffer_reference) readonly buffer MeshletTriangleBuffer { uint8_t meshlet_triangles[]; };
-layout(buffer_reference, std430) readonly buffer MeshDrawBuffer { MeshDraw mesh_draws[]; };
+layout( buffer_reference, std430 ) readonly buffer VertexBuffer
+{
+	Vertex vertices[];
+};
+layout( buffer_reference, std430 ) readonly buffer MaterialBuffer
+{
+	Material materials[];
+};
+layout( buffer_reference, std430 ) readonly buffer MeshletBuffer
+{
+	Meshlet meshlets[];
+};
+layout( buffer_reference, std430 ) readonly buffer MeshletVertexBuffer
+{
+	uint meshlet_vertices[];
+};
+layout( buffer_reference ) readonly buffer MeshletTriangleBuffer
+{
+	uint8_t meshlet_triangles[];
+};
+layout( buffer_reference, std430 ) readonly buffer MeshDrawBuffer
+{
+	MeshDraw mesh_draws[];
+};
 
 struct Mesh
 {
-    vec4 bounding_sphere;
-    MeshLOD lods[MESH_LOD_COUNT];
-    MeshLOD shadow_lods[MESH_LOD_COUNT]; // For depth-only rendering, only geometric error is considered
-    VertexBuffer vb;
-    MeshletBuffer mb;
-    MeshletVertexBuffer mvb;
-    MeshletTriangleBuffer mtb;
+	vec4 bounding_sphere;
+	MeshLOD lods[ MESH_LOD_COUNT ];
+	MeshLOD shadow_lods[ MESH_LOD_COUNT ]; // For depth-only rendering, only geometric error is considered
+	VertexBuffer vb;
+	MeshletBuffer mb;
+	MeshletVertexBuffer mvb;
+	MeshletTriangleBuffer mtb;
 };
 
 struct MeshletTaskPayload
 {
-    uint meshlets[32];
-    uint draw_id;
+	uint meshlets[ 32 ];
+	uint draw_id;
 };
 
 struct MeshDrawCommand
 {
-    uint draw_id;
-    uint lod;
-    // VkDrawIndexedIndirectCommand 
-    uint index_count;
-    uint instance_count;
-    uint first_index;
-    int vertex_offset;
-    uint first_instance;
-    // VkDrawMeshTasksIndirectCommandEXT
-    uint group_count_x;
-    uint group_count_y;
-    uint group_count_z;
+	uint draw_id;
+	uint lod;
+	// VkDrawIndexedIndirectCommand
+	uint index_count;
+	uint instance_count;
+	uint first_index;
+	int vertex_offset;
+	uint first_instance;
+	// VkDrawMeshTasksIndirectCommandEXT
+	uint group_count_x;
+	uint group_count_y;
+	uint group_count_z;
 };

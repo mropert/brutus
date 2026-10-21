@@ -1,32 +1,41 @@
 #version 450
 #extension GL_ARB_shader_draw_parameters : require
 #extension GL_EXT_buffer_reference : require
-#extension GL_EXT_mesh_shader: require
-#extension GL_EXT_shader_8bit_storage: require
+#extension GL_EXT_mesh_shader : require
+#extension GL_EXT_shader_8bit_storage : require
 #extension GL_GOOGLE_include_directive : require
 
 #include "constants.glsl"
 #include "math.glsl"
 #include "mesh.glsl"
 
-layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+layout( local_size_x = 32, local_size_y = 1, local_size_z = 1 ) in;
 
-layout(std430, set = 1, binding = 0) readonly buffer ssbo1 { Mesh meshes[]; };
-layout(std430, set = 1, binding = 1) readonly buffer ssbo2 { Material materials[]; };
+layout( std430, set = 1, binding = 0 ) readonly buffer ssbo1
+{
+	Mesh meshes[];
+};
+layout( std430, set = 1, binding = 1 ) readonly buffer ssbo2
+{
+	Material materials[];
+};
 
-layout(buffer_reference, std430) readonly buffer DrawCommandsBuffer { MeshDrawCommand commands[]; };
+layout( buffer_reference, std430 ) readonly buffer DrawCommandsBuffer
+{
+	MeshDrawCommand commands[];
+};
 
 layout( push_constant, std430 ) uniform block
 {
-    SceneConstants scene_constants;
-    MeshDrawBuffer draws_buffer;
-    DrawCommandsBuffer commands_buffer;
+	SceneConstants scene_constants;
+	MeshDrawBuffer draws_buffer;
+	DrawCommandsBuffer commands_buffer;
 };
 
 // Shadow passes use their own (depth-only) LOD chain, uniform for the whole draw
-MeshLOD get_mesh_lod(uint mesh_id, uint lod)
+MeshLOD get_mesh_lod( uint mesh_id, uint lod )
 {
-    return scene_constants.shadow_pass != 0 ? meshes[mesh_id].shadow_lods[lod] : meshes[mesh_id].lods[lod];
+	return scene_constants.shadow_pass != 0 ? meshes[ mesh_id ].shadow_lods[ lod ] : meshes[ mesh_id ].lods[ lod ];
 }
 
 shared uint meshlets_count;
@@ -39,74 +48,75 @@ taskPayloadSharedEXT MeshletTaskPayload payload;
 // - Orthographic (eg: directional light shadow maps): all view rays are parallel to the camera forward axis,
 //   so the test only depends on that direction (the meshlet bounding sphere doesn't matter).
 //   Note that camera_position is the main camera in shadow passes, it must not be used there.
-bool coneCull(vec3 center, float radius, vec3 cone_axis, float cone_cutoff, vec3 camera_position)
+bool coneCull( vec3 center, float radius, vec3 cone_axis, float cone_cutoff, vec3 camera_position )
 {
-	return dot(center - camera_position, cone_axis) >= cone_cutoff * length(center - camera_position) + radius;
+	return dot( center - camera_position, cone_axis ) >= cone_cutoff * length( center - camera_position ) + radius;
 }
 
-bool coneCullOrthographic(vec3 cone_axis, float cone_cutoff, vec3 view_direction)
+bool coneCullOrthographic( vec3 cone_axis, float cone_cutoff, vec3 view_direction )
 {
-	return dot(view_direction, cone_axis) >= cone_cutoff;
+	return dot( view_direction, cone_axis ) >= cone_cutoff;
 }
 
 void main()
 {
-    meshlets_count = 0;
-    groupMemoryBarrier();
+	meshlets_count = 0;
+	groupMemoryBarrier();
 
-    const uint draw_id = commands_buffer.commands[gl_DrawIDARB].draw_id;
-    const uint lod = commands_buffer.commands[gl_DrawIDARB].lod;
-    const uint mesh_id = draws_buffer.mesh_draws[draw_id].mesh;
+	const uint draw_id = commands_buffer.commands[ gl_DrawIDARB ].draw_id;
+	const uint lod = commands_buffer.commands[ gl_DrawIDARB ].lod;
+	const uint mesh_id = draws_buffer.mesh_draws[ draw_id ].mesh;
 
-    const MeshLOD mesh_lod = get_mesh_lod(mesh_id, lod);
-    if ( gl_GlobalInvocationID.x >= mesh_lod.meshlets_count )
-    {
-        return;
-    }
+	const MeshLOD mesh_lod = get_mesh_lod( mesh_id, lod );
+	if ( gl_GlobalInvocationID.x >= mesh_lod.meshlets_count )
+	{
+		return;
+	}
 
-    const uint meshlet_id = gl_GlobalInvocationID.x + mesh_lod.meshlets_offset;
-    const Meshlet meshlet = meshes[mesh_id].mb.meshlets[meshlet_id];
+	const uint meshlet_id = gl_GlobalInvocationID.x + mesh_lod.meshlets_offset;
+	const Meshlet meshlet = meshes[ mesh_id ].mb.meshlets[ meshlet_id ];
 
-    const vec3 meshlet_center = rotate_by_quaternion( meshlet.bounding_sphere.xyz, draws_buffer.mesh_draws[draw_id].rotation )
-                                * draws_buffer.mesh_draws[draw_id].scale
-                                + draws_buffer.mesh_draws[draw_id].translation;
+	const vec3 meshlet_center = rotate_by_quaternion( meshlet.bounding_sphere.xyz, draws_buffer.mesh_draws[ draw_id ].rotation )
+			* draws_buffer.mesh_draws[ draw_id ].scale
+		+ draws_buffer.mesh_draws[ draw_id ].translation;
 
-    const float meshlet_radius = meshlet.bounding_sphere.w * max(draws_buffer.mesh_draws[draw_id].scale.x,
-                                                                max(draws_buffer.mesh_draws[draw_id].scale.y, draws_buffer.mesh_draws[draw_id].scale.z));
-    const vec3 cone_axis = rotate_by_quaternion( meshlet.cone.xyz, draws_buffer.mesh_draws[draw_id].rotation );
+	const float meshlet_radius = meshlet.bounding_sphere.w
+		* max( draws_buffer.mesh_draws[ draw_id ].scale.x,
+			   max( draws_buffer.mesh_draws[ draw_id ].scale.y, draws_buffer.mesh_draws[ draw_id ].scale.z ) );
+	const vec3 cone_axis = rotate_by_quaternion( meshlet.cone.xyz, draws_buffer.mesh_draws[ draw_id ].rotation );
 
-    bool visible = true;
-    const uint type = materials[draws_buffer.mesh_draws[draw_id].material].type;
-    if (type == 0 || type == 2)
-    {
-        // Uniform across the whole draw, so the branch doesn't diverge
-        const bool orthographic = scene_constants.projection_matrix[3][3] != 0.0;
-        if (orthographic)
-        {
-            // View space looks down -Z
-            const vec3 view_direction = -scene_constants.inverse_view_matrix[2].xyz;
-            visible = visible && !coneCullOrthographic( cone_axis, meshlet.cone.w, view_direction );
-        }
-        else
-        {
-            visible = visible && !coneCull( meshlet_center, meshlet_radius, cone_axis, meshlet.cone.w, scene_constants.camera_position );
-        }
-    }
-    for ( int i = 0; i < 6; ++i )
-    {
-        visible = visible && dot( scene_constants.frustum[i], vec4( meshlet_center, 1 ) ) > -meshlet_radius;
-    }
-    if ( visible )
-    {
-        const uint index = atomicAdd( meshlets_count, 1 );
-        payload.meshlets[index] = meshlet_id;
-    }
+	bool visible = true;
+	const uint type = materials[ draws_buffer.mesh_draws[ draw_id ].material ].type;
+	if ( type == 0 || type == 2 )
+	{
+		// Uniform across the whole draw, so the branch doesn't diverge
+		const bool orthographic = scene_constants.projection_matrix[ 3 ][ 3 ] != 0.0;
+		if ( orthographic )
+		{
+			// View space looks down -Z
+			const vec3 view_direction = -scene_constants.inverse_view_matrix[ 2 ].xyz;
+			visible = visible && !coneCullOrthographic( cone_axis, meshlet.cone.w, view_direction );
+		}
+		else
+		{
+			visible = visible && !coneCull( meshlet_center, meshlet_radius, cone_axis, meshlet.cone.w, scene_constants.camera_position );
+		}
+	}
+	for ( int i = 0; i < 6; ++i )
+	{
+		visible = visible && dot( scene_constants.frustum[ i ], vec4( meshlet_center, 1 ) ) > -meshlet_radius;
+	}
+	if ( visible )
+	{
+		const uint index = atomicAdd( meshlets_count, 1 );
+		payload.meshlets[ index ] = meshlet_id;
+	}
 
-    groupMemoryBarrier();
+	groupMemoryBarrier();
 
-    if ( gl_LocalInvocationIndex == 0 )
-    {
-        payload.draw_id = draw_id;
-        EmitMeshTasksEXT(meshlets_count, 1, 1);
-    }
+	if ( gl_LocalInvocationIndex == 0 )
+	{
+		payload.draw_id = draw_id;
+		EmitMeshTasksEXT( meshlets_count, 1, 1 );
+	}
 }

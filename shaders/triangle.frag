@@ -1,12 +1,12 @@
 #version 450
 
-layout (location = 0) in vec3 inColor;
-layout (location = 0) out vec4 outFragColor;
+layout( location = 0 ) in vec3 inColor;
+layout( location = 0 ) out vec4 outFragColor;
 
-layout(set = 0, binding = 0) uniform sampler2D albedoTexture;
-layout(set = 0, binding = 1) uniform sampler2D normalTexture;
+layout( set = 0, binding = 0 ) uniform sampler2D albedoTexture;
+layout( set = 0, binding = 1 ) uniform sampler2D normalTexture;
 
-void main() 
+void main()
 {
-	outFragColor = vec4(inColor,1.0f);
+	outFragColor = vec4( inColor, 1.0f );
 }
