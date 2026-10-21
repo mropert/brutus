@@ -11,4 +11,5 @@ layout(buffer_reference, std430) readonly buffer SceneConstants {
 	float sky_to_sun;
 	uint shadow_map;
 	uint shadow_pass; // Non-zero when rendering a shadow map: use shadow (depth-only) LODs
+	vec2 viewport_size; // In pixels
 };

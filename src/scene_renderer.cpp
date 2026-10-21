@@ -93,6 +93,7 @@ namespace
 		float sky_to_sun;
 		renderer::BindlessSampledTexture shadow_map;
 		uint32_t shadow_pass = 0; // Non-zero when rendering a shadow map: use shadow (depth-only) LODs
+		glm::aligned_vec2 viewport_size; // In pixels
 	};
 
 	scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D extent, glm::vec4 main_light, float sky_to_sun )
@@ -109,7 +110,8 @@ namespace
 									.inverse_view_matrix = glm::inverse( view ),
 									.camera_position = camera.position,
 									.main_light = main_light,
-									.sky_to_sun = sky_to_sun };
+									.sky_to_sun = sky_to_sun,
+									.viewport_size = { extent.width, extent.height } };
 
 		// Math from https://github.com/zeux/niagara
 		const float draw_distance = 500.f;
@@ -169,7 +171,8 @@ namespace
 									.inverse_view_matrix = glm::inverse( view ),
 									.camera_position = camera.position,
 									.main_light = { 0.f, 0.f, 0.f, -1.f },
-									.shadow_pass = 1 };
+									.shadow_pass = 1,
+									.viewport_size = { resolution, resolution } };
 
 		const auto transposed_vp = glm::transpose( constants.view_projection_matrix );
 		constants.frustum[ 0 ] = normalize_plane( transposed_vp[ 3 ] + transposed_vp[ 0 ] ); // x + w < 0

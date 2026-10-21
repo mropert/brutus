@@ -12,6 +12,7 @@ layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 layout(triangles, max_vertices = 64, max_primitives = 96) out;
 
 layout(std430, set = 1, binding = 0) readonly buffer ssbo1 { Mesh meshes[]; };
+layout(std430, set = 1, binding = 1) readonly buffer ssbo2 { Material materials[]; };
 
 layout (location = 0) out vec2 outUV[];
 layout (location = 1) out vec3 outWorldPos[];
@@ -30,6 +31,9 @@ layout( push_constant, std430 ) uniform block
 
 taskPayloadSharedEXT MeshletTaskPayload payload;
 
+// Vertex positions in pixels (y up, like NDC) and clip w, for triangle culling
+shared vec3 vertex_pixels[64];
+
 void main()
 {
     const uint draw_id = payload.draw_id;
@@ -45,7 +49,10 @@ void main()
         const vec3 pos = rotate_by_quaternion( v.position, draws_buffer.mesh_draws[draw_id].rotation ) 
                 * draws_buffer.mesh_draws[draw_id].scale
                 + draws_buffer.mesh_draws[draw_id].translation;
-        gl_MeshVerticesEXT[i].gl_Position = scene_constants.view_projection_matrix * vec4(pos, 1);
+        const vec4 clip_pos = scene_constants.view_projection_matrix * vec4(pos, 1);
+        gl_MeshVerticesEXT[i].gl_Position = clip_pos;
+        // Only meaningful for w > 0, triangles with vertices behind the camera are never culled
+        vertex_pixels[i] = vec3((clip_pos.xy / clip_pos.w * 0.5 + 0.5) * scene_constants.viewport_size, clip_pos.w);
         outUV[i].x = v.uv_x;
         outUV[i].y = v.uv_y;
         const vec3 normal = rotate_by_quaternion( v.normal, draws_buffer.mesh_draws[draw_id].rotation );
@@ -56,11 +63,45 @@ void main()
         outMaterial[i] = draws_buffer.mesh_draws[draw_id].material;
     }
 
+    barrier();
+
+    // Triangle culling, saves primitive setup/rasterization cost for triangles that wouldn't produce any sample:
+    // - Back faces of single sided materials, matching the pipeline cull mode (counter-clockwise front faces)
+    // - Zero area triangles
+    // - Small triangles whose bounding box doesn't contain any pixel center. Only for shadow passes for now: with MSAA
+    //   samples aren't at pixel centers
+    const uint material_type = materials[draws_buffer.mesh_draws[draw_id].material].type;
+    const bool single_sided = material_type == 0 || material_type == 2;
+    const bool cull_small_triangles = scene_constants.shadow_pass != 0;
+
     for (uint i = gl_LocalInvocationIndex; i < meshlet.triangle_count; i += gl_WorkGroupSize.x) {
         const uint offset = meshlet.triangle_offset + i * 3;
-        gl_PrimitiveTriangleIndicesEXT[i] = uvec3(
+        const uvec3 triangle = uvec3(
             meshes[mesh_id].mtb.meshlet_triangles[offset],
             meshes[mesh_id].mtb.meshlet_triangles[offset + 1],
             meshes[mesh_id].mtb.meshlet_triangles[offset + 2]);
+        gl_PrimitiveTriangleIndicesEXT[i] = triangle;
+
+        const vec3 a = vertex_pixels[triangle.x];
+        const vec3 b = vertex_pixels[triangle.y];
+        const vec3 c = vertex_pixels[triangle.z];
+
+        // Signed area (times 2): positive for counter-clockwise triangles in y up pixel space
+        const vec2 ab = b.xy - a.xy;
+        const vec2 ac = c.xy - a.xy;
+        const float area = ab.x * ac.y - ab.y * ac.x;
+        bool culled = single_sided ? area <= 0.0 : area == 0.0;
+
+        if (cull_small_triangles)
+        {
+            const vec2 bbox_min = min(a.xy, min(b.xy, c.xy));
+            const vec2 bbox_max = max(a.xy, max(b.xy, c.xy));
+            // Pixel centers are at n + 0.5, both bounds rounding to the same integer means no center in between on that axis
+            culled = culled || any(equal(round(bbox_min), round(bbox_max)));
+        }
+
+        // Pixel positions are meaningless if any vertex is behind the camera, don't cull these
+        culled = culled && a.z > 0.0 && b.z > 0.0 && c.z > 0.0;
+        gl_MeshPrimitivesEXT[i].gl_CullPrimitiveEXT = culled;
     }
 }
