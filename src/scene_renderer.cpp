@@ -94,6 +94,7 @@ namespace
 		renderer::BindlessSampledTexture shadow_map;
 		uint32_t shadow_pass = 0; // Non-zero when rendering a shadow map: use shadow (depth-only) LODs
 		glm::aligned_vec2 viewport_size; // In pixels
+		float shadow_distance = 0.f; // View depth up to which the main light casts shadows
 	};
 
 	scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D extent, glm::vec4 main_light, float sky_to_sun )
@@ -456,6 +457,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		{
 			constants.shadow_view_projection_matrix = _shadow_mvp;
 			constants.shadow_map = _shadowmap.handles.sampled_texture;
+			constants.shadow_distance = shadow_distance;
 		}
 		constants.pbr = use_pbr ? 1 : 0;
 		memcpy( static_cast<scene_constants*>( _constant_buffers.get_mapped_address() ) + frame_index, &constants, sizeof( constants ) );

@@ -25,6 +25,8 @@ layout( push_constant, std430 ) uniform block
 	SceneConstants scene_constants;
 };
 
+#include "shadow.glsl"
+
 const float PI = 3.14159265359;
 
 vec3 fresnelSchlick( float cosTheta, vec3 F0 )
@@ -122,28 +124,7 @@ void main()
 	vec3 N = normalize( inNormal );
 	const float facing = gl_FrontFacing ? 1.0 : -1.0;
 
-	// Shadow
-	float shadow = 1.0;
-	if ( scene_constants.shadow_map != -1 )
-	{
-		const float NdotL_geo = dot( N * facing, L );
-		if ( NdotL_geo > 0.0 )
-		{
-			const vec4 shadow_pos = scene_constants.shadow_view_projection_matrix * vec4( inFragPos, 1.0 );
-			const vec3 shadow_ndc = shadow_pos.xyz / shadow_pos.w;
-			const vec2 shadow_uv = vec2( shadow_ndc.x * 0.5 + 0.5, 0.5 - shadow_ndc.y * 0.5 );
-			if ( all( greaterThanEqual( shadow_uv, vec2( 0 ) ) ) && all( lessThanEqual( shadow_uv, vec2( 1 ) ) ) && shadow_ndc.z >= 0
-				 && shadow_ndc.z <= 1.0 )
-			{
-				const float shadow_bias = max( 0.0005 * ( 1.0 - dot( N * facing, L ) ), 0.0005 );
-				shadow = texture( sampler2DShadow( textures[ scene_constants.shadow_map ], samplers[ 2 ] ),
-								  vec3( shadow_uv, shadow_ndc.z - shadow_bias ) );
-				const vec2 edge = min( shadow_uv, 1.0 - shadow_uv );
-				const float fade = smoothstep( 0.0, 0.1, min( edge.x, edge.y ) );
-				shadow = mix( 1.0, shadow, fade );
-			}
-		}
-	}
+	const float shadow = compute_shadow( scene_constants, inFragPos, N * facing, L );
 
 	if ( materials[ inMaterial ].normal_index != -1 )
 	{

@@ -4,9 +4,13 @@
 
 layout( location = 0 ) in vec2 inGridPos;
 layout( location = 1 ) in vec3 inViewPos;
+layout( location = 2 ) in vec3 inWorldPos;
 layout( location = 0 ) out vec4 outFragColor;
 
 #include "constants.glsl"
+
+layout( set = 0, binding = 0 ) uniform texture2D textures[ 1024 ];
+layout( set = 0, binding = 2 ) uniform sampler samplers[ 8 ];
 
 layout( push_constant ) uniform constants
 {
@@ -16,6 +20,8 @@ layout( push_constant ) uniform constants
 	float far_distance;
 }
 PushConstants;
+
+#include "shadow.glsl"
 
 const int GridMinorsPerMajor = 5;
 const vec3 KeyColor[ 2 ] = { { 1, 0, 0 }, { 0, 0, 1 } };
@@ -85,5 +91,14 @@ void main()
 
 	const float alpha = max( blendFactors.x, blendFactors.y );
 	const vec3 color = max( lineColor[ 0 ] * blendFactors.x, lineColor[ 1 ] * blendFactors.y );
-	outFragColor = vec4( mix( PushConstants.grid_color, color, alpha ), 1 );
+	// The grid is unlit, but receives the main light shadow: scale it the same way direct + ambient lighting would,
+	// so unshadowed parts keep their color and shadowed ones only get the ambient part
+	const vec3 up = vec3( 0, 1, 0 );
+	const vec3 to_light = normalize( -PushConstants.scene_constants.main_light.xyz );
+	const float NdotL = max( dot( up, to_light ), 0.0 );
+	const float shadow = compute_shadow( PushConstants.scene_constants, inWorldPos, up, to_light );
+	const float ambient = PushConstants.scene_constants.sky_to_sun;
+	const float lighting = ( NdotL * shadow + ambient ) / ( NdotL + ambient );
+
+	outFragColor = vec4( mix( PushConstants.grid_color, color, alpha ) * lighting, 1 );
 }

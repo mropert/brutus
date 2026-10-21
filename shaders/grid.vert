@@ -4,6 +4,7 @@
 
 layout( location = 0 ) out vec2 outGridPos;
 layout( location = 1 ) out vec3 outViewPos;
+layout( location = 2 ) out vec3 outWorldPos;
 
 #include "constants.glsl"
 
@@ -27,4 +28,5 @@ void main()
 	gl_Position = PushConstants.scene_constants.view_projection_matrix * vec4( world_pos, 1 );
 	outGridPos = flat_pos + 0.5;
 	outViewPos = ( PushConstants.scene_constants.view_matrix * vec4( world_pos, 1 ) ).xyz;
+	outWorldPos = world_pos;
 }
