@@ -244,7 +244,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 														   .mips = calc_mip_levels( _depth_pyramid_extent ) } ),
 		  true ) )
 	, _shadowmap( bindless_manager.add_texture(
-		  device.create_texture( renderer::Texture::Desc { .format = renderer::Texture::Format::D32_SFLOAT,
+		  device.create_texture( renderer::Texture::Desc { .format = SHADOW_DEPTH_FORMAT,
 														   .usage = usage::DEPTH_STENCIL_ATTACHMENT | usage::SAMPLED,
 														   .extent = { .width = 2048, .height = 2048 },
 														   .layers = SHADOW_CASCADE_MAX } ) ) )
@@ -302,7 +302,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_shaders_defines } } );
 
 	_shadowmap_mesh_pipeline = pipelines.add(
-		renderer::Pipeline::Desc { .depth_format = DEPTH_FORMAT,
+		renderer::Pipeline::Desc { .depth_format = SHADOW_DEPTH_FORMAT,
 								   .depth_compare_op = renderer::CompareOp::LESS,
 								   .push_constants_size = sizeof( draw_meshes_constants ) },
 		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines } } );
@@ -339,7 +339,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 			  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_shaders_defines } } );
 
 		_shadowmap_meshlet_pipeline = pipelines.add(
-			renderer::Pipeline::Desc { .depth_format = DEPTH_FORMAT,
+			renderer::Pipeline::Desc { .depth_format = SHADOW_DEPTH_FORMAT,
 									   .depth_compare_op = renderer::CompareOp::LESS,
 									   .push_constants_size = sizeof( draw_meshes_constants ) },
 			{ { .path = "mesh.task", .stage = renderer::ShaderStage::TASK, .defines = mesh_shaders_defines },

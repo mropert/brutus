@@ -49,6 +49,7 @@ private:
 	static constexpr auto SAMPLE_COUNT = 4;
 	static constexpr auto COLOR_FORMAT = renderer::Texture::Format::R16G16B16A16_SFLOAT;
 	static constexpr auto DEPTH_FORMAT = renderer::Texture::Format::D32_SFLOAT;
+	static constexpr auto SHADOW_DEPTH_FORMAT = renderer::Texture::Format::D16_UNORM;
 
 	void compute_draws( const BindlessManager& bindless_manager,
 						const renderer::PipelineManager& pipelines,
