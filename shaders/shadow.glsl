@@ -8,8 +8,10 @@ layout( set = 0, binding = 0 ) uniform texture2DArray textures_2d_array[ 1024 ];
 const float SHADOW_FADE_RANGE = 0.1;
 // Normal offset at grazing angles, in texels of the selected cascade
 const float SHADOW_NORMAL_OFFSET_TEXELS = 1.5;
+// Half width of the PCF tent filter, in texels (5x5 tent)
+const float SHADOW_PCF_TENT_RADIUS = 2.5;
 // Fraction of each cascade's depth slice over which it blends into the next one
-const float SHADOW_CASCADE_BLEND_RANGE = 0.1;
+const float SHADOW_CASCADE_BLEND_RANGE = 0.25;
 
 // Shadow maps are fitted to the view frustum, so they are selected and faded based on view depth
 float shadow_view_depth( SceneConstants constants, vec3 world_pos )
@@ -41,6 +43,16 @@ vec3 get_shadow_cascade_tint( SceneConstants constants, vec3 world_pos )
 	return tints[ select_shadow_cascade( constants, view_depth ) ];
 }
 
+// Integral of the PCF tent (unit area, half width SHADOW_PCF_TENT_RADIUS) from -infinity to u, u relative to its center
+vec2 shadow_tent_cdf( vec2 u )
+{
+	const float r = SHADOW_PCF_TENT_RADIUS;
+	u = clamp( u, -r, r );
+	const vec2 rising = ( u + r ) * ( u + r ) / ( 2.0 * r * r );
+	const vec2 falling = 1.0 - ( r - u ) * ( r - u ) / ( 2.0 * r * r );
+	return mix( rising, falling, step( 0.0, u ) );
+}
+
 // Returns 1 when lit, 0 when shadowed, -1 when world_pos is outside of the cascade
 float sample_shadow_cascade( SceneConstants constants, vec3 world_pos, vec3 normal, float sin_angle, uint cascade )
 {
@@ -57,8 +69,40 @@ float sample_shadow_cascade( SceneConstants constants, vec3 world_pos, vec3 norm
 		return -1.0;
 	}
 
-	return texture( sampler2DArrayShadow( textures_2d_array[ constants.shadow_map ], samplers[ 2 ] ),
-					vec4( shadow_uv, cascade, shadow_ndc.z ) );
+	// 5x5 tent filter in texels. The tent always fits in the 6x6 texels around the texel corner closest to its center.
+	// Each texel's weight is the tent area over it, and each pair of texels is read with one hardware bilinear compare
+	// placed between their centers in proportion to their weights, so 3x3 taps reproduce the 36 weights exactly
+	const vec2 map_size = vec2( textureSize( sampler2DArrayShadow( textures_2d_array[ constants.shadow_map ], samplers[ 2 ] ), 0 ).xy );
+	const vec2 tent_center = shadow_uv * map_size;
+	const vec2 corner = floor( tent_center + 0.5 );
+	const vec2 center_offset = tent_center - corner; // In [-0.5, 0.5]
+
+	vec2 tap_weights[ 3 ];
+	vec2 tap_positions[ 3 ];
+	vec2 cdf_start = shadow_tent_cdf( -3.0 - center_offset );
+	for ( int i = 0; i < 3; ++i )
+	{
+		// Texels a and b span [corner + 2i - 3, corner + 2i - 1]
+		const vec2 cdf_middle = shadow_tent_cdf( float( 2 * i - 2 ) - center_offset );
+		const vec2 cdf_end = shadow_tent_cdf( float( 2 * i - 1 ) - center_offset );
+		const vec2 weight_a = cdf_middle - cdf_start;
+		const vec2 weight_b = cdf_end - cdf_middle;
+		tap_weights[ i ] = weight_a + weight_b;
+		tap_positions[ i ] = ( corner + float( 2 * i - 3 ) + 0.5 + weight_b / tap_weights[ i ] ) / map_size;
+		cdf_start = cdf_end;
+	}
+
+	float lit = 0.0;
+	for ( int y = 0; y < 3; ++y )
+	{
+		for ( int x = 0; x < 3; ++x )
+		{
+			lit += tap_weights[ x ].x * tap_weights[ y ].y
+				* texture( sampler2DArrayShadow( textures_2d_array[ constants.shadow_map ], samplers[ 2 ] ),
+						   vec4( tap_positions[ x ].x, tap_positions[ y ].y, cascade, shadow_ndc.z ) );
+		}
+	}
+	return lit;
 }
 
 // Returns 1 when fully lit, 0 when fully shadowed
