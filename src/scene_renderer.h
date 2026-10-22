@@ -52,6 +52,9 @@ private:
 	static constexpr auto COLOR_FORMAT = renderer::Texture::Format::R16G16B16A16_SFLOAT;
 	static constexpr auto DEPTH_FORMAT = renderer::Texture::Format::D32_SFLOAT;
 	static constexpr auto SHADOW_DEPTH_FORMAT = renderer::Texture::Format::D16_UNORM;
+	// Rasterizer bias of shadow casters, in D16 units (1/65536 of the cascade depth range)
+	static constexpr float SHADOW_DEPTH_BIAS_CONSTANT = 1.f;
+	static constexpr float SHADOW_DEPTH_BIAS_SLOPE = 2.f;
 
 	void compute_draws( const BindlessManager& bindless_manager,
 						const renderer::PipelineManager& pipelines,
@@ -95,6 +98,7 @@ private:
 	{
 		std::array<glm::mat4, SHADOW_CASCADE_MAX> view_projections;
 		glm::vec4 splits; // Far view depth of each cascade
+		glm::vec4 texel_sizes; // World size of a shadow map texel in each cascade
 		uint32_t count = 0;
 	};
 

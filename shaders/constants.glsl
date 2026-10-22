@@ -8,6 +8,7 @@ layout( buffer_reference, std430 ) readonly buffer SceneConstants
 	mat4 inverse_view_matrix;
 	mat4 shadow_view_projection_matrices[ SHADOW_CASCADE_MAX ];
 	vec4 shadow_cascade_splits; // Far view depth of each cascade
+	vec4 shadow_cascade_texel_sizes; // World size of a shadow map texel in each cascade
 	vec4 frustum[ 6 ];
 	vec3 camera_position;
 	uint pbr;

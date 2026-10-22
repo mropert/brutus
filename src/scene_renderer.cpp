@@ -93,6 +93,7 @@ namespace
 		glm::mat4 inverse_view_matrix;
 		std::array<glm::mat4, SceneRenderer::SHADOW_CASCADE_MAX> shadow_view_projection_matrices;
 		glm::aligned_vec4 shadow_cascade_splits; // Far view depth of each cascade
+		glm::aligned_vec4 shadow_cascade_texel_sizes; // World size of a shadow map texel in each cascade
 		std::array<glm::aligned_vec4, 6> frustum;
 		glm::vec3 camera_position;
 		uint32_t pbr;
@@ -498,6 +499,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		{
 			constants.shadow_view_projection_matrices = shadow_cascades.view_projections;
 			constants.shadow_cascade_splits = shadow_cascades.splits;
+			constants.shadow_cascade_texel_sizes = shadow_cascades.texel_sizes;
 			constants.shadow_cascade_count = shadow_cascades.count;
 			constants.show_shadow_cascades = show_shadow_cascades ? 1 : 0;
 			constants.shadow_map = _shadowmap.handles.sampled_texture;
@@ -882,6 +884,7 @@ SceneRenderer::ShadowCascades SceneRenderer::draw_shadowmap( const BindlessManag
 		const auto constants_address = _shadowmap_constant_buffers.get_device_address() + ( constants_index * sizeof( scene_constants ) );
 
 		const float texel_world_size = 2.f / ( constants.projection_matrix[ 0 ][ 0 ] * shadowmap_resolution );
+		cascades.texel_sizes[ static_cast<glm::length_t>( cascade ) ] = texel_world_size;
 		const float lod_target = texel_world_size * 2.f;
 
 		compute_draws( bindless_manager,
@@ -904,7 +907,10 @@ SceneRenderer::ShadowCascades SceneRenderer::draw_shadowmap( const BindlessManag
 		{
 			const auto bucket = std::to_underlying( material_type::OPAQUE_SINGLE );
 			const auto& commands = _shadowmap_draw_commands_buffers[ bucket + i ];
-			cmd.set_dynamic_state( { .viewport = _shadowmap.texture.get_extent(), .cull_mode = bucket_cull_mode( i ) } );
+			cmd.set_dynamic_state( { .viewport = _shadowmap.texture.get_extent(),
+									 .cull_mode = bucket_cull_mode( i ),
+									 .depth_bias_constant = SHADOW_DEPTH_BIAS_CONSTANT,
+									 .depth_bias_slope = SHADOW_DEPTH_BIAS_SLOPE } );
 			draw_constants.commands_buffer = commands.get_device_address() + sizeof( uint32_t );
 			cmd.push_constants( pipeline, draw_constants );
 			if ( use_mesh_shader )

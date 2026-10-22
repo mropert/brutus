@@ -6,6 +6,8 @@ layout( set = 0, binding = 0 ) uniform texture2DArray textures_2d_array[ 1024 ];
 
 // Fraction of the shadow distance over which shadows fade out
 const float SHADOW_FADE_RANGE = 0.1;
+// Normal offset at grazing angles, in texels of the selected cascade
+const float SHADOW_NORMAL_OFFSET_TEXELS = 1.5;
 
 // Shadow maps are fitted to the view frustum, so they are selected and faded based on view depth
 float shadow_view_depth( SceneConstants constants, vec3 world_pos )
@@ -60,8 +62,13 @@ float compute_shadow( SceneConstants constants, vec3 world_pos, vec3 normal, vec
 		return 1.0;
 	}
 
+	// Normal offset: move the lookup off the surface by a few texels, more at grazing angles where a texel covers
+	// a larger depth range of the receiver
 	const uint cascade = select_shadow_cascade( constants, view_depth );
-	const vec4 shadow_pos = constants.shadow_view_projection_matrices[ cascade ] * vec4( world_pos, 1.0 );
+	const float sin_angle = sqrt( 1.0 - NdotL * NdotL );
+	const vec3 offset_pos = world_pos
+		+ normal * ( constants.shadow_cascade_texel_sizes[ cascade ] * SHADOW_NORMAL_OFFSET_TEXELS * sin_angle );
+	const vec4 shadow_pos = constants.shadow_view_projection_matrices[ cascade ] * vec4( offset_pos, 1.0 );
 	const vec3 shadow_ndc = shadow_pos.xyz / shadow_pos.w;
 	const vec2 shadow_uv = vec2( shadow_ndc.x * 0.5 + 0.5, 0.5 - shadow_ndc.y * 0.5 );
 	if ( any( lessThan( shadow_uv, vec2( 0.0 ) ) ) || any( greaterThan( shadow_uv, vec2( 1.0 ) ) ) || shadow_ndc.z < 0.0
@@ -70,8 +77,7 @@ float compute_shadow( SceneConstants constants, vec3 world_pos, vec3 normal, vec
 		return 1.0;
 	}
 
-	const float shadow_bias = max( 0.0005 * ( 1.0 - NdotL ), 0.0005 );
 	const float shadow = texture( sampler2DArrayShadow( textures_2d_array[ constants.shadow_map ], samplers[ 2 ] ),
-								  vec4( shadow_uv, cascade, shadow_ndc.z - shadow_bias ) );
+								  vec4( shadow_uv, cascade, shadow_ndc.z ) );
 	return mix( 1.0, shadow, fade );
 }
