@@ -126,8 +126,9 @@ void main()
 	if ( meshlet_pass != MESHLET_PASS_NONE )
 	{
 		const uint visibility_bit = draws_buffer.mesh_draws[ draw_id ].meshlet_visibility_offset + meshlet_id;
-		const uint visibility_mask = 1u << ( visibility_bit % 32 );
-		const bool was_visible = ( meshlet_visibility.bits[ visibility_bit / 32 ] & visibility_mask ) != 0;
+		const uint visibility_word = visibility_bit >> 5;
+		const uint visibility_mask = 1u << ( visibility_bit & 31 );
+		const bool was_visible = ( meshlet_visibility.bits[ visibility_word ] & visibility_mask ) != 0;
 		if ( meshlet_pass == MESHLET_PASS_EARLY )
 		{
 			visible = visible && was_visible;
@@ -162,11 +163,11 @@ void main()
 			{
 				if ( visible )
 				{
-					atomicOr( meshlet_visibility.bits[ visibility_bit / 32 ], visibility_mask );
+					atomicOr( meshlet_visibility.bits[ visibility_word ], visibility_mask );
 				}
 				else
 				{
-					atomicAnd( meshlet_visibility.bits[ visibility_bit / 32 ], ~visibility_mask );
+					atomicAnd( meshlet_visibility.bits[ visibility_word ], ~visibility_mask );
 				}
 			}
 
