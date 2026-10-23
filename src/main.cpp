@@ -372,7 +372,8 @@ int main( int argc, char** argv )
 
 	SceneRenderer scene_renderer( device, swapchain_format, bindless_manager, pipelines );
 
-	index_buffer indices( device, 128 * 1024 * 1024 );
+	// Bistro needs ~27M
+	index_buffer indices( device, 32 * 1024 * 1024 );
 	std::vector<asset> assets;
 #ifndef BISTRO
 	assets.push_back( load_asset( device, bindless_manager, indices, "assets/player.glb" ) );
