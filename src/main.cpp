@@ -145,9 +145,8 @@ struct Timings
 
 void draw_ui( ui_data& data,
 			  const renderer::Device::Properties& props,
+			  const renderer::MemoryUsage& memory_usage,
 			  const BindlessManager& bindless_manager,
-			  const index_buffer& index_buffer,
-			  std::span<const asset> assets,
 			  std::span<const float> gpu_timings,
 			  const renderer::Statistics& stats,
 			  const SceneRenderer::DrawStatistics& scene_stats,
@@ -162,18 +161,20 @@ void draw_ui( ui_data& data,
 					 props.host_memory_size >> 20,
 					 props.device_memory_size >> 20,
 					 props.transfer_memory_size >> 20 );
-		ImGui::SeparatorText( "VRAM usage" );
-		ImGui::Text( "Textures (MB): %zu", bindless_manager.get_texture_memory_usage() >> 20 );
-		size_t meshes_bytes = 0;
-		for ( const auto& asset : assets )
-		{
-			for ( const auto& mesh : asset.meshes )
-			{
-				meshes_bytes += mesh.data_buffer.get_size();
-			}
-		}
-		ImGui::Text( "Meshes (MB): %zu", meshes_bytes >> 20 );
-		ImGui::Text( "Indices (MB): %zu", ( index_buffer.size * sizeof( uint32_t ) ) >> 20 );
+		ImGui::SeparatorText( "Memory usage" );
+		ImGui::Text( "Memory (MB): RAM: %zu, VRAM: %zu, BAR: %zu",
+					 memory_usage.ram >> 20,
+					 memory_usage.vram >> 20,
+					 memory_usage.bar >> 20 );
+		const auto resource_mb = [ & ]( renderer::MemoryResource resource )
+		{ return memory_usage.resources[ std::to_underlying( resource ) ] >> 20; };
+		ImGui::Text( "Textures (MB): %zu (bindless: %zu)",
+					 resource_mb( renderer::MemoryResource::TEXTURE ),
+					 bindless_manager.get_texture_memory_usage() >> 20 );
+		ImGui::Text( "Buffers (MB): storage: %zu, index: %zu, other: %zu",
+					 resource_mb( renderer::MemoryResource::STORAGE_BUFFER ),
+					 resource_mb( renderer::MemoryResource::INDEX_BUFFER ),
+					 resource_mb( renderer::MemoryResource::OTHER_BUFFER ) );
 
 		if ( props.statistics_support )
 		{
@@ -546,7 +547,14 @@ int main( int argc, char** argv )
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
-		draw_ui( ui_state, props, bindless_manager, indices, assets, gpu_timings.averages, stats, scene_renderer.get_statistics(), camera );
+		draw_ui( ui_state,
+				 props,
+				 device.get_memory_usage(),
+				 bindless_manager,
+				 gpu_timings.averages,
+				 stats,
+				 scene_renderer.get_statistics(),
+				 camera );
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
