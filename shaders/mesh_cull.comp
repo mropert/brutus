@@ -53,35 +53,13 @@ layout( push_constant ) uniform block
 	uint draws_count;
 	float lod_target;
 	uint depth_pyramid;
+	uint meshlet_occlusion; // Non-zero when task shaders cull meshlets against the depth pyramid
 };
 
 // Shadow passes use their own (depth-only) LOD chain, uniform for the whole dispatch
 MeshLOD get_mesh_lod( uint mesh_id, uint lod )
 {
 	return scene_constants.shadow_pass != 0 ? meshes[ mesh_id ].shadow_lods[ lod ] : meshes[ mesh_id ].lods[ lod ];
-}
-
-// 2D Polyhedral Bounds of a Clipped, Perspective-Projected 3D Sphere. Michael Mara, Morgan McGuire. 2013
-bool projectSphere( vec3 c, float r, float znear, float P00, float P11, out vec4 aabb )
-{
-	if ( c.z < r + znear )
-		return false;
-
-	vec3 cr = c * r;
-	float czr2 = c.z * c.z - r * r;
-
-	float vx = sqrt( c.x * c.x + czr2 );
-	float minx = ( vx * c.x - cr.z ) / ( vx * c.z + cr.x );
-	float maxx = ( vx * c.x + cr.z ) / ( vx * c.z - cr.x );
-
-	float vy = sqrt( c.y * c.y + czr2 );
-	float miny = ( vy * c.y - cr.z ) / ( vy * c.z + cr.y );
-	float maxy = ( vy * c.y + cr.z ) / ( vy * c.z - cr.y );
-
-	aabb = vec4( minx * P00, miny * P11, maxx * P00, maxy * P11 );
-	aabb = aabb.xwzy * vec4( 0.5f, -0.5f, 0.5f, -0.5f ) + vec4( 0.5f ); // clip space -> uv space
-
-	return true;
 }
 
 void cull_draw( uint draw_id )
@@ -127,8 +105,13 @@ void cull_draw( uint draw_id )
 		}
 	}
 
-	if ( visible && ( !LATE || !was_visible ) )
+	// With meshlet occlusion, draws already drawn by the early pass are emitted again so that task shaders can test the
+	// meshlets that were hidden last frame
+	const bool drawn_early = LATE && was_visible;
+	if ( visible && ( !drawn_early || meshlet_occlusion != 0 ) )
 	{
+		// Both passes must select the same LOD: meshlet visibility bits are per LOD, and the late pass skips the meshlets
+		// the early pass drew
 		float dist = 1;
 		if ( scene_constants.projection_matrix[ 3 ][ 3 ] == 0.f )
 		{
@@ -148,6 +131,7 @@ void cull_draw( uint draw_id )
 		const uint command_id = atomicAdd( commands_count_buffers[ bucket ].commands_count, 1 );
 		commands_buffers[ bucket ].commands[ command_id ].draw_id = draw_id;
 		commands_buffers[ bucket ].commands[ command_id ].lod = lod;
+		commands_buffers[ bucket ].commands[ command_id ].drawn_early = drawn_early ? 1 : 0;
 		const uint index_count = mesh_lod.indices_count;
 		commands_buffers[ bucket ].commands[ command_id ].index_count = index_count;
 		commands_buffers[ bucket ].commands[ command_id ].instance_count = 1;
@@ -158,8 +142,11 @@ void cull_draw( uint draw_id )
 		commands_buffers[ bucket ].commands[ command_id ].group_count_y = 1;
 		commands_buffers[ bucket ].commands[ command_id ].group_count_z = 1;
 
-		atomicAdd( group_meshes[ lod ], 1 );
-		atomicAdd( group_indices[ lod ], index_count );
+		if ( !drawn_early )
+		{
+			atomicAdd( group_meshes[ lod ], 1 );
+			atomicAdd( group_indices[ lod ], index_count );
+		}
 	}
 
 	if ( LATE )

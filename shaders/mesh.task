@@ -20,16 +20,30 @@ layout( std430, set = 1, binding = 1 ) readonly buffer ssbo2
 	Material materials[];
 };
 
+layout( set = 0, binding = 0 ) uniform texture2D textures[ 1024 ];
+layout( set = 0, binding = 2 ) uniform sampler samplers[ 8 ];
+
 layout( buffer_reference, std430 ) readonly buffer DrawCommandsBuffer
 {
 	MeshDrawCommand commands[];
 };
+layout( buffer_reference, std430 ) buffer MeshletVisibilityBuffer
+{
+	uint bits[];
+};
+
+const uint MESHLET_PASS_NONE = 0; // Draw all meshlets that pass frustum and cone culling
+const uint MESHLET_PASS_EARLY = 1; // Only meshlets visible last frame
+const uint MESHLET_PASS_LATE = 2; // Test meshlets against the depth pyramid, update their visibility
 
 layout( push_constant, std430 ) uniform block
 {
 	SceneConstants scene_constants;
 	MeshDrawBuffer draws_buffer;
 	DrawCommandsBuffer commands_buffer;
+	MeshletVisibilityBuffer meshlet_visibility;
+	uint depth_pyramid;
+	uint meshlet_pass;
 };
 
 // Shadow passes use their own (depth-only) LOD chain, uniform for the whole draw
@@ -106,7 +120,62 @@ void main()
 	{
 		visible = visible && dot( scene_constants.frustum[ i ], vec4( meshlet_center, 1 ) ) > -meshlet_radius;
 	}
-	if ( visible )
+
+	bool skip = false;
+	// Only main LOD meshlets have visibility bits, shadow passes use MESHLET_PASS_NONE
+	if ( meshlet_pass != MESHLET_PASS_NONE )
+	{
+		const uint visibility_bit = draws_buffer.mesh_draws[ draw_id ].meshlet_visibility_offset + meshlet_id;
+		const uint visibility_mask = 1u << ( visibility_bit % 32 );
+		const bool was_visible = ( meshlet_visibility.bits[ visibility_bit / 32 ] & visibility_mask ) != 0;
+		if ( meshlet_pass == MESHLET_PASS_EARLY )
+		{
+			visible = visible && was_visible;
+		}
+		else
+		{
+			if ( visible )
+			{
+				vec4 aabb;
+				const vec3 center = ( scene_constants.view_matrix * vec4( meshlet_center, 1 ) ).xyz * vec3( 1, 1, -1 );
+				const float znear = scene_constants.projection_matrix[ 3 ][ 2 ];
+				const uint pyramidWidth = 1024;
+				const uint pyramidHeight = 1024;
+				if ( projectSphere( center,
+									meshlet_radius,
+									znear,
+									scene_constants.projection_matrix[ 0 ][ 0 ],
+									scene_constants.projection_matrix[ 1 ][ 1 ],
+									aabb ) )
+				{
+					const float width = ( aabb.z - aabb.x ) * pyramidWidth;
+					const float height = ( aabb.w - aabb.y ) * pyramidHeight;
+					const float level = ceil( log2( max( width, height ) ) );
+					const float
+						depth = textureLod( sampler2D( textures[ depth_pyramid ], samplers[ 1 ] ), ( aabb.xy + aabb.zw ) * 0.5, level ).x;
+					const float depth_sphere = znear / ( center.z - meshlet_radius );
+					visible = depth_sphere > depth;
+				}
+			}
+
+			if ( visible != was_visible )
+			{
+				if ( visible )
+				{
+					atomicOr( meshlet_visibility.bits[ visibility_bit / 32 ], visibility_mask );
+				}
+				else
+				{
+					atomicAnd( meshlet_visibility.bits[ visibility_bit / 32 ], ~visibility_mask );
+				}
+			}
+
+			// Already drawn by the early pass
+			skip = was_visible && commands_buffer.commands[ gl_DrawIDARB ].drawn_early != 0;
+		}
+	}
+
+	if ( visible && !skip )
 	{
 		const uint index = atomicAdd( meshlets_count, 1 );
 		payload.meshlets[ index ] = meshlet_id;

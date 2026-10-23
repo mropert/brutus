@@ -45,6 +45,7 @@ struct MeshDraw
 	vec4 rotation;
 	vec3 scale;
 	uint material;
+	uint meshlet_visibility_offset; // First bit of this draw in the meshlet visibility buffer, one bit per main LOD meshlet
 };
 
 layout( buffer_reference, std430 ) readonly buffer VertexBuffer
@@ -93,6 +94,7 @@ struct MeshDrawCommand
 {
 	uint draw_id;
 	uint lod;
+	uint drawn_early; // Late pass only: the early pass already drew the meshlets that were visible last frame
 	// VkDrawIndexedIndirectCommand
 	uint index_count;
 	uint instance_count;

@@ -1002,8 +1002,8 @@ private:
 		mesh.gpu_data.bounding_sphere.w = bounds.radius;
 
 		// Index buffer + LOD descriptors, shadow meshlets are stored after the regular ones
-		const auto shadow_meshlets_offset = upload_lods( upload_data.indices, upload_data.lods, 0, mesh.gpu_data.lods );
-		upload_lods( upload_data.shadow_indices, upload_data.shadow_lods, shadow_meshlets_offset, mesh.gpu_data.shadow_lods );
+		mesh.meshlets_count = upload_lods( upload_data.indices, upload_data.lods, 0, mesh.gpu_data.lods );
+		upload_lods( upload_data.shadow_indices, upload_data.shadow_lods, mesh.meshlets_count, mesh.gpu_data.shadow_lods );
 
 		// Data buffer (vertices + meshlets)
 		auto data_buffer_size = upload_data.vertices.size() * sizeof( mesh_vertex );

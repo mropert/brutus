@@ -26,7 +26,7 @@ public:
 				   BindlessManager& bindless_manager,
 				   renderer::PipelineManager& pipeline_manager );
 
-	void add_mesh( mesh_handle mesh, glm::vec3 translation, glm::quat rotation, glm::vec3 scale, material_handle material );
+	void add_mesh( const mesh& mesh, glm::vec3 translation, glm::quat rotation, glm::vec3 scale, material_handle material );
 	void clear_meshes();
 
 	void render( const BindlessManager& bindless_manager,
@@ -52,6 +52,8 @@ private:
 	static constexpr auto COLOR_FORMAT = renderer::Texture::Format::R16G16B16A16_SFLOAT;
 	static constexpr auto DEPTH_FORMAT = renderer::Texture::Format::D32_SFLOAT;
 	static constexpr auto SHADOW_DEPTH_FORMAT = renderer::Texture::Format::D16_UNORM;
+	// The 100x100 benchmark crowd (~40k draws) needs ~12M bits
+	static constexpr uint32_t MAX_MESHLET_VISIBILITY_BITS = 32 * 1024 * 1024;
 	// Rasterizer bias of shadow casters, in D16 units (1/65536 of the cascade depth range)
 	static constexpr float SHADOW_DEPTH_BIAS_CONSTANT = 1.f;
 	static constexpr float SHADOW_DEPTH_BIAS_SLOPE = 2.f;
@@ -65,18 +67,28 @@ private:
 						renderer::BufferHandle stats_buffer_address,
 						const std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT>& draw_commands,
 						float lod_target,
-						bool early ) const;
+						bool early,
+						bool meshlet_occlusion ) const;
+	// Matches MESHLET_PASS_* in mesh.task
+	enum class MeshletPass : uint32_t
+	{
+		NONE = 0,
+		EARLY,
+		LATE
+	};
 	void draw_opaques( const BindlessManager& bindless_manager,
 					   const renderer::PipelineManager& pipelines,
 					   renderer::CommandBuffer& cmd,
 					   renderer::BufferHandle constants_address,
 					   renderer::BufferHandle draw_buffer_address,
-					   bool use_mesh_shader ) const;
+					   bool use_mesh_shader,
+					   MeshletPass meshlet_pass ) const;
 	void draw_opaque_meshlets( const BindlessManager& bindless_manager,
 							   const renderer::PipelineManager& pipelines,
 							   renderer::CommandBuffer& cmd,
 							   renderer::BufferHandle constants_address,
-							   renderer::BufferHandle draw_buffer_address ) const;
+							   renderer::BufferHandle draw_buffer_address,
+							   MeshletPass meshlet_pass ) const;
 	void draw_opaque_meshes( const BindlessManager& bindless_manager,
 							 const renderer::PipelineManager& pipelines,
 							 renderer::CommandBuffer& cmd,
@@ -120,7 +132,10 @@ private:
 		glm::quat rotation;
 		glm::vec3 scale;
 		material_handle material;
+		uint32_t meshlet_visibility_offset;
+		uint32_t padding[ 3 ]; // std430 rounds the GPU struct size to its 16 bytes alignment
 	};
+	static_assert( sizeof( MeshDraw ) == 64 );
 
 	renderer::Extent2D _extent;
 	renderer::Extent2D _depth_pyramid_extent;
@@ -138,6 +153,9 @@ private:
 	renderer::raii::Buffer _draw_buffers;
 	renderer::raii::Buffer _draw_visibility_buffer;
 	renderer::raii::Buffer _shadowmap_visibility_buffer;
+	// One bit per main LOD meshlet of each draw, not reset when the scene changes: the late pass corrects stale bits
+	renderer::raii::Buffer _meshlet_visibility_buffer;
+	uint32_t _meshlet_visibility_bits = 0;
 	std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT> _draw_commands_buffers;
 	std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT> _shadowmap_draw_commands_buffers;
 	renderer::raii::Buffer _draw_statistics_buffer; // GPU only, accumulated by culling

@@ -35,6 +35,7 @@ namespace
 	{
 		uint32_t draw_id;
 		uint32_t lod;
+		uint32_t drawn_early;
 		VkDrawIndexedIndirectCommand draw_cmd;
 		VkDrawMeshTasksIndirectCommandEXT mesh_cmd;
 	};
@@ -50,6 +51,10 @@ namespace
 		renderer::BufferHandle scene_constants;
 		renderer::BufferHandle draws_buffer;
 		renderer::BufferHandle commands_buffer;
+		// Task shader only
+		renderer::BufferHandle meshlet_visibility;
+		renderer::BindlessSampledTexture depth_pyramid;
+		uint32_t meshlet_pass = 0;
 	};
 
 	struct grid_constants
@@ -78,6 +83,7 @@ namespace
 		uint32_t draws_count;
 		float lod_target;
 		renderer::BindlessSampledTexture depth_pyramid;
+		uint32_t meshlet_occlusion;
 	};
 
 	glm::vec4 normalize_plane( const glm::vec4& plane )
@@ -266,6 +272,9 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 	, _shadowmap_visibility_buffer( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
 															  | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 														  MAX_DRAWS ) )
+	, _meshlet_visibility_buffer(
+		  device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+								MAX_MESHLET_VISIBILITY_BITS / 8 ) )
 	, _draw_statistics_buffer( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_SRC
 														 | renderer::Buffer::Usage::TRANSFER_DST
 														 | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
@@ -408,16 +417,25 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 	}
 }
 
-void SceneRenderer::add_mesh( mesh_handle mesh, glm::vec3 translation, glm::quat rotation, glm::vec3 scale, material_handle material )
+void SceneRenderer::add_mesh( const mesh& mesh, glm::vec3 translation, glm::quat rotation, glm::vec3 scale, material_handle material )
 {
 	assert( _scene.size() < MAX_DRAWS );
-	_scene.push_back( MeshDraw { .translation = translation, .mesh = mesh, .rotation = rotation, .scale = scale, .material = material } );
+	assert( _meshlet_visibility_bits + mesh.meshlets_count <= MAX_MESHLET_VISIBILITY_BITS );
+
+	_scene.push_back( MeshDraw { .translation = translation,
+								 .mesh = mesh.handle,
+								 .rotation = rotation,
+								 .scale = scale,
+								 .material = material,
+								 .meshlet_visibility_offset = _meshlet_visibility_bits } );
+	_meshlet_visibility_bits += mesh.meshlets_count;
 	_needs_rebuild = true;
 }
 
 void SceneRenderer::clear_meshes()
 {
 	_scene.clear();
+	_meshlet_visibility_bits = 0;
 	_needs_rebuild = true;
 }
 
@@ -510,6 +528,16 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 	}
 	const auto constants_address = _constant_buffers.get_device_address() + ( frame_index * sizeof( scene_constants ) );
 
+	const bool use_mesh_shader = index_buffer == nullptr;
+	const bool meshlet_occlusion = use_occlusion_culling && use_mesh_shader;
+	if ( meshlet_occlusion )
+	{
+		// Previous frame's late pass wrote the bits the early pass reads
+		cmd.buffer_barrier( _meshlet_visibility_buffer,
+							renderer::ResourceState::SHADER_STORAGE_READ_WRITE,
+							renderer::ResourceState::SHADER_STORAGE_READ_WRITE );
+	}
+
 	{
 		const auto label = cmd.debug_label( "Opaque Early" );
 		cmd.texture_barrier( _color_texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::COLOR_ATTACHMENT );
@@ -528,13 +556,20 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 					   _draw_statistics_buffer.get_device_address(),
 					   _draw_commands_buffers,
 					   lod_pixel_tolerance / ( _extent.height / ( 2 * std::tan( FOV * 0.5f ) ) ),
-					   true );
+					   true,
+					   meshlet_occlusion );
 
 		cmd.begin_rendering( { .color_target = { .target = _color_texture_view, .clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } } },
 							   .depth_target = { .target = _depth_texture_view,
 												 .resolve_target = _resolved_depth_texture.handles.view,
 												 .clear_value = { { 0.f } } } } );
-		draw_opaques( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address, index_buffer == nullptr );
+		draw_opaques( bindless_manager,
+					  pipelines,
+					  cmd,
+					  constants_address,
+					  draw_buffer_address,
+					  use_mesh_shader,
+					  meshlet_occlusion ? MeshletPass::EARLY : MeshletPass::NONE );
 		cmd.end_rendering();
 	}
 
@@ -585,10 +620,23 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 					   _draw_statistics_buffer.get_device_address(),
 					   _draw_commands_buffers,
 					   lod_pixel_tolerance / ( _extent.height / ( 2 * std::tan( FOV * 0.5f ) ) ),
-					   false );
+					   false,
+					   meshlet_occlusion );
 
+		if ( meshlet_occlusion )
+		{
+			cmd.buffer_barrier( _meshlet_visibility_buffer,
+								renderer::ResourceState::SHADER_STORAGE_READ_WRITE,
+								renderer::ResourceState::SHADER_STORAGE_READ_WRITE );
+		}
 		cmd.begin_rendering( { .color_target = { .target = _color_texture_view }, .depth_target = { .target = _depth_texture_view } } );
-		draw_opaques( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address, index_buffer == nullptr );
+		draw_opaques( bindless_manager,
+					  pipelines,
+					  cmd,
+					  constants_address,
+					  draw_buffer_address,
+					  use_mesh_shader,
+					  meshlet_occlusion ? MeshletPass::LATE : MeshletPass::NONE );
 		cmd.end_rendering();
 	}
 
@@ -657,7 +705,8 @@ void SceneRenderer::compute_draws( const BindlessManager& bindless_manager,
 								   renderer::BufferHandle stats_buffer_address,
 								   const std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT>& draw_commands,
 								   float lod_target,
-								   bool early ) const
+								   bool early,
+								   bool meshlet_occlusion ) const
 {
 	PROFILER_GPU_EVENT( "Compute Draws" );
 	const auto label = cmd.debug_label( "Culling" );
@@ -666,7 +715,8 @@ void SceneRenderer::compute_draws( const BindlessManager& bindless_manager,
 										.statistics_buffer = stats_buffer_address,
 										.scene_constants = constants_address,
 										.draws_count = static_cast<uint32_t>( _scene.size() ),
-										.lod_target = lod_target };
+										.lod_target = lod_target,
+										.meshlet_occlusion = meshlet_occlusion ? 1u : 0u };
 
 	if ( !early )
 	{
@@ -699,14 +749,15 @@ void SceneRenderer::draw_opaques( const BindlessManager& bindless_manager,
 								  renderer::CommandBuffer& cmd,
 								  renderer::BufferHandle constants_address,
 								  renderer::BufferHandle draw_buffer_address,
-								  bool use_mesh_shader ) const
+								  bool use_mesh_shader,
+								  MeshletPass meshlet_pass ) const
 {
 	const auto label = cmd.debug_label( "Draw" );
 
 	//cmd.write_timestamp( timestamp_queries[ image_index ], early ? Timestamps::DRAW_MESHES_EARLY : Timestamps::DRAW_MESHES_LATE );
 	if ( use_mesh_shader )
 	{
-		draw_opaque_meshlets( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
+		draw_opaque_meshlets( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address, meshlet_pass );
 	}
 	else
 	{
@@ -718,11 +769,16 @@ void SceneRenderer::draw_opaque_meshlets( const BindlessManager& bindless_manage
 										  const renderer::PipelineManager& pipelines,
 										  renderer::CommandBuffer& cmd,
 										  renderer::BufferHandle constants_address,
-										  renderer::BufferHandle draw_buffer_address ) const
+										  renderer::BufferHandle draw_buffer_address,
+										  MeshletPass meshlet_pass ) const
 {
 	PROFILER_GPU_EVENT( "Draw Meshlets" );
 	cmd.bind_pipeline( pipelines.get( _meshlet_pipeline ), bindless_manager );
-	draw_meshes_constants constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
+	draw_meshes_constants constants { .scene_constants = constants_address,
+									  .draws_buffer = draw_buffer_address,
+									  .meshlet_visibility = _meshlet_visibility_buffer.get_device_address(),
+									  .depth_pyramid = _depth_pyramid.handles.sampled_texture,
+									  .meshlet_pass = std::to_underlying( meshlet_pass ) };
 	for ( int i = 0; i < 2; ++i )
 	{
 		const auto bucket = std::to_underlying( material_type::OPAQUE_SINGLE );
@@ -896,7 +952,8 @@ SceneRenderer::ShadowCascades SceneRenderer::draw_shadowmap( const BindlessManag
 					   stats_buffer_address,
 					   _shadowmap_draw_commands_buffers,
 					   lod_target,
-					   true );
+					   true,
+					   false );
 
 		PROFILER_GPU_EVENT( "Draw Shadows" );
 		const auto label = cmd.debug_label( "Draw" );
