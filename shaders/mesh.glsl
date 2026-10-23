@@ -86,23 +86,28 @@ struct Mesh
 
 struct MeshletTaskPayload
 {
-	uint meshlets[ 32 ];
+	uint meshlets[ TASK_GROUP_SIZE ];
 	uint draw_id;
 };
 
+// Vertex shader path, one per draw
 struct MeshDrawCommand
 {
 	uint draw_id;
 	uint lod;
-	uint drawn_early; // Late pass only: the early pass already drew the meshlets that were visible last frame
 	// VkDrawIndexedIndirectCommand
 	uint index_count;
 	uint instance_count;
 	uint first_index;
 	int vertex_offset;
 	uint first_instance;
-	// VkDrawMeshTasksIndirectCommandEXT
-	uint group_count_x;
-	uint group_count_y;
-	uint group_count_z;
+};
+
+// Mesh shader path, one per task workgroup: all task workgroups of a pass are a single dispatch
+struct MeshTaskCommand
+{
+	uint draw_id;
+	uint lod;
+	uint drawn_early; // Late pass only: the early pass already drew the meshlets that were visible last frame
+	uint first_meshlet; // Relative to the LOD, the workgroup handles up to TASK_GROUP_SIZE meshlets from there
 };

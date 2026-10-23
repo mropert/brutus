@@ -20,10 +20,19 @@ layout( std430, set = 1, binding = 1 ) readonly buffer ssbo2
 	Material materials[];
 };
 
+// TASK_COMMANDS: mesh shader path, one MeshTaskCommand per task workgroup and the count is the X group count of the
+// bucket's single VkDrawMeshTasksIndirectCommandEXT. Otherwise one MeshDrawCommand per draw for the vertex path.
+#if TASK_COMMANDS
+layout( buffer_reference, std430 ) writeonly buffer DrawCommandsBuffer
+{
+	MeshTaskCommand commands[];
+};
+#else
 layout( buffer_reference, std430 ) writeonly buffer DrawCommandsBuffer
 {
 	MeshDrawCommand commands[];
 };
+#endif
 layout( buffer_reference, std430 ) buffer DrawCommandsCountBuffer
 {
 	uint commands_count;
@@ -128,19 +137,27 @@ void cull_draw( uint draw_id )
 		const MeshLOD mesh_lod = get_mesh_lod( mesh_id, lod );
 
 		const uint bucket = materials[ draws_buffer.mesh_draws[ draw_id ].material ].type;
+		const uint index_count = mesh_lod.indices_count;
+#if TASK_COMMANDS
+		const uint group_count = ( mesh_lod.meshlets_count + TASK_GROUP_SIZE - 1 ) / TASK_GROUP_SIZE;
+		const uint first_command = atomicAdd( commands_count_buffers[ bucket ].commands_count, group_count );
+		for ( uint i = 0; i < group_count; ++i )
+		{
+			commands_buffers[ bucket ].commands[ first_command + i ].draw_id = draw_id;
+			commands_buffers[ bucket ].commands[ first_command + i ].lod = lod;
+			commands_buffers[ bucket ].commands[ first_command + i ].drawn_early = drawn_early ? 1 : 0;
+			commands_buffers[ bucket ].commands[ first_command + i ].first_meshlet = i * TASK_GROUP_SIZE;
+		}
+#else
 		const uint command_id = atomicAdd( commands_count_buffers[ bucket ].commands_count, 1 );
 		commands_buffers[ bucket ].commands[ command_id ].draw_id = draw_id;
 		commands_buffers[ bucket ].commands[ command_id ].lod = lod;
-		commands_buffers[ bucket ].commands[ command_id ].drawn_early = drawn_early ? 1 : 0;
-		const uint index_count = mesh_lod.indices_count;
 		commands_buffers[ bucket ].commands[ command_id ].index_count = index_count;
 		commands_buffers[ bucket ].commands[ command_id ].instance_count = 1;
 		commands_buffers[ bucket ].commands[ command_id ].first_index = mesh_lod.indices_offset;
 		commands_buffers[ bucket ].commands[ command_id ].vertex_offset = 0;
 		commands_buffers[ bucket ].commands[ command_id ].first_instance = command_id;
-		commands_buffers[ bucket ].commands[ command_id ].group_count_x = ( mesh_lod.meshlets_count + 32 - 1 ) / 32;
-		commands_buffers[ bucket ].commands[ command_id ].group_count_y = 1;
-		commands_buffers[ bucket ].commands[ command_id ].group_count_z = 1;
+#endif
 
 		if ( !drawn_early )
 		{

@@ -14,6 +14,8 @@ public:
 	static constexpr auto DRAW_BUCKETS_COUNT = std::to_underlying( material_type::COUNT );
 	static constexpr float FOV = 70.f;
 	static constexpr uint32_t SHADOW_CASCADE_MAX = 4;
+	// Task workgroups per bucket and pass, checked against the worst case of all draws at their largest LOD
+	static constexpr uint32_t MAX_TASK_COMMANDS = 256 * 1024;
 
 	struct DrawStatistics
 	{
@@ -68,7 +70,8 @@ private:
 						const std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT>& draw_commands,
 						float lod_target,
 						bool early,
-						bool meshlet_occlusion ) const;
+						bool meshlet_occlusion,
+						bool task_commands ) const;
 	// Matches MESHLET_PASS_* in mesh.task
 	enum class MeshletPass : uint32_t
 	{
@@ -156,6 +159,7 @@ private:
 	// One bit per main LOD meshlet of each draw, not reset when the scene changes: the late pass corrects stale bits
 	renderer::raii::Buffer _meshlet_visibility_buffer;
 	uint32_t _meshlet_visibility_bits = 0;
+	uint32_t _max_task_commands = 0; // Worst case for the current scene
 	std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT> _draw_commands_buffers;
 	std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT> _shadowmap_draw_commands_buffers;
 	renderer::raii::Buffer _draw_statistics_buffer; // GPU only, accumulated by culling
@@ -170,6 +174,8 @@ private:
 	renderer::PipelineHandle _shadowmap_meshlet_pipeline;
 	renderer::PipelineHandle _compute_draws_early_pipeline;
 	renderer::PipelineHandle _compute_draws_late_pipeline;
+	renderer::PipelineHandle _compute_tasks_early_pipeline;
+	renderer::PipelineHandle _compute_tasks_late_pipeline;
 	renderer::PipelineHandle _depth_pyramid_pipeline;
 	renderer::PipelineHandle _grid_pipeline;
 	renderer::PipelineHandle _tonemap_pipeline;

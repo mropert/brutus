@@ -10,6 +10,7 @@
 #include <vector>
 
 static constexpr size_t MESH_LOD_COUNT = 6;
+static constexpr uint32_t TASK_GROUP_SIZE = 32; // Meshlets per task shader workgroup
 
 int calc_mip_levels( renderer::Extent2D extent );
 
@@ -88,6 +89,7 @@ struct mesh
 	mesh_handle handle;
 	size_t material_index;
 	uint32_t meshlets_count; // All main LODs, excluding the shadow LODs
+	uint32_t max_task_groups; // Task workgroups needed by its largest LOD, main or shadow
 	// Data below is only for debugging purposes, a CPU side copy of the GPU-side descriptor
 	gpu_mesh gpu_data;
 };

@@ -28,7 +28,7 @@ layout( location = 4 ) out flat uint outMaterial[];
 
 layout( buffer_reference, std430 ) readonly buffer DrawCommandsBuffer
 {
-	MeshDrawCommand commands[];
+	MeshTaskCommand commands[];
 };
 
 layout( push_constant, std430 ) uniform block

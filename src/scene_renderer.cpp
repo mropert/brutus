@@ -30,21 +30,58 @@ namespace
 		return index_in_pair == 0 ? renderer::Pipeline::CullMode::BACK : renderer::Pipeline::CullMode::NONE;
 	}
 
-	// Not used on CPU side, only there for buffer sizing
-	struct gpu_draw_command
+	// Not used on CPU side, only there for buffer sizing and offsets
+
+	// Vertex shader path, one per draw
+	struct gpu_draw_mesh_command
+	{
+		uint32_t draw_id;
+		uint32_t lod;
+		VkDrawIndexedIndirectCommand draw_cmd;
+	};
+	static constexpr auto MAX_DRAWS = 65536;
+	struct gpu_draw_mesh_commands
+	{
+		uint32_t count;
+		std::array<gpu_draw_mesh_command, MAX_DRAWS> commands;
+	};
+
+	// Mesh shader path, one per task workgroup
+	struct gpu_task_command
 	{
 		uint32_t draw_id;
 		uint32_t lod;
 		uint32_t drawn_early;
-		VkDrawIndexedIndirectCommand draw_cmd;
-		VkDrawMeshTasksIndirectCommandEXT mesh_cmd;
+		uint32_t first_meshlet;
 	};
-	static constexpr auto MAX_DRAWS = 65536;
-	struct DrawCommands
+	struct gpu_task_commands
 	{
-		uint32_t count;
-		std::array<gpu_draw_command, MAX_DRAWS> commands;
+		VkDrawMeshTasksIndirectCommandEXT dispatch;
+		uint32_t draw_count; // Always 1 for now
+		std::array<gpu_task_command, SceneRenderer::MAX_TASK_COMMANDS> commands;
 	};
+	static_assert( offsetof( gpu_task_commands, draw_count ) == offsetof( gpu_task_commands, dispatch.groupCountZ ) + sizeof( uint32_t ),
+				   "group_count_y, group_count_z and draw_count are reset to 1 by a single fill" );
+
+	// Content of a draw commands buffer, depending on the render path
+	union gpu_draw_commands
+	{
+		gpu_draw_mesh_commands meshes;
+		gpu_task_commands tasks;
+	};
+	static_assert( offsetof( gpu_draw_commands, meshes.count ) == offsetof( gpu_draw_commands, tasks.dispatch.groupCountX ),
+				   "the culling shader increments the same counter for both paths" );
+
+	// All the task workgroups of a bucket in a single dispatch, a group count of 0 draws nothing
+	void draw_task_commands( renderer::CommandBuffer& cmd, const renderer::Buffer& commands )
+	{
+		cmd.draw_mesh_tasks_indirect( commands,
+									  offsetof( gpu_task_commands, dispatch ),
+									  commands,
+									  offsetof( gpu_task_commands, draw_count ),
+									  1,
+									  sizeof( VkDrawMeshTasksIndirectCommandEXT ) );
+	}
 
 	struct draw_meshes_constants
 	{
@@ -282,8 +319,10 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 	, _draw_indirect_count( device.get_properties().draw_indirect_count_support )
 {
 	const std::vector<renderer::ShaderSource::Define> mesh_shaders_defines { { "MESH_LOD_COUNT", std::to_string( MESH_LOD_COUNT ) },
+																			 { "TASK_GROUP_SIZE", std::to_string( TASK_GROUP_SIZE ) },
 																			 { "USE_ALPHA", "false" } };
 	const std::vector<renderer::ShaderSource::Define> mesh_alpha_shaders_defines { { "MESH_LOD_COUNT", std::to_string( MESH_LOD_COUNT ) },
+																				   { "TASK_GROUP_SIZE", std::to_string( TASK_GROUP_SIZE ) },
 																				   { "USE_ALPHA", "true" } };
 
 	_mesh_pipeline = pipelines.add(
@@ -361,15 +400,21 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 
 	std::vector<renderer::ShaderSource::Define> compute_shader_defines;
 	compute_shader_defines.emplace_back( "LATE", "false" );
+	compute_shader_defines.emplace_back( "TASK_COMMANDS", "0" ); // Used in #if, true/false would both be 0
 	std::copy( begin( mesh_shaders_defines ), end( mesh_shaders_defines ), std::back_inserter( compute_shader_defines ) );
 
-	_compute_draws_early_pipeline = pipelines.add(
-		renderer::Pipeline::Desc { .push_constants_size = sizeof( compute_draws_constants ) },
-		{ { .path = "mesh_cull.comp", .stage = renderer::ShaderStage::COMPUTE, .defines = compute_shader_defines } } );
-	compute_shader_defines[ 0 ].value = "true";
-	_compute_draws_late_pipeline = pipelines.add(
-		renderer::Pipeline::Desc { .push_constants_size = sizeof( compute_draws_constants ) },
-		{ { .path = "mesh_cull.comp", .stage = renderer::ShaderStage::COMPUTE, .defines = compute_shader_defines } } );
+	const auto add_compute_draws_pipeline = [ & ]( bool late, bool task_commands )
+	{
+		compute_shader_defines[ 0 ].value = late ? "true" : "false";
+		compute_shader_defines[ 1 ].value = task_commands ? "1" : "0";
+		return pipelines.add(
+			renderer::Pipeline::Desc { .push_constants_size = sizeof( compute_draws_constants ) },
+			{ { .path = "mesh_cull.comp", .stage = renderer::ShaderStage::COMPUTE, .defines = compute_shader_defines } } );
+	};
+	_compute_draws_early_pipeline = add_compute_draws_pipeline( false, false );
+	_compute_draws_late_pipeline = add_compute_draws_pipeline( true, false );
+	_compute_tasks_early_pipeline = add_compute_draws_pipeline( false, true );
+	_compute_tasks_late_pipeline = add_compute_draws_pipeline( true, true );
 
 	_depth_pyramid_pipeline = pipelines.add( renderer::Pipeline::Desc { .push_constants_size = sizeof( depth_pyramid_constants ) },
 											 { { .path = "depth_pyramid.comp", .stage = renderer::ShaderStage::COMPUTE } } );
@@ -387,18 +432,19 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		{ { .path = "fullscreen.vert", .stage = renderer::ShaderStage::VERTEX },
 		  { .path = "tonemap.frag", .stage = renderer::ShaderStage::FRAGMENT } } );
 
+	constexpr auto draw_commands_size = sizeof( gpu_draw_commands );
 	for ( auto& buffer : _draw_commands_buffers )
 	{
 		buffer = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::INDIRECT_BUFFER
 										   | renderer::Buffer::Usage::TRANSFER_DST | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-									   sizeof( DrawCommands ) );
+									   draw_commands_size );
 	}
 
 	for ( auto& buffer : _shadowmap_draw_commands_buffers )
 	{
 		buffer = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::INDIRECT_BUFFER
 										   | renderer::Buffer::Usage::TRANSFER_DST | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-									   sizeof( DrawCommands ) );
+									   draw_commands_size );
 	}
 
 	for ( auto& buffer : _draw_statistics_readback_buffers )
@@ -421,6 +467,7 @@ void SceneRenderer::add_mesh( const mesh& mesh, glm::vec3 translation, glm::quat
 {
 	assert( _scene.size() < MAX_DRAWS );
 	assert( _meshlet_visibility_bits + mesh.meshlets_count <= MAX_MESHLET_VISIBILITY_BITS );
+	assert( _max_task_commands + mesh.max_task_groups <= MAX_TASK_COMMANDS );
 
 	_scene.push_back( MeshDraw { .translation = translation,
 								 .mesh = mesh.handle,
@@ -429,6 +476,7 @@ void SceneRenderer::add_mesh( const mesh& mesh, glm::vec3 translation, glm::quat
 								 .material = material,
 								 .meshlet_visibility_offset = _meshlet_visibility_bits } );
 	_meshlet_visibility_bits += mesh.meshlets_count;
+	_max_task_commands += mesh.max_task_groups;
 	_needs_rebuild = true;
 }
 
@@ -436,6 +484,7 @@ void SceneRenderer::clear_meshes()
 {
 	_scene.clear();
 	_meshlet_visibility_bits = 0;
+	_max_task_commands = 0;
 	_needs_rebuild = true;
 }
 
@@ -557,7 +606,8 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 					   _draw_commands_buffers,
 					   lod_pixel_tolerance / ( _extent.height / ( 2 * std::tan( FOV * 0.5f ) ) ),
 					   true,
-					   meshlet_occlusion );
+					   meshlet_occlusion,
+					   use_mesh_shader );
 
 		cmd.begin_rendering( { .color_target = { .target = _color_texture_view, .clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } } },
 							   .depth_target = { .target = _depth_texture_view,
@@ -621,7 +671,8 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 					   _draw_commands_buffers,
 					   lod_pixel_tolerance / ( _extent.height / ( 2 * std::tan( FOV * 0.5f ) ) ),
 					   false,
-					   meshlet_occlusion );
+					   meshlet_occlusion,
+					   use_mesh_shader );
 
 		if ( meshlet_occlusion )
 		{
@@ -649,7 +700,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		}
 		else
 		{
-			draw_transparent_meshlets( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
+			draw_transparent_meshes( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
 		}
 		cmd.end_rendering();
 	}
@@ -706,7 +757,8 @@ void SceneRenderer::compute_draws( const BindlessManager& bindless_manager,
 								   const std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT>& draw_commands,
 								   float lod_target,
 								   bool early,
-								   bool meshlet_occlusion ) const
+								   bool meshlet_occlusion,
+								   bool task_commands ) const
 {
 	PROFILER_GPU_EVENT( "Compute Draws" );
 	const auto label = cmd.debug_label( "Culling" );
@@ -727,19 +779,33 @@ void SceneRenderer::compute_draws( const BindlessManager& bindless_manager,
 	{
 		// Previous draws read commands both as indirect arguments and from shaders
 		cmd.buffer_barrier( draw_commands[ i ], renderer::ResourceState::ANY_BUFFER_READ, renderer::ResourceState::TRANSFER_DST );
-		cmd.fill_buffer( draw_commands[ i ], 0, draw_commands[ i ].get_size(), 0 );
+		if ( task_commands )
+		{
+			// Only the header: group count 0, Y, Z and draw count 1. Commands past the group count are never read
+			cmd.fill_buffer( draw_commands[ i ], offsetof( gpu_task_commands, dispatch.groupCountX ), sizeof( uint32_t ), 0 );
+			cmd.fill_buffer( draw_commands[ i ], offsetof( gpu_task_commands, dispatch.groupCountY ), 3 * sizeof( uint32_t ), 1 );
+			constants.commands_buffers[ i ] = draw_commands[ i ].get_device_address() + offsetof( gpu_task_commands, commands );
+		}
+		else
+		{
+			// Draws without draw indirect count support read all MAX_DRAWS commands
+			cmd.fill_buffer( draw_commands[ i ], 0, sizeof( gpu_draw_mesh_commands ), 0 );
+			constants.commands_buffers[ i ] = draw_commands[ i ].get_device_address() + offsetof( gpu_draw_mesh_commands, commands );
+		}
 		cmd.buffer_barrier( draw_commands[ i ], renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ_WRITE );
-		constants.commands_buffers[ i ] = draw_commands[ i ].get_device_address() + sizeof( uint32_t );
 		constants.commands_count_buffers[ i ] = draw_commands[ i ].get_device_address();
 	}
-	const auto pipeline = early ? pipelines.get( _compute_draws_early_pipeline ) : pipelines.get( _compute_draws_late_pipeline );
+	const auto pipeline_handle = task_commands ? ( early ? _compute_tasks_early_pipeline : _compute_tasks_late_pipeline )
+											   : ( early ? _compute_draws_early_pipeline : _compute_draws_late_pipeline );
+	const auto pipeline = pipelines.get( pipeline_handle );
 	cmd.bind_pipeline( pipeline, bindless_manager );
 
 	cmd.push_constants( pipeline, constants );
 	cmd.dispatch( calc_group_count( static_cast<uint32_t>( _scene.size() ) ), 1, 1 );
 	for ( const auto& buffer : draw_commands )
 	{
-		cmd.buffer_barrier( buffer, renderer::ResourceState::STORAGE_WRITE, renderer::ResourceState::INDIRECT_ARGUMENT );
+		// Task and vertex shaders also read the commands
+		cmd.buffer_barrier( buffer, renderer::ResourceState::STORAGE_WRITE, renderer::ResourceState::ANY_BUFFER_READ );
 	}
 	cmd.buffer_barrier( visibility_buffer, renderer::ResourceState::STORAGE_READ_WRITE, renderer::ResourceState::STORAGE_READ_WRITE );
 }
@@ -783,14 +849,9 @@ void SceneRenderer::draw_opaque_meshlets( const BindlessManager& bindless_manage
 	{
 		const auto bucket = std::to_underlying( material_type::OPAQUE_SINGLE );
 		cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ) } );
-		constants.commands_buffer = _draw_commands_buffers[ bucket + i ].get_device_address() + sizeof( uint32_t );
+		constants.commands_buffer = _draw_commands_buffers[ bucket + i ].get_device_address() + offsetof( gpu_task_commands, commands );
 		cmd.push_constants( pipelines.get( _meshlet_pipeline ), constants );
-		cmd.draw_mesh_tasks_indirect( _draw_commands_buffers[ bucket + i ],
-									  sizeof( uint32_t ) + offsetof( gpu_draw_command, mesh_cmd ),
-									  _draw_commands_buffers[ bucket + i ],
-									  0,
-									  static_cast<uint32_t>( _scene.size() ),
-									  sizeof( gpu_draw_command ) );
+		draw_task_commands( cmd, _draw_commands_buffers[ bucket + i ] );
 	}
 }
 
@@ -807,23 +868,24 @@ void SceneRenderer::draw_opaque_meshes( const BindlessManager& bindless_manager,
 	{
 		const auto bucket = std::to_underlying( material_type::OPAQUE_SINGLE );
 		cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ) } );
-		constants.commands_buffer = _draw_commands_buffers[ bucket + i ].get_device_address() + sizeof( uint32_t );
+		constants.commands_buffer = _draw_commands_buffers[ bucket + i ].get_device_address()
+			+ offsetof( gpu_draw_mesh_commands, commands );
 		cmd.push_constants( pipelines.get( _mesh_pipeline ), constants );
 		if ( _draw_indirect_count )
 		{
 			cmd.draw_indexed_indirect( _draw_commands_buffers[ bucket + i ],
-									   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+									   offsetof( gpu_draw_mesh_commands, commands ) + offsetof( gpu_draw_mesh_command, draw_cmd ),
 									   _draw_commands_buffers[ bucket + i ],
 									   0,
 									   static_cast<uint32_t>( _scene.size() ),
-									   sizeof( gpu_draw_command ) );
+									   sizeof( gpu_draw_mesh_command ) );
 		}
 		else
 		{
 			cmd.draw_indexed_indirect( _draw_commands_buffers[ i ],
-									   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+									   offsetof( gpu_draw_mesh_commands, commands ) + offsetof( gpu_draw_mesh_command, draw_cmd ),
 									   static_cast<uint32_t>( _scene.size() ),
-									   sizeof( gpu_draw_command ) );
+									   sizeof( gpu_draw_mesh_command ) );
 		}
 	}
 }
@@ -844,14 +906,9 @@ void SceneRenderer::draw_transparent_meshlets( const BindlessManager& bindless_m
 		{
 			const auto bucket = std::to_underlying( material_type::ALPHA_SINGLE );
 			cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ), .depth_write = pass == 0 } );
-			constants.commands_buffer = _draw_commands_buffers[ bucket + i ].get_device_address() + sizeof( uint32_t );
+			constants.commands_buffer = _draw_commands_buffers[ bucket + i ].get_device_address() + offsetof( gpu_task_commands, commands );
 			cmd.push_constants( pipeline, constants );
-			cmd.draw_mesh_tasks_indirect( _draw_commands_buffers[ bucket + i ],
-										  sizeof( uint32_t ) + offsetof( gpu_draw_command, mesh_cmd ),
-										  _draw_commands_buffers[ bucket + i ],
-										  0,
-										  static_cast<uint32_t>( _scene.size() ),
-										  sizeof( gpu_draw_command ) );
+			draw_task_commands( cmd, _draw_commands_buffers[ bucket + i ] );
 		}
 	}
 }
@@ -873,23 +930,24 @@ void SceneRenderer::draw_transparent_meshes( const BindlessManager& bindless_man
 		{
 			const auto bucket = std::to_underlying( material_type::ALPHA_SINGLE );
 			cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ), .depth_write = pass == 0 } );
-			constants.commands_buffer = _draw_commands_buffers[ bucket + i ].get_device_address() + sizeof( uint32_t );
+			constants.commands_buffer = _draw_commands_buffers[ bucket + i ].get_device_address()
+				+ offsetof( gpu_draw_mesh_commands, commands );
 			cmd.push_constants( pipeline, constants );
 			if ( _draw_indirect_count )
 			{
 				cmd.draw_indexed_indirect( _draw_commands_buffers[ bucket + i ],
-										   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+										   offsetof( gpu_draw_mesh_commands, commands ) + offsetof( gpu_draw_mesh_command, draw_cmd ),
 										   _draw_commands_buffers[ bucket + i ],
 										   0,
 										   static_cast<uint32_t>( _scene.size() ),
-										   sizeof( gpu_draw_command ) );
+										   sizeof( gpu_draw_mesh_command ) );
 			}
 			else
 			{
 				cmd.draw_indexed_indirect( _draw_commands_buffers[ i ],
-										   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+										   offsetof( gpu_draw_mesh_commands, commands ) + offsetof( gpu_draw_mesh_command, draw_cmd ),
 										   static_cast<uint32_t>( _scene.size() ),
-										   sizeof( gpu_draw_command ) );
+										   sizeof( gpu_draw_mesh_command ) );
 			}
 		}
 	}
@@ -953,7 +1011,8 @@ SceneRenderer::ShadowCascades SceneRenderer::draw_shadowmap( const BindlessManag
 					   _shadowmap_draw_commands_buffers,
 					   lod_target,
 					   true,
-					   false );
+					   false,
+					   use_mesh_shader );
 
 		PROFILER_GPU_EVENT( "Draw Shadows" );
 		const auto label = cmd.debug_label( "Draw" );
@@ -968,32 +1027,28 @@ SceneRenderer::ShadowCascades SceneRenderer::draw_shadowmap( const BindlessManag
 									 .cull_mode = bucket_cull_mode( i ),
 									 .depth_bias_constant = SHADOW_DEPTH_BIAS_CONSTANT,
 									 .depth_bias_slope = SHADOW_DEPTH_BIAS_SLOPE } );
-			draw_constants.commands_buffer = commands.get_device_address() + sizeof( uint32_t );
+			draw_constants.commands_buffer = commands.get_device_address()
+				+ ( use_mesh_shader ? offsetof( gpu_task_commands, commands ) : offsetof( gpu_draw_mesh_commands, commands ) );
 			cmd.push_constants( pipeline, draw_constants );
 			if ( use_mesh_shader )
 			{
-				cmd.draw_mesh_tasks_indirect( commands,
-											  sizeof( uint32_t ) + offsetof( gpu_draw_command, mesh_cmd ),
-											  commands,
-											  0,
-											  static_cast<uint32_t>( _scene.size() ),
-											  sizeof( gpu_draw_command ) );
+				draw_task_commands( cmd, commands );
 			}
 			else if ( _draw_indirect_count )
 			{
 				cmd.draw_indexed_indirect( commands,
-										   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+										   offsetof( gpu_draw_mesh_commands, commands ) + offsetof( gpu_draw_mesh_command, draw_cmd ),
 										   commands,
 										   0,
 										   static_cast<uint32_t>( _scene.size() ),
-										   sizeof( gpu_draw_command ) );
+										   sizeof( gpu_draw_mesh_command ) );
 			}
 			else
 			{
 				cmd.draw_indexed_indirect( commands,
-										   sizeof( uint32_t ) + offsetof( gpu_draw_command, draw_cmd ),
+										   offsetof( gpu_draw_mesh_commands, commands ) + offsetof( gpu_draw_mesh_command, draw_cmd ),
 										   static_cast<uint32_t>( _scene.size() ),
-										   sizeof( gpu_draw_command ) );
+										   sizeof( gpu_draw_mesh_command ) );
 			}
 		}
 		cmd.end_rendering();
