@@ -1,4 +1,4 @@
-﻿#define GLM_ENABLE_EXPERIMENTAL // for matrix decompose
+#define GLM_ENABLE_EXPERIMENTAL // for matrix decompose
 
 #include <SDL3/SDL.h>
 #include <array>
@@ -289,7 +289,7 @@ void draw_node( const asset& scene, uint32_t node_index, SceneRenderer& scene_re
 		glm::vec4 perspective;
 		glm::quat rotation;
 		glm::decompose( local_transform, scale, rotation, translation, skew, perspective );
-		scene_renderer.add_mesh( mesh, translation, rotation, scale, scene.materials[ mesh.material_index ].handle );
+		scene_renderer.add_mesh( mesh, translation, rotation, scale, scene.materials[ mesh.material_index ] );
 	}
 	for ( const auto child : scene.nodes[ node_index ].children )
 	{
@@ -530,11 +530,7 @@ int main( int argc, char** argv )
 					const auto scale = gen_scale( rand );
 					for ( const auto& mesh : asset.meshes )
 					{
-						scene_renderer.add_mesh( mesh,
-												 pos,
-												 rotation,
-												 { scale, scale, scale },
-												 asset.materials[ mesh.material_index ].handle );
+						scene_renderer.add_mesh( mesh, pos, rotation, { scale, scale, scale }, asset.materials[ mesh.material_index ] );
 					}
 				}
 			}

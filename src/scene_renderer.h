@@ -28,7 +28,7 @@ public:
 				   BindlessManager& bindless_manager,
 				   renderer::PipelineManager& pipeline_manager );
 
-	void add_mesh( const mesh& mesh, glm::vec3 translation, glm::quat rotation, glm::vec3 scale, material_handle material );
+	void add_mesh( const mesh& mesh, glm::vec3 translation, glm::quat rotation, glm::vec3 scale, const material& material );
 	void clear_meshes();
 
 	void render( const BindlessManager& bindless_manager,
@@ -60,6 +60,25 @@ private:
 	static constexpr float SHADOW_DEPTH_BIAS_CONSTANT = 1.f;
 	static constexpr float SHADOW_DEPTH_BIAS_SLOPE = 2.f;
 
+	// A bucket's part of a draw commands buffer, laid out for one render path
+	struct DrawCommandsSegment
+	{
+		size_t commands_offset = 0;
+		uint32_t capacity = 0; // Worst case number of commands for the current scene
+	};
+	using DrawCommandsSegments = std::array<DrawCommandsSegment, DRAW_BUCKETS_COUNT>;
+	template <typename Commands>
+	static DrawCommandsSegments make_empty_draw_commands_segments();
+	// Grows a bucket's capacity, the following buckets' commands move accordingly
+	template <typename Commands>
+	static void add_draw_commands( DrawCommandsSegments& segments, size_t bucket, uint32_t count );
+	const DrawCommandsSegments& get_draw_commands_segments( bool task_commands ) const
+	{
+		return task_commands ? _task_segments : _draw_mesh_segments;
+	}
+	// One indirect draw for all the commands of a bucket
+	void draw_bucket( renderer::CommandBuffer& cmd, const renderer::Buffer& draw_commands, size_t bucket, bool use_mesh_shader ) const;
+
 	void compute_draws( const BindlessManager& bindless_manager,
 						const renderer::PipelineManager& pipelines,
 						renderer::CommandBuffer& cmd,
@@ -67,7 +86,7 @@ private:
 						renderer::BufferHandle draw_buffer_address,
 						const renderer::Buffer& visibility_buffer,
 						renderer::BufferHandle stats_buffer_address,
-						const std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT>& draw_commands,
+						const renderer::Buffer& draw_commands,
 						float lod_target,
 						bool early,
 						bool meshlet_occlusion,
@@ -159,9 +178,12 @@ private:
 	// One bit per main LOD meshlet of each draw, not reset when the scene changes: the late pass corrects stale bits
 	renderer::raii::Buffer _meshlet_visibility_buffer;
 	uint32_t _meshlet_visibility_bits = 0;
-	uint32_t _max_task_commands = 0; // Worst case for the current scene
-	std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT> _draw_commands_buffers;
-	std::array<renderer::raii::Buffer, DRAW_BUCKETS_COUNT> _shadowmap_draw_commands_buffers;
+	// Capacities are the worst case for the current scene: one command per draw for the vertex path, its largest LOD's
+	// task workgroups for the mesh shader path
+	DrawCommandsSegments _draw_mesh_segments;
+	DrawCommandsSegments _task_segments;
+	renderer::raii::Buffer _draw_commands_buffer;
+	renderer::raii::Buffer _shadowmap_draw_commands_buffer;
 	renderer::raii::Buffer _draw_statistics_buffer; // GPU only, accumulated by culling
 	std::array<renderer::raii::Buffer, renderer::MAX_FRAMES_IN_FLIGHT> _draw_statistics_readback_buffers;
 	renderer::PipelineHandle _mesh_pipeline;

@@ -97,6 +97,7 @@ struct mesh
 struct material
 {
 	material_handle handle;
+	material_type type;
 	// Data below is only for debugging purposes, a CPU side copy of the GPU-side descriptor
 	gpu_material gpu_data;
 };

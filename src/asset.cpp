@@ -1194,6 +1194,7 @@ private:
 					default:
 						throw renderer::Error( "Unsupported material alpha mode" );
 				}
+				material.type = material.gpu_data.type;
 
 				material.handle = _bindless_manager.add_buffer_entry( material.gpu_data );
 			}
