@@ -114,7 +114,8 @@ float compute_shadow( SceneConstants constants, vec3 world_pos, vec3 normal, vec
 		return 1.0;
 	}
 
-	// Surfaces facing away from the light are already unlit, no need to sample
+	// No need to sample for surfaces facing away from the light: callers must give them no direct light, even if a
+	// normal map makes their shading normal face the light (see bump_terminator_shadowing in mesh.frag)
 	const float NdotL = dot( normal, to_light );
 	if ( NdotL <= 0.0 )
 	{

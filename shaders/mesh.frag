@@ -84,6 +84,35 @@ float GeometrySmith( vec3 N, vec3 V, vec3 L, float roughness )
 	return ggx1 * ggx2;
 }
 
+// Direct light attenuation for normal mapped shading at the shadow terminator, from Chiang, Li, Burley, "Taming the
+// Shadow Terminator", SIGGRAPH 2019. 0 where the geometry faces away from the light, which the shading normal can't
+// see, then rises smoothly to 1 as the geometry receives the light the shading normal assumes.
+// geometric_normal is the interpolated vertex normal, facing the viewer for double sided surfaces.
+float bump_terminator_shadowing( vec3 geometric_normal, vec3 shading_normal, vec3 to_light )
+{
+	const float NgL = dot( geometric_normal, to_light );
+	if ( NgL <= 0.0 )
+	{
+		return 0.0;
+	}
+	const float NsL = dot( shading_normal, to_light );
+	const float NgNs = dot( geometric_normal, shading_normal );
+	const float G = min( 1.0, NgL / max( NsL * NgNs, 1e-4 ) );
+	return -G * G * G + G * G + G;
+}
+
+// Ambient / fake-IBL: no cubemap yet, so approximate the environment with a hemisphere (sky above, ground below).
+// These colors are the environment radiance, sampled with the normal for diffuse light and the reflection vector for
+// specular. Tied to the sun so there's a single exposure knob (the sun) and the balance between them stays fixed.
+// sky_to_sun is the "mood": higher = flatter/overcast.
+vec3 hemisphere_environment( vec3 direction )
+{
+	const float intensity = scene_constants.main_light.w * scene_constants.sky_to_sun;
+	const vec3 sky_color = vec3( 0.5, 0.6, 0.7 ) * intensity;
+	const vec3 ground_color = vec3( 0.2, 0.18, 0.15 ) * intensity;
+	return mix( ground_color, sky_color, 0.5 * ( direction.y + 1.0 ) );
+}
+
 void main_flat()
 {
 	const vec3 albedo = texture( sampler2D( textures[ materials[ inMaterial ].albedo_index ], samplers[ 0 ] ), inUV ).xyz
@@ -123,8 +152,9 @@ void main()
 	const vec3 L = normalize( -scene_constants.main_light.xyz );
 	vec3 N = normalize( inNormal );
 	const float facing = gl_FrontFacing ? 1.0 : -1.0;
+	const vec3 geometric_normal = N * facing;
 
-	const float shadow = compute_shadow( scene_constants, inFragPos, N * facing, L );
+	const float shadow = compute_shadow( scene_constants, inFragPos, geometric_normal, L );
 
 	if ( materials[ inMaterial ].normal_index != -1 )
 	{
@@ -138,6 +168,7 @@ void main()
 	N *= facing;
 
 	const float NdotL = max( dot( N, L ), 0.0 );
+	const float direct_light = shadow * bump_terminator_shadowing( geometric_normal, N, L );
 	const float ambient_factor = 0.1;
 	vec3 color;
 
@@ -180,18 +211,11 @@ void main()
 
 		// add to outgoing radiance Lo
 		const vec3 kD = ( 1 - F ) * ( 1 - metalness );
-		const vec3 Lo = ( kD * albedo.rgb / PI + specular ) * radiance * NdotL * shadow;
+		const vec3 Lo = ( kD * albedo.rgb / PI + specular ) * radiance * NdotL * direct_light;
 
-		// Ambient / fake-IBL: no cubemap yet, so approximate the environment with a
-		// hemisphere (sky above, ground below). These colors ARE the environment radiance.
-		// Tie the sky/ambient to the sun so there's a single exposure knob (the sun) and the
-		// balance between them stays fixed. sky_to_sun is the "mood": higher = flatter/overcast.
-		const float env_intensity = attenuation * scene_constants.sky_to_sun;
-		const vec3 sky_color = vec3( 0.5, 0.6, 0.7 ) * env_intensity;
-		const vec3 ground_color = vec3( 0.2, 0.18, 0.15 ) * env_intensity;
 		const vec3 R = reflect( -V, N );
-		const vec3 irradiance = mix( ground_color, sky_color, 0.5 * ( N.y + 1.0 ) ); // diffuse env
-		const vec3 prefiltered = mix( ground_color, sky_color, 0.5 * ( R.y + 1.0 ) ); // specular env
+		const vec3 irradiance = hemisphere_environment( N ); // diffuse env
+		const vec3 prefiltered = hemisphere_environment( R ); // specular env
 
 		const vec3 F_amb = fresnelSchlickRoughness( NdotV, F0, roughness );
 		const vec3 kD_amb = ( 1.0 - F_amb ) * ( 1.0 - metalness );
@@ -204,7 +228,7 @@ void main()
 	}
 	else
 	{
-		color = albedo.rgb * ( NdotL * shadow + scene_constants.sky_to_sun ) * scene_constants.main_light.w * 0.5;
+		color = albedo.rgb * ( NdotL * direct_light * scene_constants.main_light.w * 0.5 + hemisphere_environment( N ) );
 	}
 
 	outFragColor = vec4( color * get_shadow_cascade_tint( scene_constants, inFragPos ), albedo.a );
