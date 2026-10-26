@@ -842,15 +842,16 @@ private:
 	static void
 	generate_lods( std::span<const mesh_vertex> vertices, std::span<const uint32_t> lod0_indices, lod_chain& chain, bool use_attributes )
 	{
-		constexpr std::array<float, MESH_LOD_COUNT - 1> lod_indices_factor { { 0.5f, 0.25f, 0.12f, 0.05f, 0.01f } };
-		constexpr std::array<float, MESH_LOD_COUNT - 1> lod_error_factor { { 0.005f, 0.01f, 0.02f, 0.04f, 0.08f } };
+		// Each LOD is as coarse as its error limit allows (no index count target), limits double from one LOD to the next
+		// so that the LOD selected for a pixel tolerance never exceeds twice the error it could afford
+		constexpr float first_lod_error = 0.0025f;
 		std::vector<uint32_t> buffer( lod0_indices.size() );
 		// Simplification errors (targets and results) are relative to the mesh extents, but LOD selection compares them
 		// against world space distances (in mesh units, before instance scale) so convert results to absolute
 		const float error_scale = meshopt_simplifyScale( &vertices.front().position.x, vertices.size(), sizeof( mesh_vertex ) );
 		for ( size_t lod = 0; lod < chain.indices_per_lod.size(); ++lod )
 		{
-			const auto target_index_count = static_cast<size_t>( lod0_indices.size() * lod_indices_factor[ lod ] );
+			const float target_error = first_lod_error * static_cast<float>( 1 << lod );
 			size_t size = 0;
 			if ( use_attributes )
 			{
@@ -866,8 +867,8 @@ private:
 													   attr_weights,
 													   3,
 													   nullptr,
-													   target_index_count,
-													   lod_error_factor[ lod ],
+													   0,
+													   target_error,
 													   0,
 													   &chain.error_per_lod[ lod ] );
 			}
@@ -879,8 +880,8 @@ private:
 										 &vertices.front().position.x,
 										 vertices.size(),
 										 sizeof( mesh_vertex ),
-										 target_index_count,
-										 lod_error_factor[ lod ],
+										 0,
+										 target_error,
 										 0,
 										 &chain.error_per_lod[ lod ] );
 			}
@@ -1051,7 +1052,12 @@ private:
 						  uint32_t first_meshlet,
 						  std::array<gpu_mesh_lod, MESH_LOD_COUNT>& lods )
 	{
-		auto index_offset = static_cast<uint32_t>( _index_buffer.size.fetch_add( lod0_indices.size() + chain.indices.size() ) );
+		const size_t index_count = lod0_indices.size() + chain.indices.size();
+		auto index_offset = static_cast<uint32_t>( _index_buffer.size.fetch_add( index_count ) );
+		if ( index_offset + index_count > _index_buffer.capacity )
+		{
+			throw renderer::Error( "Index buffer is full" );
+		}
 		_mesh_upload.queue( lod0_indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
 		if ( !chain.indices.empty() )
 		{

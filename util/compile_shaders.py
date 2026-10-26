@@ -20,7 +20,7 @@ import tempfile
 DEFAULT_GLSLANG = r"C:\Program Files\VulkanSDK\1.4.335.0\Bin\glslangValidator.exe"
 STAGES = (".comp", ".vert", ".frag", ".mesh", ".task")
 DEFINES = {
-    "MESH_LOD_COUNT": ["6"],
+    "MESH_LOD_COUNT": ["8"],
     "TASK_GROUP_SIZE": ["32"],
     "LATE": ["false", "true"],
     "TASK_COMMANDS": ["0", "1"],

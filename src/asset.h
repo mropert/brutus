@@ -9,7 +9,7 @@
 #include <renderer/device.h>
 #include <vector>
 
-static constexpr size_t MESH_LOD_COUNT = 6;
+static constexpr size_t MESH_LOD_COUNT = 8;
 static constexpr uint32_t TASK_GROUP_SIZE = 32; // Meshlets per task shader workgroup
 
 int calc_mip_levels( renderer::Extent2D extent );
