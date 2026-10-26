@@ -78,11 +78,11 @@ void main()
 	// Triangle culling, saves primitive setup/rasterization cost for triangles that wouldn't produce any sample:
 	// - Back faces of single sided materials, matching the pipeline cull mode (counter-clockwise front faces)
 	// - Zero area triangles
-	// - Small triangles whose bounding box doesn't contain any pixel center. Only for shadow passes for now: with MSAA
-	//   samples aren't at pixel centers
+	// - Small triangles whose bounding box doesn't contain any sample position on one axis. Standard sample locations for
+	//   1, 2, 4 and 8 samples project to (k + 0.5) / sample_count on each axis
 	const uint material_type = materials[ draws_buffer.mesh_draws[ draw_id ].material ].type;
 	const bool single_sided = material_type == 0 || material_type == 2;
-	const bool cull_small_triangles = scene_constants.shadow_pass != 0;
+	const float sample_grid = float( scene_constants.sample_count );
 
 	for ( uint i = gl_LocalInvocationIndex; i < meshlet.triangle_count; i += gl_WorkGroupSize.x )
 	{
@@ -102,13 +102,11 @@ void main()
 		const float area = ab.x * ac.y - ab.y * ac.x;
 		bool culled = single_sided ? area <= 0.0 : area == 0.0;
 
-		if ( cull_small_triangles )
-		{
-			const vec2 bbox_min = min( a.xy, min( b.xy, c.xy ) );
-			const vec2 bbox_max = max( a.xy, max( b.xy, c.xy ) );
-			// Pixel centers are at n + 0.5, both bounds rounding to the same integer means no center in between on that axis
-			culled = culled || any( equal( round( bbox_min ), round( bbox_max ) ) );
-		}
+		// Scaled by the sample count, sample positions are at n + 0.5: both bounds rounding to the same integer means no
+		// sample in between on that axis
+		const vec2 bbox_min = min( a.xy, min( b.xy, c.xy ) ) * sample_grid;
+		const vec2 bbox_max = max( a.xy, max( b.xy, c.xy ) ) * sample_grid;
+		culled = culled || any( equal( round( bbox_min ), round( bbox_max ) ) );
 
 		// Pixel positions are meaningless if any vertex is behind the camera, don't cull these
 		culled = culled && a.z > 0.0 && b.z > 0.0 && c.z > 0.0;

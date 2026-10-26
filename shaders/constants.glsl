@@ -20,4 +20,5 @@ layout( buffer_reference, std430 ) readonly buffer SceneConstants
 	float shadow_distance; // View depth up to which the main light casts shadows
 	uint shadow_cascade_count;
 	uint show_shadow_cascades;
+	uint sample_count; // Of the render target, must use the standard sample locations
 };

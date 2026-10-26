@@ -148,6 +148,7 @@ namespace
 		float shadow_distance = 0.f; // View depth up to which the main light casts shadows
 		uint32_t shadow_cascade_count = 0;
 		uint32_t show_shadow_cascades = 0;
+		uint32_t sample_count = 1; // Of the render target, must use the standard sample locations
 	};
 	static_assert( SceneRenderer::SHADOW_CASCADE_MAX == 4, "shadow_cascade_splits holds one split per vec4 component" );
 
@@ -636,6 +637,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 			constants.shadow_distance = shadow_distance;
 		}
 		constants.pbr = use_pbr ? 1 : 0;
+		constants.sample_count = SAMPLE_COUNT;
 		memcpy( static_cast<scene_constants*>( _constant_buffers.get_mapped_address() ) + frame_index, &constants, sizeof( constants ) );
 	}
 	const auto constants_address = _constant_buffers.get_device_address() + ( frame_index * sizeof( scene_constants ) );
