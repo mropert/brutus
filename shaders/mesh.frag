@@ -190,9 +190,8 @@ void main()
 												sampler2D( textures[ materials[ inMaterial ].metallic_roughness_index ], samplers[ 0 ] ),
 												inUV )
 												.rgb;
-			// Our current test model has broken data on the MR texture
-			metalness = 0;
-			roughness *= metallic_roughness.b;
+			metalness *= metallic_roughness.b;
+			roughness *= metallic_roughness.g;
 		}
 		float specular_factor = 1.0;
 		if ( materials[ inMaterial ].specular_index != -1 )
