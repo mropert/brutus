@@ -372,27 +372,31 @@ static constexpr int BENCHMARK_CROWD_SIZE = 100;
 
 int main( int argc, char** argv )
 {
-	argparse::ArgumentParser parser( "brutus" );
-	parser.add_argument( "--benchmark" ).flag().help( "Setup scene and camera for the reference benchmark" );
+	argparse::ArgumentParser command_line( "brutus" );
+	command_line.add_argument( "--benchmark" ).flag().help( "Setup scene and camera for the reference benchmark" );
+	command_line.add_argument( "--use-vertex-shader" )
+		.default_value( false )
+		.implicit_value( true )
+		.help( "Default to vertex shader rendering even if mesh shaders are available" );
 #ifndef BISTRO
-	parser.add_argument( "--dump-scene" ).help( "Dump scene meshes and transforms to the specified file" );
+	command_line.add_argument( "--dump-scene" ).help( "Dump scene meshes and transforms to the specified file" );
 #endif
 
 	try
 	{
-		parser.parse_args( argc, argv );
+		command_line.parse_args( argc, argv );
 	}
 	catch ( const std::exception& err )
 	{
 		std::cerr << err.what() << std::endl;
-		std::cerr << parser;
+		std::cerr << command_line;
 		return EINVAL;
 	}
 
-	const bool is_benchmark = parser[ "--benchmark" ] == true;
+	const bool is_benchmark = command_line[ "--benchmark" ] == true;
 
 #ifndef BISTRO
-	if ( const auto scene_file = parser.present( "--dump-scene" ) )
+	if ( const auto scene_file = command_line.present( "--dump-scene" ) )
 	{
 		dump_crowd( generate_crowd( CROWD_ASSETS.size(), BENCHMARK_CROWD_SIZE, BENCHMARK_CROWD_SIZE ), CROWD_ASSETS, *scene_file );
 		return 0;
@@ -516,7 +520,7 @@ int main( int argc, char** argv )
 	// TODO: emulate it in shaders with a gather4 instead
 	ui_data ui_state { .vsync = vsync,
 					   .stable_power = stable_power.is_enabled(),
-					   .mesh_shading = props.mesh_shader_support,
+					   .mesh_shading = props.mesh_shader_support && command_line[ "--use-vertex-shader" ] == false,
 					   .occlusion_culling = props.minmax_filter_support };
 
 	if ( is_benchmark )
