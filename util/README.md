@@ -5,7 +5,9 @@ working directory, and so do the scripts.
 
 The `--benchmark` startup argument freezes time and places the camera at a fixed spot, which makes frames
 reproducible: two runs of the same build render **bit-identical** frames, so any pixel difference between builds is a
-real change.
+real change. Add `--use-vertex-shader` to render with the vertex path even when mesh shaders are available. The scripts
+take the app's arguments (`gputrace.py --args`, `BRUTUS_ARGS` for `renderdoc_capture.py`, `screenshot_benchmark.ps1
+-Arguments`), e.g. `--args "--benchmark --use-vertex-shader"`.
 
 ## Tools
 
