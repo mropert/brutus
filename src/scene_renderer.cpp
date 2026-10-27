@@ -2,6 +2,7 @@
 
 #include "camera.h"
 
+#include <algorithm>
 #include <numeric>
 #include <renderer/command_buffer.h>
 #include <renderer/details/profiler.h>
@@ -138,6 +139,9 @@ namespace
 		glm::aligned_vec4 shadow_cascade_splits; // Far view depth of each cascade
 		glm::aligned_vec4 shadow_cascade_texel_sizes; // World size of a shadow map texel in each cascade
 		std::array<glm::aligned_vec4, 6> frustum;
+		// Shadow passes only, see shadow_caster_visible() in constants.glsl
+		std::array<glm::aligned_vec4, 6> shadow_receiver_planes;
+		glm::aligned_vec4 shadow_caster_sweep;
 		glm::vec3 camera_position;
 		uint32_t pbr;
 		glm::aligned_vec4 main_light;
@@ -196,6 +200,23 @@ namespace
 		return splits;
 	}
 
+	// World space corners of the [near_depth, far_depth] view depth slice of the camera frustum
+	std::array<glm::vec3, 8>
+	calc_view_slice_corners( const Camera& camera, renderer::Extent2D scene_extent, float near_depth, float far_depth )
+	{
+		const glm::mat4 inverse_camera_view = glm::inverse( camera.calc_view_matrix() );
+		const auto aspect_ratio = static_cast<float>( scene_extent.width ) / scene_extent.height;
+		const float tanY = tanf( SceneRenderer::FOV * 0.5f );
+		const float tanX = tanY * aspect_ratio;
+		std::array<glm::vec3, 8> corners;
+		size_t i = 0;
+		for ( float d : { near_depth, far_depth } )
+			for ( float y : { -1.f, 1.f } )
+				for ( float x : { -1.f, 1.f } )
+					corners[ i++ ] = inverse_camera_view * glm::vec4( x * tanX * d, y * tanY * d, -d, 1.f ); // camera looks down -Z
+		return corners;
+	}
+
 	// Fits a shadow map to the [near_depth, far_depth] slice of the camera frustum
 	scene_constants build_scene_shadow_constants( const Camera& camera,
 												  uint32_t resolution,
@@ -204,16 +225,7 @@ namespace
 												  float far_depth,
 												  renderer::Extent2D scene_extent )
 	{
-		const glm::mat4 inverse_camera_view = glm::inverse( camera.calc_view_matrix() );
-		const auto aspect_ratio = static_cast<float>( scene_extent.width ) / scene_extent.height;
-		const float tanY = tanf( SceneRenderer::FOV * 0.5f );
-		const float tanX = tanY * aspect_ratio;
-		std::vector<glm::vec3> bounds;
-		bounds.reserve( 8 );
-		for ( float d : { near_depth, far_depth } )
-			for ( float y : { -1.f, 1.f } )
-				for ( float x : { -1.f, 1.f } )
-					bounds.emplace_back( inverse_camera_view * glm::vec4( x * tanX * d, y * tanY * d, -d, 1.f ) ); // camera looks down -Z
+		const auto bounds = calc_view_slice_corners( camera, scene_extent, near_depth, far_depth );
 
 		auto center = std::accumulate( begin( bounds ), end( bounds ), glm::vec3 { } ) / static_cast<float>( bounds.size() );
 		float radius = 0.f;
@@ -255,6 +267,36 @@ namespace
 		constants.frustum[ 5 ] = glm::vec4( 0, 0, 0, 1 ); // always passes; near plane intentionally skipped
 
 		return constants;
+	}
+
+	// The receivers that sample a cascade are the visible points between near_depth and far_depth of view depth. Planes
+	// are pushed out by margin, so that testing a caster's sphere also covers lookups up to margin away from the receiver
+	void set_shadow_receivers( scene_constants& constants,
+							   const scene_constants& camera_constants,
+							   const Camera& camera,
+							   renderer::Extent2D scene_extent,
+							   glm::vec3 light_direction,
+							   float near_depth,
+							   float far_depth,
+							   float margin )
+	{
+		const glm::vec3 forward = -glm::vec3( camera_constants.inverse_view_matrix[ 2 ] );
+		const float camera_depth = glm::dot( forward, camera.position );
+		for ( size_t i = 0; i < 4; ++i )
+		{
+			constants.shadow_receiver_planes[ i ] = camera_constants.frustum[ i ];
+		}
+		constants.shadow_receiver_planes[ 4 ] = glm::vec4( forward, -( camera_depth + near_depth ) );
+		constants.shadow_receiver_planes[ 5 ] = glm::vec4( -forward, camera_depth + far_depth );
+		for ( auto& plane : constants.shadow_receiver_planes )
+		{
+			plane.w += margin;
+		}
+
+		const auto light_depth = [ & ]( const glm::vec3& p ) { return glm::dot( p, light_direction ); };
+		const float max_light_depth = light_depth(
+			std::ranges::max( calc_view_slice_corners( camera, scene_extent, near_depth, far_depth ), { }, light_depth ) );
+		constants.shadow_caster_sweep = glm::vec4( light_direction, max_light_depth + margin );
 	}
 }
 
@@ -1012,28 +1054,43 @@ SceneRenderer::ShadowCascades SceneRenderer::draw_shadowmap( const BindlessManag
 
 	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
 	const auto& pipeline = pipelines.get( use_mesh_shader ? _shadowmap_meshlet_pipeline : _shadowmap_mesh_pipeline );
+	const auto camera_constants = build_scene_constants( camera, _extent, { }, 0.f );
 
 	static constexpr std::array<const char*, SHADOW_CASCADE_MAX> cascade_labels { "Cascade 0", "Cascade 1", "Cascade 2", "Cascade 3" };
 	for ( size_t cascade = 0; cascade < cascade_count; ++cascade )
 	{
 		const auto cascade_label = cmd.debug_label( cascade_labels[ cascade ] );
 		const float near_depth = cascade == 0 ? shadow_near_depth : cascades.splits[ static_cast<glm::length_t>( cascade - 1 ) ];
-		const auto constants = build_scene_shadow_constants( camera,
-															 shadowmap_resolution,
-															 main_light,
-															 near_depth,
-															 cascades.splits[ static_cast<glm::length_t>( cascade ) ],
-															 _extent );
+		const float far_depth = cascades.splits[ static_cast<glm::length_t>( cascade ) ];
+		auto constants = build_scene_shadow_constants( camera, shadowmap_resolution, main_light, near_depth, far_depth, _extent );
 		cascades.view_projections[ cascade ] = constants.view_projection_matrix;
+
+		const float texel_world_size = 2.f / ( constants.projection_matrix[ 0 ][ 0 ] * shadowmap_resolution );
+		cascades.texel_sizes[ static_cast<glm::length_t>( cascade ) ] = texel_world_size;
+		const float lod_target = texel_world_size * 2.f;
+
+		// Matches the cascade selection in shadow.glsl: cascade 0 also covers view depths under shadow_near_depth, and the
+		// end of the previous cascade's slice blends into this one
+		float receivers_near_depth = 0.f;
+		if ( cascade > 0 )
+		{
+			const float previous_near_depth = cascade == 1 ? 0.f : cascades.splits[ static_cast<glm::length_t>( cascade - 2 ) ];
+			receivers_near_depth = near_depth - SHADOW_CASCADE_BLEND_RANGE * ( near_depth - previous_near_depth );
+		}
+		set_shadow_receivers( constants,
+							  camera_constants,
+							  camera,
+							  _extent,
+							  glm::normalize( main_light ),
+							  receivers_near_depth,
+							  far_depth,
+							  texel_world_size * SHADOW_CASTER_MARGIN_TEXELS );
+
 		const auto constants_index = frame_index * SHADOW_CASCADE_MAX + cascade;
 		memcpy( static_cast<scene_constants*>( _shadowmap_constant_buffers.get_mapped_address() ) + constants_index,
 				&constants,
 				sizeof( constants ) );
 		const auto constants_address = _shadowmap_constant_buffers.get_device_address() + ( constants_index * sizeof( scene_constants ) );
-
-		const float texel_world_size = 2.f / ( constants.projection_matrix[ 0 ][ 0 ] * shadowmap_resolution );
-		cascades.texel_sizes[ static_cast<glm::length_t>( cascade ) ] = texel_world_size;
-		const float lod_target = texel_world_size * 2.f;
 
 		compute_draws( bindless_manager,
 					   pipelines,

@@ -89,6 +89,10 @@ void cull_draw( uint draw_id )
 	{
 		visible = visible && dot( scene_constants.frustum[ i ], vec4( mesh_center, 1 ) ) > -mesh_radius;
 	}
+	if ( scene_constants.shadow_pass != 0 )
+	{
+		visible = visible && shadow_caster_visible( scene_constants, mesh_center, mesh_radius );
+	}
 
 	if ( LATE && visible )
 	{

@@ -120,6 +120,10 @@ void main()
 	{
 		visible = visible && dot( scene_constants.frustum[ i ], vec4( meshlet_center, 1 ) ) > -meshlet_radius;
 	}
+	if ( scene_constants.shadow_pass != 0 )
+	{
+		visible = visible && shadow_caster_visible( scene_constants, meshlet_center, meshlet_radius );
+	}
 
 	bool skip = false;
 	// Only main LOD meshlets have visibility bits, shadow passes use MESHLET_PASS_NONE

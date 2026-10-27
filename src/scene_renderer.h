@@ -61,6 +61,11 @@ private:
 	// Rasterizer bias of shadow casters, in D16 units (1/65536 of the cascade depth range)
 	static constexpr float SHADOW_DEPTH_BIAS_CONSTANT = 1.f;
 	static constexpr float SHADOW_DEPTH_BIAS_SLOPE = 2.f;
+	// Must match SHADOW_CASCADE_BLEND_RANGE in shadow.glsl
+	static constexpr float SHADOW_CASCADE_BLEND_RANGE = 0.25f;
+	// How far from a receiver's position, in texels of its cascade, a shadow lookup reads: 1.5 texels of normal offset
+	// and the 5x5 tent read with bilinear taps (3.5 texels), plus one of slack
+	static constexpr float SHADOW_CASTER_MARGIN_TEXELS = 6.f;
 
 	// A bucket's part of a draw commands buffer, laid out for one render path
 	struct DrawCommandsSegment
