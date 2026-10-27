@@ -39,6 +39,7 @@ public:
 				 renderer::Texture output_texture,
 				 renderer::TextureView output_texture_view,
 				 const renderer::Buffer* index_buffer, // null -> use mesh shaders
+				 renderer::TimestampQuery timings_pool,
 				 const Camera& camera,
 				 glm::vec4 main_light,
 				 float sky_illumination,

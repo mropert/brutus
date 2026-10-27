@@ -37,6 +37,7 @@
 
 #include "asset.h"
 #include "camera.h"
+#include "gpu_timing.h"
 #include "scene_renderer.h"
 
 static constexpr uint32_t MAX_MESHES = 4096;
@@ -101,51 +102,6 @@ struct ui_data
 	bool pbr = true;
 };
 
-namespace Timestamps
-{
-	enum : uint32_t
-	{
-		FRAME_START = 0,
-		COMPUTE_DRAWS_EARLY,
-		DRAW_MESHES_EARLY,
-		DEPTH_PYRAMID,
-		COMPUTE_DRAWS_LATE,
-		DRAW_MESHES_LATE,
-		DRAW_GRID,
-		BLIT,
-		DRAW_UI,
-		FRAME_END,
-		COUNT
-	};
-}
-
-struct Timings
-{
-	explicit Timings( float gpu_timestamp_period )
-		: period( gpu_timestamp_period )
-	{
-	}
-
-	void add( std::span<const uint64_t, Timestamps::COUNT> values, int frame_index )
-	{
-		using namespace Timestamps;
-		const int index = frame_index % last_values[ 0 ].size();
-		last_values[ 0 ][ index ] = ( values[ FRAME_END ] - values[ FRAME_START ] ) * period;
-		for ( size_t i = 1; i < last_values.size(); ++i )
-		{
-			last_values[ i ][ index ] = ( values[ i + 1 ] - values[ i ] ) * period;
-		}
-		for ( size_t i = 0; i < last_values.size(); ++i )
-		{
-			averages[ i ] = std::accumulate( begin( last_values[ i ] ), end( last_values[ i ] ), 0.f ) / last_values[ i ].size();
-		}
-	}
-
-	std::array<std::array<float, 60>, Timestamps::FRAME_END> last_values;
-	std::array<float, Timestamps::FRAME_END> averages;
-	float period;
-};
-
 void draw_ui( ui_data& data,
 			  const renderer::Device::Properties& props,
 			  const renderer::MemoryUsage& memory_usage,
@@ -182,15 +138,17 @@ void draw_ui( ui_data& data,
 		if ( props.statistics_support )
 		{
 			ImGui::SeparatorText( "Stats" );
-			ImGui::Text( "GPU times (ms): %.2f", gpu_timings[ 0 ] * 1e-6f );
-			ImGui::BulletText( "Early meshes draw: %.2f / %.2f",
-							   gpu_timings[ Timestamps::COMPUTE_DRAWS_EARLY ] * 1e-6f,
-							   gpu_timings[ Timestamps::DRAW_MESHES_EARLY ] * 1e-6f );
-			ImGui::BulletText( "Late meshes draw: %.2f / %.2f",
-							   gpu_timings[ Timestamps::COMPUTE_DRAWS_LATE ] * 1e-6f,
-							   gpu_timings[ Timestamps::DRAW_MESHES_LATE ] * 1e-6f );
-			ImGui::BulletText( "Depth pyramid: %.2f", gpu_timings[ Timestamps::DEPTH_PYRAMID ] * 1e-6f );
-			ImGui::BulletText( "UI: %.2f", gpu_timings[ Timestamps::DRAW_UI ] * 1e-6f );
+			ImGui::Text( "GPU times (ms): %.2f", gpu_timings[ std::to_underlying( GpuTiming::FRAME ) ] * 1e-6f );
+			ImGui::BulletText( "Draw shadows: %.2f", gpu_timings[ std::to_underlying( GpuTiming::DRAW_SHADOWS ) ] * 1e-6f );
+			ImGui::BulletText( "Early culling: %.2f", gpu_timings[ std::to_underlying( GpuTiming::CULLING_EARLY ) ] * 1e-6f );
+			ImGui::BulletText( "Early opaques draw: %.2f", gpu_timings[ std::to_underlying( GpuTiming::DRAW_OPAQUES_EARLY ) ] * 1e-6f );
+			ImGui::BulletText( "Late culling: %.2f", gpu_timings[ std::to_underlying( GpuTiming::CULLING_LATE ) ] * 1e-6f );
+			ImGui::BulletText( "Late opaques draw: %.2f", gpu_timings[ std::to_underlying( GpuTiming::DRAW_OPAQUES_LATE ) ] * 1e-6f );
+			ImGui::BulletText( "Transparents draw: %.2f", gpu_timings[ std::to_underlying( GpuTiming::DRAW_TRANSPARENTS ) ] * 1e-6f );
+			ImGui::BulletText( "Depth pyramid: %.2f", gpu_timings[ std::to_underlying( GpuTiming::DEPTH_PYRAMID ) ] * 1e-6f );
+			ImGui::BulletText( "Grid draw: %.2f", gpu_timings[ std::to_underlying( GpuTiming::DRAW_GRID ) ] * 1e-6f );
+			ImGui::BulletText( "UI: %.2f", gpu_timings[ std::to_underlying( GpuTiming::DRAW_UI ) ] * 1e-6f );
+			ImGui::BulletText( "Tonemap: %.2f", gpu_timings[ std::to_underlying( GpuTiming::TONEMAP ) ] * 1e-6f );
 			ImGui::BulletText( "Triangles (millions): %.2f", static_cast<float>( stats.clipping_invocations / 1000 ) / 1000 );
 		}
 		if ( ImGui::BeginTable( "scene_stats", MESH_LOD_COUNT + 1, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg ) )
@@ -479,7 +437,8 @@ int main( int argc, char** argv )
 	std::array<renderer::raii::StatisticsQuery, renderer::MAX_FRAMES_IN_FLIGHT> statistics_queries { nullptr, nullptr };
 	if ( props.statistics_support )
 	{
-		timestamp_queries = { device.create_timestamp_query( Timestamps::COUNT ), device.create_timestamp_query( Timestamps::COUNT ) };
+		timestamp_queries = { device.create_timestamp_query( GpuTimings::TIMESTAMPS_COUNT ),
+							  device.create_timestamp_query( GpuTimings::TIMESTAMPS_COUNT ) };
 		statistics_queries = { device.create_statistics_query(), device.create_statistics_query() };
 	};
 
@@ -496,7 +455,7 @@ int main( int argc, char** argv )
 
 	Camera camera { .position = glm::vec3( 0, 1.f, 2.f ) };
 	glm::vec3 camera_velocity { };
-	Timings gpu_timings( device.get_timestamp_period() );
+	GpuTimings gpu_timings( device.get_timestamp_period() );
 
 	if ( profile_startup )
 	{
@@ -598,7 +557,7 @@ int main( int argc, char** argv )
 		renderer::Statistics stats;
 		if ( frame_count > renderer::MAX_FRAMES_IN_FLIGHT )
 		{
-			std::array<uint64_t, Timestamps::COUNT> timestamps;
+			std::array<uint64_t, GpuTimings::TIMESTAMPS_COUNT> timestamps { };
 			device.get_query_results( timestamp_queries[ image_index ], 0, timestamps );
 			gpu_timings.add( timestamps, frame_count );
 			stats = device.get_query_results( statistics_queries[ image_index ] );
@@ -641,18 +600,18 @@ int main( int argc, char** argv )
 		command_buffer->reset();
 		command_buffer->begin();
 
-		command_buffer->reset_query( timestamp_queries[ image_index ], 0, Timestamps::COUNT );
-		command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::FRAME_START );
-
 		command_buffer->reset_query( statistics_queries[ image_index ] );
 		command_buffer->begin_query( statistics_queries[ image_index ] );
 
+		command_buffer->reset_query( timestamp_queries[ image_index ], 0, GpuTimings::TIMESTAMPS_COUNT );
+		GpuTimingScope frame_scope( *command_buffer, timestamp_queries[ image_index ], GpuTiming::FRAME );
 		scene_renderer.render( bindless_manager,
 							   pipelines,
 							   *command_buffer,
 							   swapchain_image,
 							   swapchain_image_view,
 							   mesh_shading ? nullptr : &indices.buffer,
+							   timestamp_queries[ image_index ],
 							   camera,
 							   main_light,
 							   sky_illumination,
@@ -666,7 +625,7 @@ int main( int argc, char** argv )
 		{
 			PROFILER_GPU_EVENT( "Draw UI" );
 			const auto label = command_buffer->debug_label( "UI" );
-			command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_UI );
+			const GpuTimingScope ui_scope( *command_buffer, timestamp_queries[ image_index ], GpuTiming::DRAW_UI );
 			command_buffer->begin_rendering( { .color_target = { .target = swapchain_image_view } } );
 			ImGui::Render();
 			ImGui_ImplVulkan_RenderDrawData( ImGui::GetDrawData(), command_buffer->get_impl() );
@@ -674,8 +633,7 @@ int main( int argc, char** argv )
 		}
 
 		command_buffer->texture_barrier( swapchain_image, renderer::ResourceState::COLOR_ATTACHMENT, renderer::ResourceState::PRESENT );
-
-		command_buffer->write_timestamp( timestamp_queries[ image_index ], Timestamps::FRAME_END );
+		frame_scope.end();
 		command_buffer->end_query( statistics_queries[ image_index ] );
 
 		command_buffer->end();
