@@ -523,11 +523,16 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		{ { .path = "fullscreen.vert", .stage = renderer::ShaderStage::VERTEX },
 		  { .path = "tonemap.frag", .stage = renderer::ShaderStage::FRAGMENT } } );
 
-	for ( const auto buffer : { &_draw_commands_buffer, &_shadowmap_draw_commands_buffer } )
+	const auto create_draw_commands_buffer = [ & ]()
 	{
-		*buffer = device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::INDIRECT_BUFFER
-											| renderer::Buffer::Usage::TRANSFER_DST | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-										sizeof( gpu_draw_commands ) );
+		return device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::INDIRECT_BUFFER
+										 | renderer::Buffer::Usage::TRANSFER_DST | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+									 sizeof( gpu_draw_commands ) );
+	};
+	_draw_commands_buffer = create_draw_commands_buffer();
+	for ( auto& buffer : _shadowmap_draw_commands_buffers )
+	{
+		buffer = create_draw_commands_buffer();
 	}
 
 	for ( auto& buffer : _draw_statistics_readback_buffers )
@@ -722,10 +727,10 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 	if ( shadow_cascades.count > 0 )
 	{
 		const auto label = cmd.debug_label( "Shadow Map" );
-		const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::DRAW_SHADOWS );
 		draw_shadowmap( bindless_manager,
 						pipelines,
 						cmd,
+						timings_pool,
 						frame_constants_address,
 						draw_buffer_address,
 						_draw_statistics_buffer.get_device_address(),
@@ -938,6 +943,60 @@ void SceneRenderer::compute_draws( const BindlessManager& bindless_manager,
 {
 	PROFILER_GPU_EVENT( "Compute Draws" );
 	const auto label = cmd.debug_label( "Culling" );
+	// Previous draws read commands both as indirect arguments and from shaders
+	cmd.buffer_barrier( draw_commands, renderer::ResourceState::ANY_BUFFER_READ, renderer::ResourceState::TRANSFER_DST );
+	clear_draw_commands( cmd, draw_commands, task_commands );
+	cmd.buffer_barrier( draw_commands, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ_WRITE );
+	dispatch_culling( bindless_manager,
+					  pipelines,
+					  cmd,
+					  pass_constants_address,
+					  draw_buffer_address,
+					  visibility_buffer,
+					  stats_buffer_address,
+					  draw_commands,
+					  lod_target,
+					  early,
+					  meshlet_occlusion,
+					  task_commands );
+	// Task and vertex shaders also read the commands
+	cmd.buffer_barrier( draw_commands, renderer::ResourceState::STORAGE_WRITE, renderer::ResourceState::ANY_BUFFER_READ );
+	cmd.buffer_barrier( visibility_buffer, renderer::ResourceState::STORAGE_READ_WRITE, renderer::ResourceState::STORAGE_READ_WRITE );
+}
+
+void SceneRenderer::clear_draw_commands( renderer::CommandBuffer& cmd, const renderer::Buffer& draw_commands, bool task_commands ) const
+{
+	if ( !task_commands )
+	{
+		// Draws without draw indirect count support read all the buckets' commands, commands past the count must be empty
+		const size_t commands_size = _draw_indirect_count ? 0 : _scene.size() * sizeof( gpu_draw_mesh_command );
+		cmd.fill_buffer( draw_commands, 0, offsetof( gpu_draw_mesh_commands, commands ) + commands_size, 0 );
+	}
+	else
+	{
+		for ( size_t i = 0; i < DRAW_BUCKETS_COUNT; ++i )
+		{
+			// Group count 0, Y, Z and draw count 1. Commands past the group count are never read
+			const auto header_offset = calc_header_offset<gpu_task_commands>( i );
+			cmd.fill_buffer( draw_commands, header_offset + offsetof( gpu_task_header, dispatch.groupCountX ), sizeof( uint32_t ), 0 );
+			cmd.fill_buffer( draw_commands, header_offset + offsetof( gpu_task_header, dispatch.groupCountY ), 3 * sizeof( uint32_t ), 1 );
+		}
+	}
+}
+
+void SceneRenderer::dispatch_culling( const BindlessManager& bindless_manager,
+									  const renderer::PipelineManager& pipelines,
+									  renderer::CommandBuffer& cmd,
+									  renderer::BufferHandle pass_constants_address,
+									  renderer::BufferHandle draw_buffer_address,
+									  const renderer::Buffer& visibility_buffer,
+									  renderer::BufferHandle stats_buffer_address,
+									  const renderer::Buffer& draw_commands,
+									  float lod_target,
+									  bool early,
+									  bool meshlet_occlusion,
+									  bool task_commands ) const
+{
 	compute_draws_constants constants { .draws_buffer = draw_buffer_address,
 										.visibility_buffer = visibility_buffer.get_device_address(),
 										.statistics_buffer = stats_buffer_address,
@@ -951,29 +1010,14 @@ void SceneRenderer::compute_draws( const BindlessManager& bindless_manager,
 		constants.depth_pyramid = _depth_pyramid.handles.sampled_texture;
 	}
 
-	// Previous draws read commands both as indirect arguments and from shaders
-	cmd.buffer_barrier( draw_commands, renderer::ResourceState::ANY_BUFFER_READ, renderer::ResourceState::TRANSFER_DST );
-	if ( !task_commands )
-	{
-		// Draws without draw indirect count support read all the buckets' commands, commands past the count must be empty
-		const size_t commands_size = _draw_indirect_count ? 0 : _scene.size() * sizeof( gpu_draw_mesh_command );
-		cmd.fill_buffer( draw_commands, 0, offsetof( gpu_draw_mesh_commands, commands ) + commands_size, 0 );
-	}
 	for ( size_t i = 0; i < DRAW_BUCKETS_COUNT; ++i )
 	{
 		const auto header_offset = task_commands ? calc_header_offset<gpu_task_commands>( i )
 												 : calc_header_offset<gpu_draw_mesh_commands>( i );
-		if ( task_commands )
-		{
-			// Group count 0, Y, Z and draw count 1. Commands past the group count are never read
-			cmd.fill_buffer( draw_commands, header_offset + offsetof( gpu_task_header, dispatch.groupCountX ), sizeof( uint32_t ), 0 );
-			cmd.fill_buffer( draw_commands, header_offset + offsetof( gpu_task_header, dispatch.groupCountY ), 3 * sizeof( uint32_t ), 1 );
-		}
 		constants.commands_buffers[ i ] = draw_commands.get_device_address()
 			+ get_draw_commands_segments( task_commands )[ i ].commands_offset;
 		constants.commands_count_buffers[ i ] = draw_commands.get_device_address() + header_offset;
 	}
-	cmd.buffer_barrier( draw_commands, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ_WRITE );
 
 	const auto pipeline_handle = task_commands ? ( early ? _compute_tasks_early_pipeline : _compute_tasks_late_pipeline )
 											   : ( early ? _compute_draws_early_pipeline : _compute_draws_late_pipeline );
@@ -982,9 +1026,6 @@ void SceneRenderer::compute_draws( const BindlessManager& bindless_manager,
 
 	cmd.push_constants( pipeline, constants );
 	cmd.dispatch( calc_group_count( static_cast<uint32_t>( _scene.size() ) ), 1, 1 );
-	// Task and vertex shaders also read the commands
-	cmd.buffer_barrier( draw_commands, renderer::ResourceState::STORAGE_WRITE, renderer::ResourceState::ANY_BUFFER_READ );
-	cmd.buffer_barrier( visibility_buffer, renderer::ResourceState::STORAGE_READ_WRITE, renderer::ResourceState::STORAGE_READ_WRITE );
 }
 
 void SceneRenderer::draw_opaques( const BindlessManager& bindless_manager,
@@ -1163,6 +1204,7 @@ SceneRenderer::setup_shadow_cascades( const Camera& camera, glm::vec3 main_light
 void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 									const renderer::PipelineManager& pipelines,
 									renderer::CommandBuffer& cmd,
+									renderer::TimestampQuery timings_pool,
 									renderer::BufferHandle frame_constants_address,
 									renderer::BufferHandle draw_buffer_address,
 									renderer::BufferHandle stats_buffer_address,
@@ -1177,6 +1219,50 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 		cmd.buffer_barrier( _shadowmap_visibility_buffer, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ );
 	}
 
+	const auto calc_pass_constants_address = [ & ]( size_t cascade )
+	{
+		return _shadowmap_pass_constant_buffers.get_device_address()
+			+ ( ( frame_index * SHADOW_CASCADE_MAX + cascade ) * sizeof( pass_constants ) );
+	};
+	const std::span cascades_draw_commands( begin( _shadowmap_draw_commands_buffers ), cascades.count );
+
+	// Each cascade has its own commands so that all the culling dispatches can run concurrently, then all the draws
+	{
+		PROFILER_GPU_EVENT( "Shadows Culling" );
+		const auto label = cmd.debug_label( "Culling" );
+		const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::CULLING_SHADOWS );
+		for ( const auto& draw_commands : cascades_draw_commands )
+		{
+			// Previous frame's draws read commands both as indirect arguments and from shaders
+			cmd.buffer_barrier( draw_commands, renderer::ResourceState::ANY_BUFFER_READ, renderer::ResourceState::TRANSFER_DST );
+			clear_draw_commands( cmd, draw_commands, use_mesh_shader );
+			cmd.buffer_barrier( draw_commands, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ_WRITE );
+		}
+		// Shadow passes only read the visibility buffer, the dispatches don't depend on each other
+		for ( size_t cascade = 0; cascade < cascades.count; ++cascade )
+		{
+			dispatch_culling( bindless_manager,
+							  pipelines,
+							  cmd,
+							  calc_pass_constants_address( cascade ),
+							  draw_buffer_address,
+							  _shadowmap_visibility_buffer,
+							  stats_buffer_address,
+							  cascades_draw_commands[ cascade ],
+							  cascades.texel_sizes[ static_cast<glm::length_t>( cascade ) ] * 2.f,
+							  true,
+							  false,
+							  use_mesh_shader );
+			// Task and vertex shaders also read the commands
+			cmd.buffer_barrier( cascades_draw_commands[ cascade ],
+								renderer::ResourceState::STORAGE_WRITE,
+								renderer::ResourceState::ANY_BUFFER_READ );
+		}
+	}
+
+	PROFILER_GPU_EVENT( "Draw Shadows" );
+	const auto label = cmd.debug_label( "Draw" );
+	const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::DRAW_SHADOWS );
 	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
 	const auto& pipeline = pipelines.get( use_mesh_shader ? _shadowmap_meshlet_pipeline : _shadowmap_mesh_pipeline );
 
@@ -1184,29 +1270,11 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 	for ( size_t cascade = 0; cascade < cascades.count; ++cascade )
 	{
 		const auto cascade_label = cmd.debug_label( cascade_labels[ cascade ] );
-		const auto pass_constants_address = _shadowmap_pass_constant_buffers.get_device_address()
-			+ ( ( frame_index * SHADOW_CASCADE_MAX + cascade ) * sizeof( pass_constants ) );
-		const float lod_target = cascades.texel_sizes[ static_cast<glm::length_t>( cascade ) ] * 2.f;
-
-		compute_draws( bindless_manager,
-					   pipelines,
-					   cmd,
-					   pass_constants_address,
-					   draw_buffer_address,
-					   _shadowmap_visibility_buffer,
-					   stats_buffer_address,
-					   _shadowmap_draw_commands_buffer,
-					   lod_target,
-					   true,
-					   false,
-					   use_mesh_shader );
-
-		PROFILER_GPU_EVENT( "Draw Shadows" );
-		const auto label = cmd.debug_label( "Draw" );
+		const auto& draw_commands = cascades_draw_commands[ cascade ];
 		cmd.begin_rendering( { .depth_target = { .target = _shadowmap_layer_views[ cascade ], .clear_value = { { 1.f } } } } );
 		cmd.bind_pipeline( pipeline, bindless_manager );
 		draw_meshes_constants draw_constants { .frame_constants = frame_constants_address,
-											   .pass_constants = pass_constants_address,
+											   .pass_constants = calc_pass_constants_address( cascade ),
 											   .draws_buffer = draw_buffer_address };
 		for ( int i = 0; i < 2; ++i )
 		{
@@ -1215,10 +1283,10 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 									 .cull_mode = bucket_cull_mode( i ),
 									 .depth_bias_constant = SHADOW_DEPTH_BIAS_CONSTANT,
 									 .depth_bias_slope = SHADOW_DEPTH_BIAS_SLOPE } );
-			draw_constants.commands_buffer = _shadowmap_draw_commands_buffer.get_device_address()
+			draw_constants.commands_buffer = draw_commands.get_device_address()
 				+ get_draw_commands_segments( use_mesh_shader )[ bucket + i ].commands_offset;
 			cmd.push_constants( pipeline, draw_constants );
-			draw_bucket( cmd, _shadowmap_draw_commands_buffer, bucket + i, use_mesh_shader );
+			draw_bucket( cmd, draw_commands, bucket + i, use_mesh_shader );
 		}
 		cmd.end_rendering();
 	}

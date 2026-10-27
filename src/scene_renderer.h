@@ -87,6 +87,7 @@ private:
 	// One indirect draw for all the commands of a bucket
 	void draw_bucket( renderer::CommandBuffer& cmd, const renderer::Buffer& draw_commands, size_t bucket, bool use_mesh_shader ) const;
 
+	// Culls the draws of a pass into draw_commands, with the barriers around it
 	void compute_draws( const BindlessManager& bindless_manager,
 						const renderer::PipelineManager& pipelines,
 						renderer::CommandBuffer& cmd,
@@ -99,6 +100,20 @@ private:
 						bool early,
 						bool meshlet_occlusion,
 						bool task_commands ) const;
+	// The steps of compute_draws without barriers, for callers that batch several passes
+	void clear_draw_commands( renderer::CommandBuffer& cmd, const renderer::Buffer& draw_commands, bool task_commands ) const;
+	void dispatch_culling( const BindlessManager& bindless_manager,
+						   const renderer::PipelineManager& pipelines,
+						   renderer::CommandBuffer& cmd,
+						   renderer::BufferHandle pass_constants_address,
+						   renderer::BufferHandle draw_buffer_address,
+						   const renderer::Buffer& visibility_buffer,
+						   renderer::BufferHandle stats_buffer_address,
+						   const renderer::Buffer& draw_commands,
+						   float lod_target,
+						   bool early,
+						   bool meshlet_occlusion,
+						   bool task_commands ) const;
 	// Matches MESHLET_PASS_* in mesh.task
 	enum class MeshletPass : uint32_t
 	{
@@ -154,6 +169,7 @@ private:
 	void draw_shadowmap( const BindlessManager& bindless_manager,
 						 const renderer::PipelineManager& pipelines,
 						 renderer::CommandBuffer& cmd,
+						 renderer::TimestampQuery timings_pool,
 						 renderer::BufferHandle frame_constants_address,
 						 renderer::BufferHandle draw_buffer_address,
 						 renderer::BufferHandle stats_buffer_address,
@@ -197,7 +213,7 @@ private:
 	DrawCommandsSegments _draw_mesh_segments;
 	DrawCommandsSegments _task_segments;
 	renderer::raii::Buffer _draw_commands_buffer;
-	renderer::raii::Buffer _shadowmap_draw_commands_buffer;
+	std::array<renderer::raii::Buffer, SHADOW_CASCADE_MAX> _shadowmap_draw_commands_buffers; // One per cascade
 	renderer::raii::Buffer _draw_statistics_buffer; // GPU only, accumulated by culling
 	std::array<renderer::raii::Buffer, renderer::MAX_FRAMES_IN_FLIGHT> _draw_statistics_readback_buffers;
 	renderer::PipelineHandle _mesh_pipeline;

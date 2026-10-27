@@ -139,7 +139,8 @@ void draw_ui( ui_data& data,
 		{
 			ImGui::SeparatorText( "Stats" );
 			ImGui::Text( "GPU times (ms): %.2f", gpu_timings[ std::to_underlying( GpuTiming::FRAME ) ] * 1e-6f );
-			ImGui::BulletText( "Draw shadows: %.2f", gpu_timings[ std::to_underlying( GpuTiming::DRAW_SHADOWS ) ] * 1e-6f );
+			ImGui::BulletText( "Shadows culling: %.2f", gpu_timings[ std::to_underlying( GpuTiming::CULLING_SHADOWS ) ] * 1e-6f );
+			ImGui::BulletText( "Shadows draw: %.2f", gpu_timings[ std::to_underlying( GpuTiming::DRAW_SHADOWS ) ] * 1e-6f );
 			ImGui::BulletText( "Early culling: %.2f", gpu_timings[ std::to_underlying( GpuTiming::CULLING_EARLY ) ] * 1e-6f );
 			ImGui::BulletText( "Early opaques draw: %.2f", gpu_timings[ std::to_underlying( GpuTiming::DRAW_OPAQUES_EARLY ) ] * 1e-6f );
 			ImGui::BulletText( "Late culling: %.2f", gpu_timings[ std::to_underlying( GpuTiming::CULLING_LATE ) ] * 1e-6f );

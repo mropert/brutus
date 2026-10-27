@@ -9,6 +9,7 @@
 enum class GpuTiming : uint32_t
 {
 	FRAME = 0,
+	CULLING_SHADOWS,
 	DRAW_SHADOWS,
 	CULLING_EARLY,
 	DRAW_OPAQUES_EARLY,
