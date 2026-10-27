@@ -12,7 +12,9 @@ class SceneRenderer
 {
 public:
 	static constexpr auto DRAW_BUCKETS_COUNT = std::to_underlying( material_type::COUNT );
-	static constexpr float FOV = 70.f;
+	// Vertical, in radians: 50.70 degrees. It used to be 70 degrees passed as radians by accident, which gave this angle;
+	// kept so that reference images and benchmarks stay comparable
+	static constexpr float FOV = 0.884962f;
 	static constexpr uint32_t SHADOW_CASCADE_MAX = 4;
 	// Task workgroups per bucket and pass, checked against the worst case of all draws at their largest LOD
 	static constexpr uint32_t MAX_TASK_COMMANDS = 256 * 1024;
