@@ -58,7 +58,7 @@ layout( push_constant ) uniform block
 	DrawCommandsCountBuffer commands_count_buffers[ 4 ];
 	VisibilityBuffer visibility_buffer;
 	DrawStatisticsBuffer statistics_buffer;
-	SceneConstants scene_constants;
+	PassConstants pass_constants;
 	uint draws_count;
 	float lod_target;
 	uint depth_pyramid;
@@ -68,7 +68,7 @@ layout( push_constant ) uniform block
 // Shadow passes use their own (depth-only) LOD chain, uniform for the whole dispatch
 MeshLOD get_mesh_lod( uint mesh_id, uint lod )
 {
-	return scene_constants.shadow_pass != 0 ? meshes[ mesh_id ].shadow_lods[ lod ] : meshes[ mesh_id ].lods[ lod ];
+	return pass_constants.shadow_pass != 0 ? meshes[ mesh_id ].shadow_lods[ lod ] : meshes[ mesh_id ].lods[ lod ];
 }
 
 void cull_draw( uint draw_id )
@@ -87,25 +87,25 @@ void cull_draw( uint draw_id )
 	bool visible = true;
 	for ( int i = 0; i < 6; ++i )
 	{
-		visible = visible && dot( scene_constants.frustum[ i ], vec4( mesh_center, 1 ) ) > -mesh_radius;
+		visible = visible && dot( pass_constants.frustum[ i ], vec4( mesh_center, 1 ) ) > -mesh_radius;
 	}
-	if ( scene_constants.shadow_pass != 0 )
+	if ( pass_constants.shadow_pass != 0 )
 	{
-		visible = visible && shadow_caster_visible( scene_constants, mesh_center, mesh_radius );
+		visible = visible && shadow_caster_visible( pass_constants, mesh_center, mesh_radius );
 	}
 
 	if ( LATE && visible )
 	{
 		vec4 aabb;
-		const vec3 center = ( scene_constants.view_matrix * vec4( mesh_center, 1 ) ).xyz * vec3( 1, 1, -1 );
-		const float znear = scene_constants.projection_matrix[ 3 ][ 2 ];
+		const vec3 center = ( pass_constants.view_matrix * vec4( mesh_center, 1 ) ).xyz * vec3( 1, 1, -1 );
+		const float znear = pass_constants.projection_matrix[ 3 ][ 2 ];
 		const uint pyramidWidth = 1024;
 		const uint pyramidHeight = 1024;
 		if ( projectSphere( center,
 							mesh_radius,
 							znear,
-							scene_constants.projection_matrix[ 0 ][ 0 ],
-							scene_constants.projection_matrix[ 1 ][ 1 ],
+							pass_constants.projection_matrix[ 0 ][ 0 ],
+							pass_constants.projection_matrix[ 1 ][ 1 ],
 							aabb ) )
 		{
 			const float width = ( aabb.z - aabb.x ) * pyramidWidth;
@@ -126,9 +126,9 @@ void cull_draw( uint draw_id )
 		// Both passes must select the same LOD: meshlet visibility bits are per LOD, and the late pass skips the meshlets
 		// the early pass drew
 		float dist = 1;
-		if ( scene_constants.projection_matrix[ 3 ][ 3 ] == 0.f )
+		if ( pass_constants.projection_matrix[ 3 ][ 3 ] == 0.f )
 		{
-			dist = max( distance( scene_constants.camera_position, mesh_center ) - mesh_radius, 0.0 );
+			dist = max( distance( pass_constants.view_position, mesh_center ) - mesh_radius, 0.0 );
 		}
 		const float threshold = dist * lod_target / mesh_scale;
 

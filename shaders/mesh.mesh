@@ -33,7 +33,8 @@ layout( buffer_reference, std430 ) readonly buffer DrawCommandsBuffer
 
 layout( push_constant, std430 ) uniform block
 {
-	SceneConstants scene_constants;
+	FrameConstants frame_constants;
+	PassConstants pass_constants;
 	MeshDrawBuffer draws_buffer;
 	DrawCommandsBuffer commands_buffer;
 };
@@ -59,10 +60,10 @@ void main()
 		const vec3 pos = rotate_by_quaternion( v.position, draws_buffer.mesh_draws[ draw_id ].rotation )
 				* draws_buffer.mesh_draws[ draw_id ].scale
 			+ draws_buffer.mesh_draws[ draw_id ].translation;
-		const vec4 clip_pos = scene_constants.view_projection_matrix * vec4( pos, 1 );
+		const vec4 clip_pos = pass_constants.view_projection_matrix * vec4( pos, 1 );
 		gl_MeshVerticesEXT[ i ].gl_Position = clip_pos;
 		// Only meaningful for w > 0, triangles with vertices behind the camera are never culled
-		vertex_pixels[ i ] = vec3( ( clip_pos.xy / clip_pos.w * 0.5 + 0.5 ) * scene_constants.viewport_size, clip_pos.w );
+		vertex_pixels[ i ] = vec3( ( clip_pos.xy / clip_pos.w * 0.5 + 0.5 ) * pass_constants.viewport_size, clip_pos.w );
 		outUV[ i ].x = v.uv_x;
 		outUV[ i ].y = v.uv_y;
 		const vec3 normal = rotate_by_quaternion( v.normal, draws_buffer.mesh_draws[ draw_id ].rotation );
@@ -82,7 +83,7 @@ void main()
 	//   1, 2, 4 and 8 samples project to (k + 0.5) / sample_count on each axis
 	const uint material_type = materials[ draws_buffer.mesh_draws[ draw_id ].material ].type;
 	const bool single_sided = material_type == 0 || material_type == 2;
-	const float sample_grid = float( scene_constants.sample_count );
+	const float sample_grid = float( pass_constants.sample_count );
 
 	for ( uint i = gl_LocalInvocationIndex; i < meshlet.triangle_count; i += gl_WorkGroupSize.x )
 	{

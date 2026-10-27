@@ -27,7 +27,8 @@ layout( buffer_reference, std430 ) readonly buffer DrawCommandsBuffer
 
 layout( push_constant, std430 ) uniform block
 {
-	SceneConstants scene_constants;
+	FrameConstants frame_constants;
+	PassConstants pass_constants;
 	MeshDrawBuffer draws_buffer;
 	DrawCommandsBuffer commands_buffer;
 };
@@ -42,7 +43,7 @@ void main()
 	const vec3 pos = rotate_by_quaternion( v.position, draws_buffer.mesh_draws[ draw_id ].rotation )
 			* draws_buffer.mesh_draws[ draw_id ].scale
 		+ draws_buffer.mesh_draws[ draw_id ].translation;
-	gl_Position = scene_constants.view_projection_matrix * vec4( pos, 1 );
+	gl_Position = pass_constants.view_projection_matrix * vec4( pos, 1 );
 	outUV.x = v.uv_x;
 	outUV.y = v.uv_y;
 	outNormal = rotate_by_quaternion( v.normal, draws_buffer.mesh_draws[ draw_id ].rotation );

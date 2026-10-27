@@ -15,7 +15,8 @@ layout( set = 0, binding = 2 ) uniform sampler samplers[ 8 ];
 layout( push_constant ) uniform constants
 {
 	vec3 grid_color;
-	SceneConstants scene_constants;
+	FrameConstants frame_constants;
+	PassConstants pass_constants;
 	float near_distance;
 	float far_distance;
 }
@@ -94,12 +95,12 @@ void main()
 	// The grid is unlit, but receives the main light shadow: scale it the same way direct + ambient lighting would,
 	// so unshadowed parts keep their color and shadowed ones only get the ambient part
 	const vec3 up = vec3( 0, 1, 0 );
-	const vec3 to_light = normalize( -PushConstants.scene_constants.main_light.xyz );
+	const vec3 to_light = normalize( -PushConstants.frame_constants.main_light.xyz );
 	const float NdotL = max( dot( up, to_light ), 0.0 );
-	const float shadow = compute_shadow( PushConstants.scene_constants, inWorldPos, up, to_light );
-	const float ambient = PushConstants.scene_constants.sky_to_sun;
+	const float shadow = compute_shadow( PushConstants.frame_constants, inWorldPos, up, to_light );
+	const float ambient = PushConstants.frame_constants.sky_to_sun;
 	const float lighting = ( NdotL * shadow + ambient ) / ( NdotL + ambient );
 
-	const vec3 tint = get_shadow_cascade_tint( PushConstants.scene_constants, inWorldPos );
+	const vec3 tint = get_shadow_cascade_tint( PushConstants.frame_constants, inWorldPos );
 	outFragColor = vec4( mix( PushConstants.grid_color, color, alpha ) * lighting * tint, 1 );
 }

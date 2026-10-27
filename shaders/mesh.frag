@@ -22,7 +22,7 @@ layout( std430, set = 1, binding = 1 ) readonly buffer ssbo2
 
 layout( push_constant, std430 ) uniform block
 {
-	SceneConstants scene_constants;
+	FrameConstants frame_constants;
 };
 
 #include "shadow.glsl"
@@ -107,7 +107,7 @@ float bump_terminator_shadowing( vec3 geometric_normal, vec3 shading_normal, vec
 // sky_to_sun is the "mood": higher = flatter/overcast.
 vec3 hemisphere_environment( vec3 direction )
 {
-	const float intensity = scene_constants.main_light.w * scene_constants.sky_to_sun;
+	const float intensity = frame_constants.main_light.w * frame_constants.sky_to_sun;
 	const vec3 sky_color = vec3( 0.5, 0.6, 0.7 ) * intensity;
 	const vec3 ground_color = vec3( 0.2, 0.18, 0.15 ) * intensity;
 	return mix( ground_color, sky_color, 0.5 * ( direction.y + 1.0 ) );
@@ -125,7 +125,7 @@ void main_basic_diffuse()
 	vec3 albedo = texture( sampler2D( textures[ materials[ inMaterial ].albedo_index ], samplers[ 0 ] ), inUV ).xyz
 		* materials[ inMaterial ].baseColor.xyz;
 	const vec3 N = normalize( inNormal );
-	const vec3 L = normalize( scene_constants.main_light.xyz );
+	const vec3 L = normalize( frame_constants.main_light.xyz );
 	const float NdotL = max( dot( N, -L ), 0.0 );
 
 	albedo = albedo * ( NdotL + 0.1 );
@@ -149,12 +149,12 @@ void main()
 		discard;
 	}
 
-	const vec3 L = normalize( -scene_constants.main_light.xyz );
+	const vec3 L = normalize( -frame_constants.main_light.xyz );
 	vec3 N = normalize( inNormal );
 	const float facing = gl_FrontFacing ? 1.0 : -1.0;
 	const vec3 geometric_normal = N * facing;
 
-	const float shadow = compute_shadow( scene_constants, inFragPos, geometric_normal, L );
+	const float shadow = compute_shadow( frame_constants, inFragPos, geometric_normal, L );
 
 	if ( materials[ inMaterial ].normal_index != -1 )
 	{
@@ -172,13 +172,13 @@ void main()
 	const float ambient_factor = 0.1;
 	vec3 color;
 
-	if ( scene_constants.pbr == 1 )
+	if ( frame_constants.pbr == 1 )
 	{
-		const vec3 V = normalize( scene_constants.camera_position - inFragPos );
+		const vec3 V = normalize( frame_constants.camera_position - inFragPos );
 		const vec3 H = normalize( V + L );
 		const float NdotV = max( dot( N, V ), 1e-4 );
 		const float HdotV = max( dot( H, V ), 1e-4 );
-		const float attenuation = scene_constants.main_light.w;
+		const float attenuation = frame_constants.main_light.w;
 		const vec3 radiance = vec3( 1.0, 1.0, 1.0 ) * attenuation;
 
 		// cook-torrance brdf
@@ -227,8 +227,8 @@ void main()
 	}
 	else
 	{
-		color = albedo.rgb * ( NdotL * direct_light * scene_constants.main_light.w * 0.5 + hemisphere_environment( N ) );
+		color = albedo.rgb * ( NdotL * direct_light * frame_constants.main_light.w * 0.5 + hemisphere_environment( N ) );
 	}
 
-	outFragColor = vec4( color * get_shadow_cascade_tint( scene_constants, inFragPos ), albedo.a );
+	outFragColor = vec4( color * get_shadow_cascade_tint( frame_constants, inFragPos ), albedo.a );
 }

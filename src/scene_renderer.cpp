@@ -86,7 +86,8 @@ namespace
 
 	struct draw_meshes_constants
 	{
-		renderer::BufferHandle scene_constants;
+		renderer::BufferHandle frame_constants;
+		renderer::BufferHandle pass_constants;
 		renderer::BufferHandle draws_buffer;
 		renderer::BufferHandle commands_buffer;
 		// Task shader only
@@ -98,7 +99,8 @@ namespace
 	struct grid_constants
 	{
 		glm::aligned_vec3 grid_color = { 0.1f, 0.1f, 0.1f };
-		renderer::BufferHandle scene_constants;
+		renderer::BufferHandle frame_constants;
+		renderer::BufferHandle pass_constants;
 		float near_distance = 50.f;
 		float far_distance = 60.f;
 	};
@@ -117,7 +119,7 @@ namespace
 		std::array<renderer::BufferHandle, SceneRenderer::DRAW_BUCKETS_COUNT> commands_count_buffers;
 		renderer::BufferHandle visibility_buffer;
 		renderer::BufferHandle statistics_buffer;
-		renderer::BufferHandle scene_constants;
+		renderer::BufferHandle pass_constants;
 		uint32_t draws_count;
 		float lod_target;
 		renderer::BindlessSampledTexture depth_pyramid;
@@ -129,34 +131,54 @@ namespace
 		return plane / glm::length( glm::vec3( plane ) );
 	}
 
-	struct scene_constants
+	// FrameConstants in constants.glsl. glm::aligned_vec3 takes 16 bytes where std430 lets a scalar follow a vec3, so
+	// they're only followed by 16 bytes aligned members
+	struct frame_constants
 	{
+		// Main camera
+		glm::aligned_vec3 camera_position;
+		glm::aligned_vec3 camera_forward;
+
+		// Lighting
+		glm::aligned_vec4 main_light; // xyz the direction the light travels, w its intensity
+		float sky_to_sun = 0.f;
+		uint32_t pbr = 0;
+
+		// Main light shadows
+		renderer::BindlessSampledTexture shadow_map;
+		uint32_t shadow_cascade_count = 0;
+		float shadow_distance = 0.f; // View depth up to which the main light casts shadows
+		std::array<glm::aligned_mat4, SceneRenderer::SHADOW_CASCADE_MAX> shadow_view_projection_matrices;
+		glm::aligned_vec4 shadow_cascade_splits; // Far view depth of each cascade
+		glm::aligned_vec4 shadow_cascade_texel_sizes; // World size of a shadow map texel in each cascade
+
+		// Debug
+		uint32_t show_shadow_cascades = 0;
+	};
+	static_assert( SceneRenderer::SHADOW_CASCADE_MAX == 4, "shadow_cascade_splits holds one split per vec4 component" );
+
+	// PassConstants in constants.glsl, same layout rules
+	struct pass_constants
+	{
+		// View
 		glm::mat4 view_projection_matrix;
 		glm::mat4 projection_matrix;
 		glm::mat4 view_matrix;
 		glm::mat4 inverse_view_matrix;
-		std::array<glm::mat4, SceneRenderer::SHADOW_CASCADE_MAX> shadow_view_projection_matrices;
-		glm::aligned_vec4 shadow_cascade_splits; // Far view depth of each cascade
-		glm::aligned_vec4 shadow_cascade_texel_sizes; // World size of a shadow map texel in each cascade
+		glm::aligned_vec3 view_position;
 		std::array<glm::aligned_vec4, 6> frustum;
+
+		// Render target
+		glm::aligned_vec2 viewport_size; // In pixels
+		uint32_t sample_count = 1; // Must use the standard sample locations
+
 		// Shadow passes only, see shadow_caster_visible() in constants.glsl
+		uint32_t shadow_pass = 0; // Non-zero when rendering a shadow map: use shadow (depth-only) LODs
 		std::array<glm::aligned_vec4, 6> shadow_receiver_planes;
 		glm::aligned_vec4 shadow_caster_sweep;
-		glm::vec3 camera_position;
-		uint32_t pbr;
-		glm::aligned_vec4 main_light;
-		float sky_to_sun;
-		renderer::BindlessSampledTexture shadow_map;
-		uint32_t shadow_pass = 0; // Non-zero when rendering a shadow map: use shadow (depth-only) LODs
-		glm::aligned_vec2 viewport_size; // In pixels
-		float shadow_distance = 0.f; // View depth up to which the main light casts shadows
-		uint32_t shadow_cascade_count = 0;
-		uint32_t show_shadow_cascades = 0;
-		uint32_t sample_count = 1; // Of the render target, must use the standard sample locations
 	};
-	static_assert( SceneRenderer::SHADOW_CASCADE_MAX == 4, "shadow_cascade_splits holds one split per vec4 component" );
 
-	scene_constants build_scene_constants( const Camera& camera, renderer::Extent2D extent, glm::vec4 main_light, float sky_to_sun )
+	pass_constants build_main_pass_constants( const Camera& camera, renderer::Extent2D extent, uint32_t sample_count )
 	{
 		const glm::mat4 view = camera.calc_view_matrix();
 		// https://nlguillemot.wordpress.com/2016/12/07/reversed-z-in-opengl/
@@ -164,14 +186,13 @@ namespace
 		const auto aspect_ratio = static_cast<float>( extent.width ) / extent.height;
 		glm::mat4 projection( f / aspect_ratio, 0.0f, 0.0f, 0.0f, 0.0f, f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.01f, 0.0f );
 
-		scene_constants constants { .view_projection_matrix = projection * view,
-									.projection_matrix = projection,
-									.view_matrix = view,
-									.inverse_view_matrix = glm::inverse( view ),
-									.camera_position = camera.position,
-									.main_light = main_light,
-									.sky_to_sun = sky_to_sun,
-									.viewport_size = { extent.width, extent.height } };
+		pass_constants constants { .view_projection_matrix = projection * view,
+								   .projection_matrix = projection,
+								   .view_matrix = view,
+								   .inverse_view_matrix = glm::inverse( view ),
+								   .view_position = camera.position,
+								   .viewport_size = { extent.width, extent.height },
+								   .sample_count = sample_count };
 
 		// Math from https://github.com/zeux/niagara
 		const float draw_distance = 500.f;
@@ -218,12 +239,12 @@ namespace
 	}
 
 	// Fits a shadow map to the [near_depth, far_depth] slice of the camera frustum
-	scene_constants build_scene_shadow_constants( const Camera& camera,
-												  uint32_t resolution,
-												  glm::vec3 light_direction,
-												  float near_depth,
-												  float far_depth,
-												  renderer::Extent2D scene_extent )
+	pass_constants build_shadow_pass_constants( const Camera& camera,
+												uint32_t resolution,
+												glm::vec3 light_direction,
+												float near_depth,
+												float far_depth,
+												renderer::Extent2D scene_extent )
 	{
 		const auto bounds = calc_view_slice_corners( camera, scene_extent, near_depth, far_depth );
 
@@ -249,14 +270,13 @@ namespace
 		const glm::mat4 view = glm::lookAtRH( eye, center, up );
 		const glm::mat4 projection = glm::orthoRH_ZO( -radius, radius, -radius, radius, 0.f, backOff + radius );
 
-		scene_constants constants { .view_projection_matrix = projection * view,
-									.projection_matrix = projection,
-									.view_matrix = view,
-									.inverse_view_matrix = glm::inverse( view ),
-									.camera_position = camera.position,
-									.main_light = { 0.f, 0.f, 0.f, -1.f },
-									.shadow_pass = 1,
-									.viewport_size = { resolution, resolution } };
+		pass_constants constants { .view_projection_matrix = projection * view,
+								   .projection_matrix = projection,
+								   .view_matrix = view,
+								   .inverse_view_matrix = glm::inverse( view ),
+								   .view_position = eye,
+								   .viewport_size = { resolution, resolution },
+								   .shadow_pass = 1 };
 
 		const auto transposed_vp = glm::transpose( constants.view_projection_matrix );
 		constants.frustum[ 0 ] = normalize_plane( transposed_vp[ 3 ] + transposed_vp[ 0 ] ); // x + w < 0
@@ -271,8 +291,8 @@ namespace
 
 	// The receivers that sample a cascade are the visible points between near_depth and far_depth of view depth. Planes
 	// are pushed out by margin, so that testing a caster's sphere also covers lookups up to margin away from the receiver
-	void set_shadow_receivers( scene_constants& constants,
-							   const scene_constants& camera_constants,
+	void set_shadow_receivers( pass_constants& constants,
+							   const pass_constants& camera_constants,
 							   const Camera& camera,
 							   renderer::Extent2D scene_extent,
 							   glm::vec3 light_direction,
@@ -355,12 +375,17 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 														   .usage = usage::DEPTH_STENCIL_ATTACHMENT | usage::SAMPLED,
 														   .extent = { .width = 2048, .height = 2048 },
 														   .layers = SHADOW_CASCADE_MAX } ) ) )
-	, _constant_buffers( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-											   sizeof( std::array<scene_constants, renderer::MAX_FRAMES_IN_FLIGHT> ),
-											   renderer::Buffer::CpuUsage::WRITE ) )
-	, _shadowmap_constant_buffers(
+	, _frame_constant_buffers(
 		  device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-								sizeof( std::array<scene_constants, renderer::MAX_FRAMES_IN_FLIGHT * SHADOW_CASCADE_MAX> ),
+								sizeof( std::array<frame_constants, renderer::MAX_FRAMES_IN_FLIGHT> ),
+								renderer::Buffer::CpuUsage::WRITE ) )
+	, _pass_constant_buffers(
+		  device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+								sizeof( std::array<pass_constants, renderer::MAX_FRAMES_IN_FLIGHT> ),
+								renderer::Buffer::CpuUsage::WRITE ) )
+	, _shadowmap_pass_constant_buffers(
+		  device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+								sizeof( std::array<pass_constants, renderer::MAX_FRAMES_IN_FLIGHT * SHADOW_CASCADE_MAX> ),
 								renderer::Buffer::CpuUsage::WRITE ) )
 	, _draw_buffers( device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
 										   sizeof( std::array<MeshDraw, MAX_DRAWS> ) * renderer::MAX_FRAMES_IN_FLIGHT,
@@ -650,41 +675,61 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 	memcpy( static_cast<Draws*>( _draw_buffers.get_mapped_address() ) + frame_index, _scene.data(), sizeof( MeshDraw ) * _scene.size() );
 	const auto draw_buffer_address = _draw_buffers.get_device_address() + ( frame_index * sizeof( Draws ) );
 
+	const bool use_mesh_shader = index_buffer == nullptr;
+
 	ShadowCascades shadow_cascades;
 	if ( shadow_cascade_count > 0 )
 	{
-		const auto label = cmd.debug_label( "Shadow Map" );
-		shadow_cascades = draw_shadowmap( bindless_manager,
-										  pipelines,
-										  cmd,
-										  draw_buffer_address,
-										  _draw_statistics_buffer.get_device_address(),
-										  camera,
-										  main_light,
-										  shadow_distance,
-										  std::min( shadow_cascade_count, SHADOW_CASCADE_MAX ),
-										  index_buffer == nullptr );
+		shadow_cascades = setup_shadow_cascades( camera,
+												 main_light,
+												 shadow_distance,
+												 std::min( shadow_cascade_count, SHADOW_CASCADE_MAX ) );
 	}
 
 	{
-		auto constants = build_scene_constants( camera, _extent, main_light, sky_illumination );
+		const glm::mat4 inverse_view = glm::inverse( camera.calc_view_matrix() );
+		frame_constants constants { .camera_position = camera.position,
+									.camera_forward = -glm::vec3( inverse_view[ 2 ] ),
+									.main_light = main_light,
+									.sky_to_sun = sky_illumination,
+									.pbr = use_pbr ? 1u : 0u };
 		if ( shadow_cascades.count > 0 )
 		{
-			constants.shadow_view_projection_matrices = shadow_cascades.view_projections;
+			constants.shadow_map = _shadowmap.handles.sampled_texture;
+			constants.shadow_cascade_count = shadow_cascades.count;
+			constants.shadow_distance = shadow_distance;
+			std::ranges::copy( shadow_cascades.view_projections, begin( constants.shadow_view_projection_matrices ) );
 			constants.shadow_cascade_splits = shadow_cascades.splits;
 			constants.shadow_cascade_texel_sizes = shadow_cascades.texel_sizes;
-			constants.shadow_cascade_count = shadow_cascades.count;
 			constants.show_shadow_cascades = show_shadow_cascades ? 1 : 0;
-			constants.shadow_map = _shadowmap.handles.sampled_texture;
-			constants.shadow_distance = shadow_distance;
 		}
-		constants.pbr = use_pbr ? 1 : 0;
-		constants.sample_count = SAMPLE_COUNT;
-		memcpy( static_cast<scene_constants*>( _constant_buffers.get_mapped_address() ) + frame_index, &constants, sizeof( constants ) );
+		memcpy( static_cast<frame_constants*>( _frame_constant_buffers.get_mapped_address() ) + frame_index,
+				&constants,
+				sizeof( constants ) );
 	}
-	const auto constants_address = _constant_buffers.get_device_address() + ( frame_index * sizeof( scene_constants ) );
+	const auto frame_constants_address = _frame_constant_buffers.get_device_address() + ( frame_index * sizeof( frame_constants ) );
 
-	const bool use_mesh_shader = index_buffer == nullptr;
+	{
+		const auto constants = build_main_pass_constants( camera, _extent, SAMPLE_COUNT );
+		memcpy( static_cast<pass_constants*>( _pass_constant_buffers.get_mapped_address() ) + frame_index,
+				&constants,
+				sizeof( constants ) );
+	}
+	const auto pass_constants_address = _pass_constant_buffers.get_device_address() + ( frame_index * sizeof( pass_constants ) );
+
+	if ( shadow_cascades.count > 0 )
+	{
+		const auto label = cmd.debug_label( "Shadow Map" );
+		draw_shadowmap( bindless_manager,
+						pipelines,
+						cmd,
+						frame_constants_address,
+						draw_buffer_address,
+						_draw_statistics_buffer.get_device_address(),
+						shadow_cascades,
+						use_mesh_shader );
+	}
+
 	const bool meshlet_occlusion = use_occlusion_culling && use_mesh_shader;
 	if ( meshlet_occlusion )
 	{
@@ -706,7 +751,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		compute_draws( bindless_manager,
 					   pipelines,
 					   cmd,
-					   constants_address,
+					   pass_constants_address,
 					   draw_buffer_address,
 					   _draw_visibility_buffer,
 					   _draw_statistics_buffer.get_device_address(),
@@ -723,7 +768,8 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		draw_opaques( bindless_manager,
 					  pipelines,
 					  cmd,
-					  constants_address,
+					  frame_constants_address,
+					  pass_constants_address,
 					  draw_buffer_address,
 					  use_mesh_shader,
 					  meshlet_occlusion ? MeshletPass::EARLY : MeshletPass::NONE );
@@ -771,7 +817,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		compute_draws( bindless_manager,
 					   pipelines,
 					   cmd,
-					   constants_address,
+					   pass_constants_address,
 					   draw_buffer_address,
 					   _draw_visibility_buffer,
 					   _draw_statistics_buffer.get_device_address(),
@@ -791,7 +837,8 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		draw_opaques( bindless_manager,
 					  pipelines,
 					  cmd,
-					  constants_address,
+					  frame_constants_address,
+					  pass_constants_address,
 					  draw_buffer_address,
 					  use_mesh_shader,
 					  meshlet_occlusion ? MeshletPass::LATE : MeshletPass::NONE );
@@ -803,11 +850,21 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		cmd.begin_rendering( { .color_target = { .target = _color_texture_view }, .depth_target = { .target = _depth_texture_view } } );
 		if ( !index_buffer )
 		{
-			draw_transparent_meshlets( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
+			draw_transparent_meshlets( bindless_manager,
+									   pipelines,
+									   cmd,
+									   frame_constants_address,
+									   pass_constants_address,
+									   draw_buffer_address );
 		}
 		else
 		{
-			draw_transparent_meshes( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
+			draw_transparent_meshes( bindless_manager,
+									 pipelines,
+									 cmd,
+									 frame_constants_address,
+									 pass_constants_address,
+									 draw_buffer_address );
 		}
 		cmd.end_rendering();
 	}
@@ -830,7 +887,8 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		cmd.set_dynamic_state( { .viewport = _extent } );
 		//cmd.write_timestamp( timestamp_queries[ image_index ], Timestamps::DRAW_GRID );
 		cmd.bind_pipeline( pipelines.get( _grid_pipeline ), bindless_manager );
-		cmd.push_constants( pipelines.get( _grid_pipeline ), grid_constants { .scene_constants = constants_address } );
+		cmd.push_constants( pipelines.get( _grid_pipeline ),
+							grid_constants { .frame_constants = frame_constants_address, .pass_constants = pass_constants_address } );
 		cmd.draw( 4 );
 		cmd.end_rendering();
 	}
@@ -857,7 +915,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 void SceneRenderer::compute_draws( const BindlessManager& bindless_manager,
 								   const renderer::PipelineManager& pipelines,
 								   renderer::CommandBuffer& cmd,
-								   renderer::BufferHandle constants_address,
+								   renderer::BufferHandle pass_constants_address,
 								   renderer::BufferHandle draw_buffer_address,
 								   const renderer::Buffer& visibility_buffer,
 								   renderer::BufferHandle stats_buffer_address,
@@ -872,7 +930,7 @@ void SceneRenderer::compute_draws( const BindlessManager& bindless_manager,
 	compute_draws_constants constants { .draws_buffer = draw_buffer_address,
 										.visibility_buffer = visibility_buffer.get_device_address(),
 										.statistics_buffer = stats_buffer_address,
-										.scene_constants = constants_address,
+										.pass_constants = pass_constants_address,
 										.draws_count = static_cast<uint32_t>( _scene.size() ),
 										.lod_target = lod_target,
 										.meshlet_occlusion = meshlet_occlusion ? 1u : 0u };
@@ -921,7 +979,8 @@ void SceneRenderer::compute_draws( const BindlessManager& bindless_manager,
 void SceneRenderer::draw_opaques( const BindlessManager& bindless_manager,
 								  const renderer::PipelineManager& pipelines,
 								  renderer::CommandBuffer& cmd,
-								  renderer::BufferHandle constants_address,
+								  renderer::BufferHandle frame_constants_address,
+								  renderer::BufferHandle pass_constants_address,
 								  renderer::BufferHandle draw_buffer_address,
 								  bool use_mesh_shader,
 								  MeshletPass meshlet_pass ) const
@@ -931,24 +990,32 @@ void SceneRenderer::draw_opaques( const BindlessManager& bindless_manager,
 	//cmd.write_timestamp( timestamp_queries[ image_index ], early ? Timestamps::DRAW_MESHES_EARLY : Timestamps::DRAW_MESHES_LATE );
 	if ( use_mesh_shader )
 	{
-		draw_opaque_meshlets( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address, meshlet_pass );
+		draw_opaque_meshlets( bindless_manager,
+							  pipelines,
+							  cmd,
+							  frame_constants_address,
+							  pass_constants_address,
+							  draw_buffer_address,
+							  meshlet_pass );
 	}
 	else
 	{
-		draw_opaque_meshes( bindless_manager, pipelines, cmd, constants_address, draw_buffer_address );
+		draw_opaque_meshes( bindless_manager, pipelines, cmd, frame_constants_address, pass_constants_address, draw_buffer_address );
 	}
 }
 
 void SceneRenderer::draw_opaque_meshlets( const BindlessManager& bindless_manager,
 										  const renderer::PipelineManager& pipelines,
 										  renderer::CommandBuffer& cmd,
-										  renderer::BufferHandle constants_address,
+										  renderer::BufferHandle frame_constants_address,
+										  renderer::BufferHandle pass_constants_address,
 										  renderer::BufferHandle draw_buffer_address,
 										  MeshletPass meshlet_pass ) const
 {
 	PROFILER_GPU_EVENT( "Draw Meshlets" );
 	cmd.bind_pipeline( pipelines.get( _meshlet_pipeline ), bindless_manager );
-	draw_meshes_constants constants { .scene_constants = constants_address,
+	draw_meshes_constants constants { .frame_constants = frame_constants_address,
+									  .pass_constants = pass_constants_address,
 									  .draws_buffer = draw_buffer_address,
 									  .meshlet_visibility = _meshlet_visibility_buffer.get_device_address(),
 									  .depth_pyramid = _depth_pyramid.handles.sampled_texture,
@@ -966,12 +1033,15 @@ void SceneRenderer::draw_opaque_meshlets( const BindlessManager& bindless_manage
 void SceneRenderer::draw_opaque_meshes( const BindlessManager& bindless_manager,
 										const renderer::PipelineManager& pipelines,
 										renderer::CommandBuffer& cmd,
-										renderer::BufferHandle constants_address,
+										renderer::BufferHandle frame_constants_address,
+										renderer::BufferHandle pass_constants_address,
 										renderer::BufferHandle draw_buffer_address ) const
 {
 	PROFILER_GPU_EVENT( "Draw Meshes" );
 	cmd.bind_pipeline( pipelines.get( _mesh_pipeline ), bindless_manager );
-	draw_meshes_constants constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
+	draw_meshes_constants constants { .frame_constants = frame_constants_address,
+									  .pass_constants = pass_constants_address,
+									  .draws_buffer = draw_buffer_address };
 	for ( int i = 0; i < 2; ++i )
 	{
 		const auto bucket = std::to_underlying( material_type::OPAQUE_SINGLE );
@@ -985,11 +1055,14 @@ void SceneRenderer::draw_opaque_meshes( const BindlessManager& bindless_manager,
 void SceneRenderer::draw_transparent_meshlets( const BindlessManager& bindless_manager,
 											   const renderer::PipelineManager& pipelines,
 											   renderer::CommandBuffer& cmd,
-											   renderer::BufferHandle constants_address,
+											   renderer::BufferHandle frame_constants_address,
+											   renderer::BufferHandle pass_constants_address,
 											   renderer::BufferHandle draw_buffer_address ) const
 {
 	PROFILER_GPU_EVENT( "Draw Transparent Meshlets" );
-	draw_meshes_constants constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
+	draw_meshes_constants constants { .frame_constants = frame_constants_address,
+									  .pass_constants = pass_constants_address,
+									  .draws_buffer = draw_buffer_address };
 	for ( int pass = 0; pass < 2; ++pass )
 	{
 		const auto pipeline = pipelines.get( pass == 0 ? _meshlet_alpha_clip_pipeline : _meshlet_alpha_blend_pipeline );
@@ -1008,11 +1081,14 @@ void SceneRenderer::draw_transparent_meshlets( const BindlessManager& bindless_m
 void SceneRenderer::draw_transparent_meshes( const BindlessManager& bindless_manager,
 											 const renderer::PipelineManager& pipelines,
 											 renderer::CommandBuffer& cmd,
-											 renderer::BufferHandle constants_address,
+											 renderer::BufferHandle frame_constants_address,
+											 renderer::BufferHandle pass_constants_address,
 											 renderer::BufferHandle draw_buffer_address ) const
 {
 	PROFILER_GPU_EVENT( "Draw Transparent Meshes" );
-	draw_meshes_constants constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
+	draw_meshes_constants constants { .frame_constants = frame_constants_address,
+									  .pass_constants = pass_constants_address,
+									  .draws_buffer = draw_buffer_address };
 	for ( int pass = 0; pass < 2; ++pass )
 	{
 		const auto pipeline = pipelines.get( pass == 0 ? _mesh_alpha_clip_pipeline : _mesh_alpha_blend_pipeline );
@@ -1029,45 +1105,25 @@ void SceneRenderer::draw_transparent_meshes( const BindlessManager& bindless_man
 	}
 }
 
-SceneRenderer::ShadowCascades SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
-															 const renderer::PipelineManager& pipelines,
-															 renderer::CommandBuffer& cmd,
-															 renderer::BufferHandle draw_buffer_address,
-															 renderer::BufferHandle stats_buffer_address,
-															 const Camera& camera,
-															 glm::vec3 main_light,
-															 float shadow_distance,
-															 uint32_t cascade_count,
-															 bool use_mesh_shader )
+SceneRenderer::ShadowCascades
+SceneRenderer::setup_shadow_cascades( const Camera& camera, glm::vec3 main_light, float shadow_distance, uint32_t cascade_count )
 {
 	const auto frame_index = _frames % renderer::MAX_FRAMES_IN_FLIGHT;
 	const auto shadowmap_resolution = _shadowmap.texture.get_extent().width;
 	constexpr float shadow_near_depth = 0.1f;
 	ShadowCascades cascades { .splits = compute_shadow_cascade_splits( cascade_count, shadow_near_depth, shadow_distance ),
 							  .count = cascade_count };
+	const auto camera_constants = build_main_pass_constants( camera, _extent, SAMPLE_COUNT );
 
-	if ( _frames == 0 )
-	{
-		cmd.fill_buffer( _shadowmap_visibility_buffer, 0, _shadowmap_visibility_buffer.get_size(), 0x01010101 );
-		cmd.buffer_barrier( _shadowmap_visibility_buffer, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ );
-	}
-
-	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
-	const auto& pipeline = pipelines.get( use_mesh_shader ? _shadowmap_meshlet_pipeline : _shadowmap_mesh_pipeline );
-	const auto camera_constants = build_scene_constants( camera, _extent, { }, 0.f );
-
-	static constexpr std::array<const char*, SHADOW_CASCADE_MAX> cascade_labels { "Cascade 0", "Cascade 1", "Cascade 2", "Cascade 3" };
 	for ( size_t cascade = 0; cascade < cascade_count; ++cascade )
 	{
-		const auto cascade_label = cmd.debug_label( cascade_labels[ cascade ] );
 		const float near_depth = cascade == 0 ? shadow_near_depth : cascades.splits[ static_cast<glm::length_t>( cascade - 1 ) ];
 		const float far_depth = cascades.splits[ static_cast<glm::length_t>( cascade ) ];
-		auto constants = build_scene_shadow_constants( camera, shadowmap_resolution, main_light, near_depth, far_depth, _extent );
+		auto constants = build_shadow_pass_constants( camera, shadowmap_resolution, main_light, near_depth, far_depth, _extent );
 		cascades.view_projections[ cascade ] = constants.view_projection_matrix;
 
 		const float texel_world_size = 2.f / ( constants.projection_matrix[ 0 ][ 0 ] * shadowmap_resolution );
 		cascades.texel_sizes[ static_cast<glm::length_t>( cascade ) ] = texel_world_size;
-		const float lod_target = texel_world_size * 2.f;
 
 		// Matches the cascade selection in shadow.glsl: cascade 0 also covers view depths under shadow_near_depth, and the
 		// end of the previous cascade's slice blends into this one
@@ -1086,16 +1142,46 @@ SceneRenderer::ShadowCascades SceneRenderer::draw_shadowmap( const BindlessManag
 							  far_depth,
 							  texel_world_size * SHADOW_CASTER_MARGIN_TEXELS );
 
-		const auto constants_index = frame_index * SHADOW_CASCADE_MAX + cascade;
-		memcpy( static_cast<scene_constants*>( _shadowmap_constant_buffers.get_mapped_address() ) + constants_index,
+		memcpy( static_cast<pass_constants*>( _shadowmap_pass_constant_buffers.get_mapped_address() ) + frame_index * SHADOW_CASCADE_MAX
+					+ cascade,
 				&constants,
 				sizeof( constants ) );
-		const auto constants_address = _shadowmap_constant_buffers.get_device_address() + ( constants_index * sizeof( scene_constants ) );
+	}
+	return cascades;
+}
+
+void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
+									const renderer::PipelineManager& pipelines,
+									renderer::CommandBuffer& cmd,
+									renderer::BufferHandle frame_constants_address,
+									renderer::BufferHandle draw_buffer_address,
+									renderer::BufferHandle stats_buffer_address,
+									const ShadowCascades& cascades,
+									bool use_mesh_shader )
+{
+	const auto frame_index = _frames % renderer::MAX_FRAMES_IN_FLIGHT;
+
+	if ( _frames == 0 )
+	{
+		cmd.fill_buffer( _shadowmap_visibility_buffer, 0, _shadowmap_visibility_buffer.get_size(), 0x01010101 );
+		cmd.buffer_barrier( _shadowmap_visibility_buffer, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ );
+	}
+
+	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
+	const auto& pipeline = pipelines.get( use_mesh_shader ? _shadowmap_meshlet_pipeline : _shadowmap_mesh_pipeline );
+
+	static constexpr std::array<const char*, SHADOW_CASCADE_MAX> cascade_labels { "Cascade 0", "Cascade 1", "Cascade 2", "Cascade 3" };
+	for ( size_t cascade = 0; cascade < cascades.count; ++cascade )
+	{
+		const auto cascade_label = cmd.debug_label( cascade_labels[ cascade ] );
+		const auto pass_constants_address = _shadowmap_pass_constant_buffers.get_device_address()
+			+ ( ( frame_index * SHADOW_CASCADE_MAX + cascade ) * sizeof( pass_constants ) );
+		const float lod_target = cascades.texel_sizes[ static_cast<glm::length_t>( cascade ) ] * 2.f;
 
 		compute_draws( bindless_manager,
 					   pipelines,
 					   cmd,
-					   constants_address,
+					   pass_constants_address,
 					   draw_buffer_address,
 					   _shadowmap_visibility_buffer,
 					   stats_buffer_address,
@@ -1109,7 +1195,9 @@ SceneRenderer::ShadowCascades SceneRenderer::draw_shadowmap( const BindlessManag
 		const auto label = cmd.debug_label( "Draw" );
 		cmd.begin_rendering( { .depth_target = { .target = _shadowmap_layer_views[ cascade ], .clear_value = { { 1.f } } } } );
 		cmd.bind_pipeline( pipeline, bindless_manager );
-		draw_meshes_constants draw_constants { .scene_constants = constants_address, .draws_buffer = draw_buffer_address };
+		draw_meshes_constants draw_constants { .frame_constants = frame_constants_address,
+											   .pass_constants = pass_constants_address,
+											   .draws_buffer = draw_buffer_address };
 		for ( int i = 0; i < 2; ++i )
 		{
 			const auto bucket = std::to_underlying( material_type::OPAQUE_SINGLE );
@@ -1125,5 +1213,4 @@ SceneRenderer::ShadowCascades SceneRenderer::draw_shadowmap( const BindlessManag
 		cmd.end_rendering();
 	}
 	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::DEPTH_ATTACHMENT, renderer::ResourceState::FRAGMENT_SHADER_READ );
-	return cascades;
 }

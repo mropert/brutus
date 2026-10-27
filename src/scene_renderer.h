@@ -89,7 +89,7 @@ private:
 	void compute_draws( const BindlessManager& bindless_manager,
 						const renderer::PipelineManager& pipelines,
 						renderer::CommandBuffer& cmd,
-						renderer::BufferHandle constants_address,
+						renderer::BufferHandle pass_constants_address,
 						renderer::BufferHandle draw_buffer_address,
 						const renderer::Buffer& visibility_buffer,
 						renderer::BufferHandle stats_buffer_address,
@@ -108,31 +108,36 @@ private:
 	void draw_opaques( const BindlessManager& bindless_manager,
 					   const renderer::PipelineManager& pipelines,
 					   renderer::CommandBuffer& cmd,
-					   renderer::BufferHandle constants_address,
+					   renderer::BufferHandle frame_constants_address,
+					   renderer::BufferHandle pass_constants_address,
 					   renderer::BufferHandle draw_buffer_address,
 					   bool use_mesh_shader,
 					   MeshletPass meshlet_pass ) const;
 	void draw_opaque_meshlets( const BindlessManager& bindless_manager,
 							   const renderer::PipelineManager& pipelines,
 							   renderer::CommandBuffer& cmd,
-							   renderer::BufferHandle constants_address,
+							   renderer::BufferHandle frame_constants_address,
+							   renderer::BufferHandle pass_constants_address,
 							   renderer::BufferHandle draw_buffer_address,
 							   MeshletPass meshlet_pass ) const;
 	void draw_opaque_meshes( const BindlessManager& bindless_manager,
 							 const renderer::PipelineManager& pipelines,
 							 renderer::CommandBuffer& cmd,
-							 renderer::BufferHandle constants_address,
+							 renderer::BufferHandle frame_constants_address,
+							 renderer::BufferHandle pass_constants_address,
 							 renderer::BufferHandle draw_buffer_address ) const;
 
 	void draw_transparent_meshlets( const BindlessManager& bindless_manager,
 									const renderer::PipelineManager& pipelines,
 									renderer::CommandBuffer& cmd,
-									renderer::BufferHandle constants_address,
+									renderer::BufferHandle frame_constants_address,
+									renderer::BufferHandle pass_constants_address,
 									renderer::BufferHandle draw_buffer_address ) const;
 	void draw_transparent_meshes( const BindlessManager& bindless_manager,
 								  const renderer::PipelineManager& pipelines,
 								  renderer::CommandBuffer& cmd,
-								  renderer::BufferHandle constants_address,
+								  renderer::BufferHandle frame_constants_address,
+								  renderer::BufferHandle pass_constants_address,
 								  renderer::BufferHandle draw_buffer_address ) const;
 
 	struct ShadowCascades
@@ -143,16 +148,16 @@ private:
 		uint32_t count = 0;
 	};
 
-	ShadowCascades draw_shadowmap( const BindlessManager& bindless_manager,
-								   const renderer::PipelineManager& pipelines,
-								   renderer::CommandBuffer& cmd,
-								   renderer::BufferHandle draw_buffer_address,
-								   renderer::BufferHandle stats_buffer_address,
-								   const Camera& camera,
-								   glm::vec3 main_light,
-								   float shadow_distance,
-								   uint32_t cascade_count,
-								   bool use_mesh_shader );
+	// Fits the cascades to the camera and writes their pass constants for this frame
+	ShadowCascades setup_shadow_cascades( const Camera& camera, glm::vec3 main_light, float shadow_distance, uint32_t cascade_count );
+	void draw_shadowmap( const BindlessManager& bindless_manager,
+						 const renderer::PipelineManager& pipelines,
+						 renderer::CommandBuffer& cmd,
+						 renderer::BufferHandle frame_constants_address,
+						 renderer::BufferHandle draw_buffer_address,
+						 renderer::BufferHandle stats_buffer_address,
+						 const ShadowCascades& cascades,
+						 bool use_mesh_shader );
 
 	struct MeshDraw
 	{
@@ -177,8 +182,9 @@ private:
 	renderer::BindlessTexture _depth_pyramid;
 	renderer::BindlessTexture _shadowmap; // One layer per cascade
 	std::array<renderer::raii::TextureView, SHADOW_CASCADE_MAX> _shadowmap_layer_views;
-	renderer::raii::Buffer _constant_buffers;
-	renderer::raii::Buffer _shadowmap_constant_buffers;
+	renderer::raii::Buffer _frame_constant_buffers;
+	renderer::raii::Buffer _pass_constant_buffers;
+	renderer::raii::Buffer _shadowmap_pass_constant_buffers; // One per cascade
 	renderer::raii::Buffer _draw_buffers;
 	renderer::raii::Buffer _draw_visibility_buffer;
 	renderer::raii::Buffer _shadowmap_visibility_buffer;

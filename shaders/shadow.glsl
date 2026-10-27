@@ -14,14 +14,13 @@ const float SHADOW_PCF_TENT_RADIUS = 2.5;
 const float SHADOW_CASCADE_BLEND_RANGE = 0.25;
 
 // Shadow maps are fitted to the view frustum, so they are selected and faded based on view depth
-float shadow_view_depth( SceneConstants constants, vec3 world_pos )
+float shadow_view_depth( FrameConstants constants, vec3 world_pos )
 {
-	const vec3 camera_forward = -constants.inverse_view_matrix[ 2 ].xyz;
-	return dot( world_pos - constants.camera_position, camera_forward );
+	return dot( world_pos - constants.camera_position, constants.camera_forward );
 }
 
 // Cascades are fitted to consecutive view depth slices
-uint select_shadow_cascade( SceneConstants constants, float view_depth )
+uint select_shadow_cascade( FrameConstants constants, float view_depth )
 {
 	uint cascade = 0;
 	while ( cascade + 1 < constants.shadow_cascade_count && view_depth > constants.shadow_cascade_splits[ cascade ] )
@@ -32,7 +31,7 @@ uint select_shadow_cascade( SceneConstants constants, float view_depth )
 }
 
 // Color tint of the cascade covering world_pos for debugging, (1, 1, 1) when disabled or outside of cascades
-vec3 get_shadow_cascade_tint( SceneConstants constants, vec3 world_pos )
+vec3 get_shadow_cascade_tint( FrameConstants constants, vec3 world_pos )
 {
 	const float view_depth = shadow_view_depth( constants, world_pos );
 	if ( constants.show_shadow_cascades == 0 || constants.shadow_map == -1 || view_depth > constants.shadow_distance )
@@ -54,7 +53,7 @@ vec2 shadow_tent_cdf( vec2 u )
 }
 
 // Returns 1 when lit, 0 when shadowed, -1 when world_pos is outside of the cascade
-float sample_shadow_cascade( SceneConstants constants, vec3 world_pos, vec3 normal, float sin_angle, uint cascade )
+float sample_shadow_cascade( FrameConstants constants, vec3 world_pos, vec3 normal, float sin_angle, uint cascade )
 {
 	// Normal offset: move the lookup off the surface by a few texels, more at grazing angles where a texel covers
 	// a larger depth range of the receiver
@@ -107,7 +106,7 @@ float sample_shadow_cascade( SceneConstants constants, vec3 world_pos, vec3 norm
 
 // Returns 1 when fully lit, 0 when fully shadowed
 // normal is the geometric normal (facing the viewer for double sided surfaces), to_light the normalized direction towards the light
-float compute_shadow( SceneConstants constants, vec3 world_pos, vec3 normal, vec3 to_light )
+float compute_shadow( FrameConstants constants, vec3 world_pos, vec3 normal, vec3 to_light )
 {
 	if ( constants.shadow_map == -1 )
 	{
