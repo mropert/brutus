@@ -8,6 +8,9 @@
 #include "math.glsl"
 #include "mesh.glsl"
 
+// Uses mesh.glsl
+#include "draw_commands.glsl"
+
 layout( local_size_x = TASK_GROUP_SIZE, local_size_y = 1, local_size_z = 1 ) in;
 
 layout( std430, set = 1, binding = 0 ) readonly buffer ssbo1
@@ -22,10 +25,6 @@ layout( std430, set = 1, binding = 1 ) readonly buffer ssbo2
 layout( set = 0, binding = 0 ) uniform texture2D textures[ 1024 ];
 layout( set = 0, binding = 2 ) uniform sampler samplers[ 8 ];
 
-layout( buffer_reference, std430 ) readonly buffer DrawCommandsBuffer
-{
-	MeshTaskCommand commands[];
-};
 layout( buffer_reference, std430 ) buffer MeshletVisibilityBuffer
 {
 	uint bits[];
@@ -40,10 +39,11 @@ layout( push_constant, std430 ) uniform block
 	FrameConstants frame_constants;
 	PassConstants pass_constants;
 	MeshDrawBuffer draws_buffer;
-	DrawCommandsBuffer commands_buffer;
+	TaskCommandsBuffer commands_buffer;
 	MeshletVisibilityBuffer meshlet_visibility;
 	uint depth_pyramid;
 	uint meshlet_pass;
+	uint draw_list;
 };
 
 // Shadow passes use their own (depth-only) LOD chain, uniform for the whole draw
@@ -76,7 +76,7 @@ void main()
 	meshlets_count = 0;
 	groupMemoryBarrier();
 
-	const MeshTaskCommand command = commands_buffer.commands[ gl_WorkGroupID.x ];
+	const MeshTaskCommand command = commands_buffer.commands[ commands_buffer.headers[ draw_list ].first_command + gl_WorkGroupID.x ];
 	const uint draw_id = command.draw_id;
 	const uint mesh_id = draws_buffer.mesh_draws[ draw_id ].mesh;
 

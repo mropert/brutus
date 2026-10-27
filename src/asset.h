@@ -89,7 +89,7 @@ struct mesh
 	mesh_handle handle;
 	size_t material_index;
 	uint32_t meshlets_count; // All main LODs, excluding the shadow LODs
-	std::array<uint32_t, MESH_LOD_COUNT> task_groups_per_lod; // Task workgroups per LOD, the larger of the main and shadow LODs
+	uint32_t max_task_groups; // Task workgroups needed by its largest LOD, main or shadow
 	// Data below is only for debugging purposes, a CPU side copy of the GPU-side descriptor
 	gpu_mesh gpu_data;
 };

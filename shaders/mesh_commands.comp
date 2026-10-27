@@ -1,0 +1,121 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "constants.glsl"
+#include "mesh.glsl"
+
+// Uses mesh.glsl
+#include "draw_commands.glsl"
+
+// Writes the commands of the draws mesh_cull.comp listed: each bucket's LOD lists are packed in LOD order from the
+// bucket's first command. TASK_COMMANDS: mesh shader path, one MeshTaskCommand per task workgroup. Otherwise one
+// MeshDrawCommand per draw for the vertex path
+
+layout( local_size_x = 32, local_size_y = 1, local_size_z = 1 ) in;
+
+layout( std430, set = 1, binding = 0 ) readonly buffer ssbo1
+{
+	Mesh meshes[];
+};
+
+#if TASK_COMMANDS
+#define CommandsBuffer TaskCommandsBuffer
+#else
+#define CommandsBuffer MeshDrawCommandsBuffer
+#endif
+
+layout( push_constant ) uniform block
+{
+	MeshDrawBuffer draws_buffer;
+	CommandsBuffer commands_buffer;
+	DrawSlotsBuffer slots_buffer;
+	PassConstants pass_constants;
+	uint draws_count;
+	uint bucket_first_commands[ DRAW_BUCKETS_COUNT ];
+};
+
+shared uint list_first_commands[ DRAW_LISTS_COUNT ];
+
+MeshLOD get_mesh_lod( uint mesh_id, uint lod )
+{
+	return pass_constants.shadow_pass != 0 ? meshes[ mesh_id ].shadow_lods[ lod ] : meshes[ mesh_id ].lods[ lod ];
+}
+
+uint get_list_count( uint list )
+{
+#if TASK_COMMANDS
+	return commands_buffer.headers[ list ].group_count_x;
+#else
+	return commands_buffer.list_counts[ list ];
+#endif
+}
+
+void main()
+{
+	// 32 lists: every workgroup computes the prefix sums, the first one also publishes them for the draws
+	if ( gl_LocalInvocationIndex < DRAW_BUCKETS_COUNT )
+	{
+		const uint bucket = gl_LocalInvocationIndex;
+		uint first_command = bucket_first_commands[ bucket ];
+		for ( uint lod = 0; lod < MESH_LOD_COUNT; ++lod )
+		{
+			const uint list = bucket * MESH_LOD_COUNT + lod;
+			list_first_commands[ list ] = first_command;
+#if TASK_COMMANDS
+			if ( gl_WorkGroupID.x == 0 )
+			{
+				commands_buffer.headers[ list ].group_count_y = 1;
+				commands_buffer.headers[ list ].group_count_z = 1;
+				commands_buffer.headers[ list ].draw_count = 1;
+				commands_buffer.headers[ list ].first_command = first_command;
+			}
+#endif
+			first_command += get_list_count( list );
+		}
+#if !TASK_COMMANDS
+		if ( gl_WorkGroupID.x == 0 )
+		{
+			commands_buffer.bucket_counts[ bucket ] = first_command - bucket_first_commands[ bucket ];
+		}
+#endif
+	}
+	barrier();
+
+	const uint draw_id = gl_GlobalInvocationID.x;
+	if ( draw_id >= draws_count )
+	{
+		return;
+	}
+	const DrawSlot slot = slots_buffer.slots[ draw_id ];
+	if ( slot.list == DRAW_NOT_LISTED )
+	{
+		return;
+	}
+
+	const uint list = slot.list & DRAW_SLOT_LIST_MASK;
+	const uint lod = list % MESH_LOD_COUNT;
+	const MeshLOD mesh_lod = get_mesh_lod( draws_buffer.mesh_draws[ draw_id ].mesh, lod );
+	const uint first_command = list_first_commands[ list ] + slot.first_command;
+#if TASK_COMMANDS
+	const uint group_count = ( mesh_lod.meshlets_count + TASK_GROUP_SIZE - 1 ) / TASK_GROUP_SIZE;
+	for ( uint i = 0; i < group_count; ++i )
+	{
+		commands_buffer.commands[ first_command + i ].draw_id = draw_id;
+		commands_buffer.commands[ first_command + i ].lod = lod;
+		commands_buffer.commands[ first_command + i ].drawn_early = ( slot.list & DRAW_SLOT_DRAWN_EARLY ) != 0 ? 1 : 0;
+		commands_buffer.commands[ first_command + i ].first_meshlet = i * TASK_GROUP_SIZE;
+	}
+#else
+	const uint bucket = list / MESH_LOD_COUNT;
+	commands_buffer.commands[ first_command ].draw_id = draw_id;
+	commands_buffer.commands[ first_command ].lod = lod;
+	commands_buffer.commands[ first_command ].index_count = mesh_lod.indices_count;
+	commands_buffer.commands[ first_command ].instance_count = 1;
+	commands_buffer.commands[ first_command ].first_index = mesh_lod.indices_offset;
+	commands_buffer.commands[ first_command ].vertex_offset = 0;
+	// Vertex shaders read their command with gl_BaseInstance, relative to the bucket's first command
+	commands_buffer.commands[ first_command ].first_instance = first_command - bucket_first_commands[ bucket ];
+#endif
+}
