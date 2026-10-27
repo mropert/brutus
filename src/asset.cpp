@@ -1005,13 +1005,10 @@ private:
 		// Index buffer + LOD descriptors, shadow meshlets are stored after the regular ones
 		mesh.meshlets_count = upload_lods( upload_data.indices, upload_data.lods, 0, mesh.gpu_data.lods );
 		upload_lods( upload_data.shadow_indices, upload_data.shadow_lods, mesh.meshlets_count, mesh.gpu_data.shadow_lods );
-		mesh.max_task_groups = 0;
-		for ( const auto chain : { &upload_data.lods, &upload_data.shadow_lods } )
+		for ( size_t lod = 0; lod < MESH_LOD_COUNT; ++lod )
 		{
-			for ( const auto meshlets : chain->meshlets_per_lod )
-			{
-				mesh.max_task_groups = std::max( mesh.max_task_groups, ( meshlets + TASK_GROUP_SIZE - 1 ) / TASK_GROUP_SIZE );
-			}
+			const uint32_t meshlets = std::max( upload_data.lods.meshlets_per_lod[ lod ], upload_data.shadow_lods.meshlets_per_lod[ lod ] );
+			mesh.task_groups_per_lod[ lod ] = ( meshlets + TASK_GROUP_SIZE - 1 ) / TASK_GROUP_SIZE;
 		}
 
 		// Data buffer (vertices + meshlets)

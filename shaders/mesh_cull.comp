@@ -21,22 +21,32 @@ layout( std430, set = 1, binding = 1 ) readonly buffer ssbo2
 };
 
 // TASK_COMMANDS: mesh shader path, one MeshTaskCommand per task workgroup and the count is the X group count of the
-// bucket's single VkDrawMeshTasksIndirectCommandEXT. Otherwise one MeshDrawCommand per draw for the vertex path.
+// list's single VkDrawMeshTasksIndirectCommandEXT. Otherwise one MeshDrawCommand per draw for the vertex path.
+// Draws are sorted into one list per bucket and LOD, the vertex path only uses the LOD 0 lists
 #if TASK_COMMANDS
-layout( buffer_reference, std430 ) writeonly buffer DrawCommandsBuffer
+struct DrawCommandsHeader
 {
+	uint commands_count; // VkDrawMeshTasksIndirectCommandEXT
+	uint group_count_y;
+	uint group_count_z;
+	uint draw_count;
+};
+layout( buffer_reference, std430 ) buffer DrawCommandsBuffer
+{
+	DrawCommandsHeader headers[ DRAW_LISTS_COUNT ];
 	MeshTaskCommand commands[];
 };
 #else
-layout( buffer_reference, std430 ) writeonly buffer DrawCommandsBuffer
-{
-	MeshDrawCommand commands[];
-};
-#endif
-layout( buffer_reference, std430 ) buffer DrawCommandsCountBuffer
+struct DrawCommandsHeader
 {
 	uint commands_count;
 };
+layout( buffer_reference, std430 ) buffer DrawCommandsBuffer
+{
+	DrawCommandsHeader headers[ DRAW_LISTS_COUNT ];
+	MeshDrawCommand commands[];
+};
+#endif
 layout( buffer_reference, std430 ) buffer VisibilityBuffer
 {
 	uint8_t draws[];
@@ -54,8 +64,7 @@ shared uint group_indices[ MESH_LOD_COUNT ];
 layout( push_constant ) uniform block
 {
 	MeshDrawBuffer draws_buffer;
-	DrawCommandsBuffer commands_buffers[ 4 ];
-	DrawCommandsCountBuffer commands_count_buffers[ 4 ];
+	DrawCommandsBuffer commands_buffer;
 	VisibilityBuffer visibility_buffer;
 	DrawStatisticsBuffer statistics_buffer;
 	PassConstants pass_constants;
@@ -63,6 +72,7 @@ layout( push_constant ) uniform block
 	float lod_target;
 	uint depth_pyramid;
 	uint meshlet_occlusion; // Non-zero when task shaders cull meshlets against the depth pyramid
+	uint first_commands[ DRAW_LISTS_COUNT ]; // Index of each list's first command in commands
 };
 
 // Shadow passes use their own (depth-only) LOD chain, uniform for the whole dispatch
@@ -143,24 +153,28 @@ void cull_draw( uint draw_id )
 		const uint bucket = materials[ draws_buffer.mesh_draws[ draw_id ].material ].type;
 		const uint index_count = mesh_lod.indices_count;
 #if TASK_COMMANDS
+		const uint list = bucket * MESH_LOD_COUNT + lod;
 		const uint group_count = ( mesh_lod.meshlets_count + TASK_GROUP_SIZE - 1 ) / TASK_GROUP_SIZE;
-		const uint first_command = atomicAdd( commands_count_buffers[ bucket ].commands_count, group_count );
+		const uint first_command = first_commands[ list ] + atomicAdd( commands_buffer.headers[ list ].commands_count, group_count );
 		for ( uint i = 0; i < group_count; ++i )
 		{
-			commands_buffers[ bucket ].commands[ first_command + i ].draw_id = draw_id;
-			commands_buffers[ bucket ].commands[ first_command + i ].lod = lod;
-			commands_buffers[ bucket ].commands[ first_command + i ].drawn_early = drawn_early ? 1 : 0;
-			commands_buffers[ bucket ].commands[ first_command + i ].first_meshlet = i * TASK_GROUP_SIZE;
+			commands_buffer.commands[ first_command + i ].draw_id = draw_id;
+			commands_buffer.commands[ first_command + i ].lod = lod;
+			commands_buffer.commands[ first_command + i ].drawn_early = drawn_early ? 1 : 0;
+			commands_buffer.commands[ first_command + i ].first_meshlet = i * TASK_GROUP_SIZE;
 		}
 #else
-		const uint command_id = atomicAdd( commands_count_buffers[ bucket ].commands_count, 1 );
-		commands_buffers[ bucket ].commands[ command_id ].draw_id = draw_id;
-		commands_buffers[ bucket ].commands[ command_id ].lod = lod;
-		commands_buffers[ bucket ].commands[ command_id ].index_count = index_count;
-		commands_buffers[ bucket ].commands[ command_id ].instance_count = 1;
-		commands_buffers[ bucket ].commands[ command_id ].first_index = mesh_lod.indices_offset;
-		commands_buffers[ bucket ].commands[ command_id ].vertex_offset = 0;
-		commands_buffers[ bucket ].commands[ command_id ].first_instance = command_id;
+		const uint list = bucket * MESH_LOD_COUNT;
+		// Draws read their command with gl_InstanceIndex, relative to the list
+		const uint list_command_id = atomicAdd( commands_buffer.headers[ list ].commands_count, 1 );
+		const uint command_id = first_commands[ list ] + list_command_id;
+		commands_buffer.commands[ command_id ].draw_id = draw_id;
+		commands_buffer.commands[ command_id ].lod = lod;
+		commands_buffer.commands[ command_id ].index_count = index_count;
+		commands_buffer.commands[ command_id ].instance_count = 1;
+		commands_buffer.commands[ command_id ].first_index = mesh_lod.indices_offset;
+		commands_buffer.commands[ command_id ].vertex_offset = 0;
+		commands_buffer.commands[ command_id ].first_instance = list_command_id;
 #endif
 
 		if ( !drawn_early )

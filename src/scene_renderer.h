@@ -12,12 +12,16 @@ class SceneRenderer
 {
 public:
 	static constexpr auto DRAW_BUCKETS_COUNT = std::to_underlying( material_type::COUNT );
+	// Culling sorts draws into one list per bucket and LOD so that passes draw LOD 0 first, roughly front to back. The
+	// vertex path only uses the LOD 0 lists: it has one command per draw whatever the LOD
+	static constexpr size_t DRAW_LISTS_COUNT = DRAW_BUCKETS_COUNT * MESH_LOD_COUNT;
 	// Vertical, in radians: 50.70 degrees. It used to be 70 degrees passed as radians by accident, which gave this angle;
 	// kept so that reference images and benchmarks stay comparable
 	static constexpr float FOV = 0.884962f;
 	static constexpr uint32_t SHADOW_CASCADE_MAX = 4;
-	// Task workgroups per bucket and pass, checked against the worst case of all draws at their largest LOD
-	static constexpr uint32_t MAX_TASK_COMMANDS = 256 * 1024;
+	// Task workgroups of all the draw lists of a pass, checked against the worst case of every draw in each of its LOD
+	// lists. The 100x100 benchmark crowd needs ~615k
+	static constexpr uint32_t MAX_TASK_COMMANDS = 640 * 1024;
 
 	struct DrawStatistics
 	{
@@ -68,24 +72,27 @@ private:
 	// and the 5x5 tent read with bilinear taps (3.5 texels), plus one of slack
 	static constexpr float SHADOW_CASTER_MARGIN_TEXELS = 6.f;
 
-	// A bucket's part of a draw commands buffer, laid out for one render path
+	// A draw list's part of a draw commands buffer, laid out for one render path
 	struct DrawCommandsSegment
 	{
 		size_t commands_offset = 0;
 		uint32_t capacity = 0; // Worst case number of commands for the current scene
 	};
-	using DrawCommandsSegments = std::array<DrawCommandsSegment, DRAW_BUCKETS_COUNT>;
+	using DrawCommandsSegments = std::array<DrawCommandsSegment, DRAW_LISTS_COUNT>;
+	static constexpr size_t calc_draw_list( size_t bucket, size_t lod ) { return bucket * MESH_LOD_COUNT + lod; }
+	// LODs that have their own draw list
+	static constexpr size_t get_draw_list_lod_count( bool task_commands ) { return task_commands ? MESH_LOD_COUNT : 1; }
 	template <typename Commands>
 	static DrawCommandsSegments make_empty_draw_commands_segments();
-	// Grows a bucket's capacity, the following buckets' commands move accordingly
+	// Grows a list's capacity, the following lists' commands move accordingly
 	template <typename Commands>
-	static void add_draw_commands( DrawCommandsSegments& segments, size_t bucket, uint32_t count );
+	static void add_draw_commands( DrawCommandsSegments& segments, size_t list, uint32_t count );
 	const DrawCommandsSegments& get_draw_commands_segments( bool task_commands ) const
 	{
 		return task_commands ? _task_segments : _draw_mesh_segments;
 	}
-	// One indirect draw for all the commands of a bucket
-	void draw_bucket( renderer::CommandBuffer& cmd, const renderer::Buffer& draw_commands, size_t bucket, bool use_mesh_shader ) const;
+	// One indirect draw for all the commands of a list
+	void draw_list( renderer::CommandBuffer& cmd, const renderer::Buffer& draw_commands, size_t list, bool use_mesh_shader ) const;
 
 	// Culls the draws of a pass into draw_commands, with the barriers around it
 	void compute_draws( const BindlessManager& bindless_manager,
@@ -208,8 +215,8 @@ private:
 	// One bit per main LOD meshlet of each draw, not reset when the scene changes: the late pass corrects stale bits
 	renderer::raii::Buffer _meshlet_visibility_buffer;
 	uint32_t _meshlet_visibility_bits = 0;
-	// Capacities are the worst case for the current scene: one command per draw for the vertex path, its largest LOD's
-	// task workgroups for the mesh shader path
+	// Capacities are the worst case for the current scene: one command per draw for the vertex path, and for the mesh
+	// shader path each LOD list holds the task workgroups of all the draws at that LOD
 	DrawCommandsSegments _draw_mesh_segments;
 	DrawCommandsSegments _task_segments;
 	renderer::raii::Buffer _draw_commands_buffer;

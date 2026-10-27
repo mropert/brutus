@@ -47,8 +47,8 @@ namespace
 	};
 	struct gpu_draw_mesh_commands
 	{
-		std::array<gpu_draw_mesh_header, SceneRenderer::DRAW_BUCKETS_COUNT> headers;
-		// Commands are stored as one array, each bucket starting at the sum of the previous buckets' capacities
+		std::array<gpu_draw_mesh_header, SceneRenderer::DRAW_LISTS_COUNT> headers;
+		// Commands are stored as one array, each list starting at the sum of the previous lists' capacities
 		std::array<gpu_draw_mesh_command, MAX_DRAWS> commands;
 	};
 
@@ -70,7 +70,7 @@ namespace
 
 	struct gpu_task_commands
 	{
-		std::array<gpu_task_header, SceneRenderer::DRAW_BUCKETS_COUNT> headers;
+		std::array<gpu_task_header, SceneRenderer::DRAW_LISTS_COUNT> headers;
 		std::array<gpu_task_command, SceneRenderer::MAX_TASK_COMMANDS> commands;
 	};
 	union gpu_draw_commands
@@ -80,9 +80,17 @@ namespace
 	};
 
 	template <typename Commands>
-	constexpr size_t calc_header_offset( size_t bucket )
+	constexpr size_t calc_header_offset( size_t list )
 	{
-		return offsetof( Commands, headers ) + bucket * sizeof( typename decltype( Commands::headers )::value_type );
+		return offsetof( Commands, headers ) + list * sizeof( typename decltype( Commands::headers )::value_type );
+	}
+
+	// Index of a list's first command in the commands array, from its segment offset in bytes
+	template <typename Commands>
+	uint32_t calc_first_command( size_t commands_offset )
+	{
+		using Command = typename decltype( Commands::commands )::value_type;
+		return static_cast<uint32_t>( ( commands_offset - offsetof( Commands, commands ) ) / sizeof( Command ) );
 	}
 
 	struct draw_meshes_constants
@@ -116,8 +124,7 @@ namespace
 	struct compute_draws_constants
 	{
 		renderer::BufferHandle draws_buffer;
-		std::array<renderer::BufferHandle, SceneRenderer::DRAW_BUCKETS_COUNT> commands_buffers;
-		std::array<renderer::BufferHandle, SceneRenderer::DRAW_BUCKETS_COUNT> commands_count_buffers;
+		renderer::BufferHandle commands_buffer;
 		renderer::BufferHandle visibility_buffer;
 		renderer::BufferHandle statistics_buffer;
 		renderer::BufferHandle pass_constants;
@@ -125,6 +132,7 @@ namespace
 		float lod_target;
 		renderer::BindlessSampledTexture depth_pyramid;
 		uint32_t meshlet_occlusion;
+		std::array<uint32_t, SceneRenderer::DRAW_LISTS_COUNT> first_commands;
 	};
 
 	glm::vec4 normalize_plane( const glm::vec4& plane )
@@ -330,11 +338,11 @@ SceneRenderer::DrawCommandsSegments SceneRenderer::make_empty_draw_commands_segm
 }
 
 template <typename Commands>
-void SceneRenderer::add_draw_commands( DrawCommandsSegments& segments, size_t bucket, uint32_t count )
+void SceneRenderer::add_draw_commands( DrawCommandsSegments& segments, size_t list, uint32_t count )
 {
 	using Command = typename decltype( Commands::commands )::value_type;
-	segments[ bucket ].capacity += count;
-	for ( size_t i = bucket + 1; i < DRAW_BUCKETS_COUNT; ++i )
+	segments[ list ].capacity += count;
+	for ( size_t i = list + 1; i < DRAW_LISTS_COUNT; ++i )
 	{
 		segments[ i ].commands_offset += count * sizeof( Command );
 	}
@@ -492,6 +500,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 	std::vector<renderer::ShaderSource::Define> compute_shader_defines;
 	compute_shader_defines.emplace_back( "LATE", "false" );
 	compute_shader_defines.emplace_back( "TASK_COMMANDS", "0" ); // Used in #if, true/false would both be 0
+	compute_shader_defines.emplace_back( "DRAW_LISTS_COUNT", std::to_string( DRAW_LISTS_COUNT ) );
 	std::copy( begin( mesh_shaders_defines ), end( mesh_shaders_defines ), std::back_inserter( compute_shader_defines ) );
 
 	const auto add_compute_draws_pipeline = [ & ]( bool late, bool task_commands )
@@ -559,7 +568,7 @@ void SceneRenderer::add_mesh( const mesh& mesh, glm::vec3 translation, glm::quat
 							 end( _task_segments ),
 							 0u,
 							 []( uint32_t total, const DrawCommandsSegment& segment ) { return total + segment.capacity; } )
-				+ mesh.max_task_groups
+				+ std::accumulate( begin( mesh.task_groups_per_lod ), end( mesh.task_groups_per_lod ), 0u )
 			<= MAX_TASK_COMMANDS );
 
 	_scene.push_back( MeshDraw { .translation = translation,
@@ -570,8 +579,11 @@ void SceneRenderer::add_mesh( const mesh& mesh, glm::vec3 translation, glm::quat
 								 .meshlet_visibility_offset = _meshlet_visibility_bits } );
 	_meshlet_visibility_bits += mesh.meshlets_count;
 	const auto bucket = std::to_underlying( material.type );
-	add_draw_commands<gpu_draw_mesh_commands>( _draw_mesh_segments, bucket, 1 );
-	add_draw_commands<gpu_task_commands>( _task_segments, bucket, mesh.max_task_groups );
+	add_draw_commands<gpu_draw_mesh_commands>( _draw_mesh_segments, calc_draw_list( bucket, 0 ), 1 );
+	for ( size_t lod = 0; lod < MESH_LOD_COUNT; ++lod )
+	{
+		add_draw_commands<gpu_task_commands>( _task_segments, calc_draw_list( bucket, lod ), mesh.task_groups_per_lod[ lod ] );
+	}
 	_needs_rebuild = true;
 }
 
@@ -584,12 +596,12 @@ void SceneRenderer::clear_meshes()
 	_needs_rebuild = true;
 }
 
-void SceneRenderer::draw_bucket( renderer::CommandBuffer& cmd,
-								 const renderer::Buffer& draw_commands,
-								 size_t bucket,
-								 bool use_mesh_shader ) const
+void SceneRenderer::draw_list( renderer::CommandBuffer& cmd,
+							   const renderer::Buffer& draw_commands,
+							   size_t list,
+							   bool use_mesh_shader ) const
 {
-	const auto& segment = get_draw_commands_segments( use_mesh_shader )[ bucket ];
+	const auto& segment = get_draw_commands_segments( use_mesh_shader )[ list ];
 	if ( segment.capacity == 0 )
 	{
 		return;
@@ -598,7 +610,7 @@ void SceneRenderer::draw_bucket( renderer::CommandBuffer& cmd,
 	if ( use_mesh_shader )
 	{
 		// All the task workgroups in a single dispatch, a group count of 0 draws nothing
-		const auto header_offset = calc_header_offset<gpu_task_commands>( bucket );
+		const auto header_offset = calc_header_offset<gpu_task_commands>( list );
 		cmd.draw_mesh_tasks_indirect( draw_commands,
 									  header_offset + offsetof( gpu_task_header, dispatch ),
 									  draw_commands,
@@ -611,7 +623,7 @@ void SceneRenderer::draw_bucket( renderer::CommandBuffer& cmd,
 		cmd.draw_indexed_indirect( draw_commands,
 								   segment.commands_offset + offsetof( gpu_draw_mesh_command, draw_cmd ),
 								   draw_commands,
-								   calc_header_offset<gpu_draw_mesh_commands>( bucket ) + offsetof( gpu_draw_mesh_header, count ),
+								   calc_header_offset<gpu_draw_mesh_commands>( list ) + offsetof( gpu_draw_mesh_header, count ),
 								   segment.capacity,
 								   sizeof( gpu_draw_mesh_command ) );
 	}
@@ -974,8 +986,13 @@ void SceneRenderer::clear_draw_commands( renderer::CommandBuffer& cmd, const ren
 	}
 	else
 	{
-		for ( size_t i = 0; i < DRAW_BUCKETS_COUNT; ++i )
+		for ( size_t i = 0; i < DRAW_LISTS_COUNT; ++i )
 		{
+			// Empty lists are never drawn
+			if ( _task_segments[ i ].capacity == 0 )
+			{
+				continue;
+			}
 			// Group count 0, Y, Z and draw count 1. Commands past the group count are never read
 			const auto header_offset = calc_header_offset<gpu_task_commands>( i );
 			cmd.fill_buffer( draw_commands, header_offset + offsetof( gpu_task_header, dispatch.groupCountX ), sizeof( uint32_t ), 0 );
@@ -998,6 +1015,7 @@ void SceneRenderer::dispatch_culling( const BindlessManager& bindless_manager,
 									  bool task_commands ) const
 {
 	compute_draws_constants constants { .draws_buffer = draw_buffer_address,
+										.commands_buffer = draw_commands.get_device_address(),
 										.visibility_buffer = visibility_buffer.get_device_address(),
 										.statistics_buffer = stats_buffer_address,
 										.pass_constants = pass_constants_address,
@@ -1010,13 +1028,11 @@ void SceneRenderer::dispatch_culling( const BindlessManager& bindless_manager,
 		constants.depth_pyramid = _depth_pyramid.handles.sampled_texture;
 	}
 
-	for ( size_t i = 0; i < DRAW_BUCKETS_COUNT; ++i )
+	for ( size_t i = 0; i < DRAW_LISTS_COUNT; ++i )
 	{
-		const auto header_offset = task_commands ? calc_header_offset<gpu_task_commands>( i )
-												 : calc_header_offset<gpu_draw_mesh_commands>( i );
-		constants.commands_buffers[ i ] = draw_commands.get_device_address()
-			+ get_draw_commands_segments( task_commands )[ i ].commands_offset;
-		constants.commands_count_buffers[ i ] = draw_commands.get_device_address() + header_offset;
+		const auto commands_offset = get_draw_commands_segments( task_commands )[ i ].commands_offset;
+		constants.first_commands[ i ] = task_commands ? calc_first_command<gpu_task_commands>( commands_offset )
+													  : calc_first_command<gpu_draw_mesh_commands>( commands_offset );
 	}
 
 	const auto pipeline_handle = task_commands ? ( early ? _compute_tasks_early_pipeline : _compute_tasks_late_pipeline )
@@ -1071,13 +1087,20 @@ void SceneRenderer::draw_opaque_meshlets( const BindlessManager& bindless_manage
 									  .meshlet_visibility = _meshlet_visibility_buffer.get_device_address(),
 									  .depth_pyramid = _depth_pyramid.handles.sampled_texture,
 									  .meshlet_pass = std::to_underlying( meshlet_pass ) };
-	for ( int i = 0; i < 2; ++i )
+	// LOD 0 first: the nearest draws fill depth before the ones they hide. A label per LOD to measure their cost
+	static constexpr std::array<const char*, MESH_LOD_COUNT> lod_labels { "LOD 0", "LOD 1", "LOD 2", "LOD 3",
+																		  "LOD 4", "LOD 5", "LOD 6", "LOD 7" };
+	for ( size_t lod = 0; lod < MESH_LOD_COUNT; ++lod )
 	{
-		const auto bucket = std::to_underlying( material_type::OPAQUE_SINGLE );
-		cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ) } );
-		constants.commands_buffer = _draw_commands_buffer.get_device_address() + _task_segments[ bucket + i ].commands_offset;
-		cmd.push_constants( pipelines.get( _meshlet_pipeline ), constants );
-		draw_bucket( cmd, _draw_commands_buffer, bucket + i, true );
+		const auto lod_label = cmd.debug_label( lod_labels[ lod ] );
+		for ( int i = 0; i < 2; ++i )
+		{
+			const auto list = calc_draw_list( std::to_underlying( material_type::OPAQUE_SINGLE ) + i, lod );
+			cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ) } );
+			constants.commands_buffer = _draw_commands_buffer.get_device_address() + _task_segments[ list ].commands_offset;
+			cmd.push_constants( pipelines.get( _meshlet_pipeline ), constants );
+			draw_list( cmd, _draw_commands_buffer, list, true );
+		}
 	}
 }
 
@@ -1095,11 +1118,11 @@ void SceneRenderer::draw_opaque_meshes( const BindlessManager& bindless_manager,
 									  .draws_buffer = draw_buffer_address };
 	for ( int i = 0; i < 2; ++i )
 	{
-		const auto bucket = std::to_underlying( material_type::OPAQUE_SINGLE );
+		const auto list = calc_draw_list( std::to_underlying( material_type::OPAQUE_SINGLE ) + i, 0 );
 		cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ) } );
-		constants.commands_buffer = _draw_commands_buffer.get_device_address() + _draw_mesh_segments[ bucket + i ].commands_offset;
+		constants.commands_buffer = _draw_commands_buffer.get_device_address() + _draw_mesh_segments[ list ].commands_offset;
 		cmd.push_constants( pipelines.get( _mesh_pipeline ), constants );
-		draw_bucket( cmd, _draw_commands_buffer, bucket + i, false );
+		draw_list( cmd, _draw_commands_buffer, list, false );
 	}
 }
 
@@ -1118,13 +1141,16 @@ void SceneRenderer::draw_transparent_meshlets( const BindlessManager& bindless_m
 	{
 		const auto pipeline = pipelines.get( pass == 0 ? _meshlet_alpha_clip_pipeline : _meshlet_alpha_blend_pipeline );
 		cmd.bind_pipeline( pipeline, bindless_manager );
-		for ( int i = 0; i < 2; ++i )
+		for ( size_t lod = 0; lod < MESH_LOD_COUNT; ++lod )
 		{
-			const auto bucket = std::to_underlying( material_type::ALPHA_SINGLE );
-			cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ), .depth_write = pass == 0 } );
-			constants.commands_buffer = _draw_commands_buffer.get_device_address() + _task_segments[ bucket + i ].commands_offset;
-			cmd.push_constants( pipeline, constants );
-			draw_bucket( cmd, _draw_commands_buffer, bucket + i, true );
+			for ( int i = 0; i < 2; ++i )
+			{
+				const auto list = calc_draw_list( std::to_underlying( material_type::ALPHA_SINGLE ) + i, lod );
+				cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ), .depth_write = pass == 0 } );
+				constants.commands_buffer = _draw_commands_buffer.get_device_address() + _task_segments[ list ].commands_offset;
+				cmd.push_constants( pipeline, constants );
+				draw_list( cmd, _draw_commands_buffer, list, true );
+			}
 		}
 	}
 }
@@ -1147,11 +1173,11 @@ void SceneRenderer::draw_transparent_meshes( const BindlessManager& bindless_man
 
 		for ( int i = 0; i < 2; ++i )
 		{
-			const auto bucket = std::to_underlying( material_type::ALPHA_SINGLE );
+			const auto list = calc_draw_list( std::to_underlying( material_type::ALPHA_SINGLE ) + i, 0 );
 			cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ), .depth_write = pass == 0 } );
-			constants.commands_buffer = _draw_commands_buffer.get_device_address() + _draw_mesh_segments[ bucket + i ].commands_offset;
+			constants.commands_buffer = _draw_commands_buffer.get_device_address() + _draw_mesh_segments[ list ].commands_offset;
 			cmd.push_constants( pipeline, constants );
-			draw_bucket( cmd, _draw_commands_buffer, bucket + i, false );
+			draw_list( cmd, _draw_commands_buffer, list, false );
 		}
 	}
 }
@@ -1276,17 +1302,20 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 		draw_meshes_constants draw_constants { .frame_constants = frame_constants_address,
 											   .pass_constants = calc_pass_constants_address( cascade ),
 											   .draws_buffer = draw_buffer_address };
-		for ( int i = 0; i < 2; ++i )
+		for ( size_t lod = 0; lod < get_draw_list_lod_count( use_mesh_shader ); ++lod )
 		{
-			const auto bucket = std::to_underlying( material_type::OPAQUE_SINGLE );
-			cmd.set_dynamic_state( { .viewport = _shadowmap.texture.get_extent(),
-									 .cull_mode = bucket_cull_mode( i ),
-									 .depth_bias_constant = SHADOW_DEPTH_BIAS_CONSTANT,
-									 .depth_bias_slope = SHADOW_DEPTH_BIAS_SLOPE } );
-			draw_constants.commands_buffer = draw_commands.get_device_address()
-				+ get_draw_commands_segments( use_mesh_shader )[ bucket + i ].commands_offset;
-			cmd.push_constants( pipeline, draw_constants );
-			draw_bucket( cmd, draw_commands, bucket + i, use_mesh_shader );
+			for ( int i = 0; i < 2; ++i )
+			{
+				const auto list = calc_draw_list( std::to_underlying( material_type::OPAQUE_SINGLE ) + i, lod );
+				cmd.set_dynamic_state( { .viewport = _shadowmap.texture.get_extent(),
+										 .cull_mode = bucket_cull_mode( i ),
+										 .depth_bias_constant = SHADOW_DEPTH_BIAS_CONSTANT,
+										 .depth_bias_slope = SHADOW_DEPTH_BIAS_SLOPE } );
+				draw_constants.commands_buffer = draw_commands.get_device_address()
+					+ get_draw_commands_segments( use_mesh_shader )[ list ].commands_offset;
+				cmd.push_constants( pipeline, draw_constants );
+				draw_list( cmd, draw_commands, list, use_mesh_shader );
+			}
 		}
 		cmd.end_rendering();
 	}
