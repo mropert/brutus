@@ -43,8 +43,8 @@ namespace
 	};
 	struct gpu_draw_mesh_commands
 	{
-		std::array<uint32_t, SceneRenderer::DRAW_LISTS_COUNT> list_counts;
-		// Draw count of all the lists of a bucket, for its indirect multi draw
+		std::array<uint32_t, SceneRenderer::DRAW_BINS_COUNT> bin_counts;
+		// Draw count of all the bins of a bucket, for its indirect multi draw
 		std::array<uint32_t, SceneRenderer::DRAW_BUCKETS_COUNT> bucket_counts;
 		// Commands are stored as one array, each bucket starting at the sum of the previous buckets' capacities
 		std::array<gpu_draw_mesh_command, MAX_DRAWS> commands;
@@ -67,7 +67,7 @@ namespace
 
 	struct gpu_task_commands
 	{
-		std::array<gpu_task_header, SceneRenderer::DRAW_LISTS_COUNT> headers;
+		std::array<gpu_task_header, SceneRenderer::DRAW_BINS_COUNT> headers;
 		std::array<gpu_task_command, SceneRenderer::MAX_TASK_COMMANDS> commands;
 	};
 	union gpu_draw_commands
@@ -79,8 +79,8 @@ namespace
 	// Where culling put a draw, DrawSlot in draw_commands.glsl
 	struct gpu_draw_slot
 	{
-		uint32_t list;
-		uint32_t first_command;
+		uint32_t bin;
+		uint32_t offset_in_bin;
 	};
 	struct gpu_draw_commands_buffer
 	{
@@ -89,9 +89,9 @@ namespace
 	};
 
 	template <typename Commands>
-	constexpr size_t calc_header_offset( size_t list )
+	constexpr size_t calc_header_offset( size_t bin )
 	{
-		return offsetof( Commands, headers ) + list * sizeof( typename decltype( Commands::headers )::value_type );
+		return offsetof( Commands, headers ) + bin * sizeof( typename decltype( Commands::headers )::value_type );
 	}
 
 	// Index of a bucket's first command in the commands array, from its segment offset in bytes
@@ -112,7 +112,7 @@ namespace
 		renderer::BufferHandle meshlet_visibility;
 		renderer::BindlessSampledTexture depth_pyramid;
 		uint32_t meshlet_pass = 0;
-		uint32_t draw_list = 0;
+		uint32_t draw_bin = 0;
 	};
 
 	struct grid_constants
@@ -439,13 +439,17 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 
 	const std::vector<renderer::ShaderSource::Define> mesh_shaders_defines { { "MESH_LOD_COUNT", std::to_string( MESH_LOD_COUNT ) },
 																			 { "TASK_GROUP_SIZE", std::to_string( TASK_GROUP_SIZE ) },
-																			 { "DRAW_LISTS_COUNT", std::to_string( DRAW_LISTS_COUNT ) },
+																			 { "DRAW_BUCKETS_COUNT", std::to_string( DRAW_BUCKETS_COUNT ) },
+																			 { "DRAW_BINS_PER_BUCKET",
+																			   std::to_string( DRAW_BINS_PER_BUCKET ) },
 																			 { "USE_ALPHA", "false" } };
-	const std::vector<renderer::ShaderSource::Define> mesh_alpha_shaders_defines { { "MESH_LOD_COUNT", std::to_string( MESH_LOD_COUNT ) },
-																				   { "TASK_GROUP_SIZE", std::to_string( TASK_GROUP_SIZE ) },
-																				   { "DRAW_LISTS_COUNT",
-																					 std::to_string( DRAW_LISTS_COUNT ) },
-																				   { "USE_ALPHA", "true" } };
+	const std::vector<renderer::ShaderSource::Define> mesh_alpha_shaders_defines {
+		{ "MESH_LOD_COUNT", std::to_string( MESH_LOD_COUNT ) },
+		{ "TASK_GROUP_SIZE", std::to_string( TASK_GROUP_SIZE ) },
+		{ "DRAW_BUCKETS_COUNT", std::to_string( DRAW_BUCKETS_COUNT ) },
+		{ "DRAW_BINS_PER_BUCKET", std::to_string( DRAW_BINS_PER_BUCKET ) },
+		{ "USE_ALPHA", "true" }
+	};
 
 	_mesh_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
@@ -625,15 +629,15 @@ void SceneRenderer::clear_meshes()
 	_needs_rebuild = true;
 }
 
-void SceneRenderer::draw_list( renderer::CommandBuffer& cmd, const renderer::Buffer& draw_commands, size_t list ) const
+void SceneRenderer::draw_bin( renderer::CommandBuffer& cmd, const renderer::Buffer& draw_commands, size_t bin ) const
 {
-	if ( _task_segments[ list / MESH_LOD_COUNT ].capacity == 0 )
+	if ( _task_segments[ bin / DRAW_BINS_PER_BUCKET ].capacity == 0 )
 	{
 		return;
 	}
 
 	// All the task workgroups in a single dispatch, a group count of 0 draws nothing
-	const auto header_offset = calc_header_offset<gpu_task_commands>( list );
+	const auto header_offset = calc_header_offset<gpu_task_commands>( bin );
 	cmd.draw_mesh_tasks_indirect( draw_commands,
 								  header_offset + offsetof( gpu_task_header, dispatch ),
 								  draw_commands,
@@ -1132,19 +1136,20 @@ void SceneRenderer::draw_opaque_meshlets( const BindlessManager& bindless_manage
 									  .meshlet_visibility = _meshlet_visibility_buffer.get_device_address(),
 									  .depth_pyramid = _depth_pyramid.handles.sampled_texture,
 									  .meshlet_pass = std::to_underlying( meshlet_pass ) };
-	// LOD 0 first: the nearest draws fill depth before the ones they hide. A label per LOD to measure their cost
-	static constexpr std::array<const char*, MESH_LOD_COUNT> lod_labels { "LOD 0", "LOD 1", "LOD 2", "LOD 3",
-																		  "LOD 4", "LOD 5", "LOD 6", "LOD 7" };
-	for ( size_t lod = 0; lod < MESH_LOD_COUNT; ++lod )
+	// Bins in order: the nearest draws fill depth before the ones they hide. A label per bin to measure their cost, the
+	// sort key is the LOD
+	static constexpr std::array<const char*, DRAW_BINS_PER_BUCKET> bin_labels { "LOD 0", "LOD 1", "LOD 2", "LOD 3",
+																				"LOD 4", "LOD 5", "LOD 6", "LOD 7" };
+	for ( size_t bin_in_bucket = 0; bin_in_bucket < DRAW_BINS_PER_BUCKET; ++bin_in_bucket )
 	{
-		const auto lod_label = cmd.debug_label( lod_labels[ lod ] );
+		const auto bin_label = cmd.debug_label( bin_labels[ bin_in_bucket ] );
 		for ( int i = 0; i < 2; ++i )
 		{
-			const auto list = calc_draw_list( std::to_underlying( material_type::OPAQUE_SINGLE ) + i, lod );
+			const auto bin = calc_draw_bin( std::to_underlying( material_type::OPAQUE_SINGLE ) + i, bin_in_bucket );
 			cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ) } );
-			constants.draw_list = static_cast<uint32_t>( list );
+			constants.draw_bin = static_cast<uint32_t>( bin );
 			cmd.push_constants( pipelines.get( _meshlet_pipeline ), constants );
-			draw_list( cmd, _draw_commands_buffer, list );
+			draw_bin( cmd, _draw_commands_buffer, bin );
 		}
 	}
 }
@@ -1187,15 +1192,15 @@ void SceneRenderer::draw_transparent_meshlets( const BindlessManager& bindless_m
 	{
 		const auto pipeline = pipelines.get( pass == 0 ? _meshlet_alpha_clip_pipeline : _meshlet_alpha_blend_pipeline );
 		cmd.bind_pipeline( pipeline, bindless_manager );
-		for ( size_t lod = 0; lod < MESH_LOD_COUNT; ++lod )
+		for ( size_t bin_in_bucket = 0; bin_in_bucket < DRAW_BINS_PER_BUCKET; ++bin_in_bucket )
 		{
 			for ( int i = 0; i < 2; ++i )
 			{
-				const auto list = calc_draw_list( std::to_underlying( material_type::ALPHA_SINGLE ) + i, lod );
+				const auto bin = calc_draw_bin( std::to_underlying( material_type::ALPHA_SINGLE ) + i, bin_in_bucket );
 				cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ), .depth_write = pass == 0 } );
-				constants.draw_list = static_cast<uint32_t>( list );
+				constants.draw_bin = static_cast<uint32_t>( bin );
 				cmd.push_constants( pipeline, constants );
-				draw_list( cmd, _draw_commands_buffer, list );
+				draw_bin( cmd, _draw_commands_buffer, bin );
 			}
 		}
 	}
@@ -1371,15 +1376,15 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 		};
 		if ( use_mesh_shader )
 		{
-			for ( size_t lod = 0; lod < MESH_LOD_COUNT; ++lod )
+			for ( size_t bin_in_bucket = 0; bin_in_bucket < DRAW_BINS_PER_BUCKET; ++bin_in_bucket )
 			{
 				for ( int i = 0; i < 2; ++i )
 				{
-					const auto list = calc_draw_list( std::to_underlying( material_type::OPAQUE_SINGLE ) + i, lod );
+					const auto bin = calc_draw_bin( std::to_underlying( material_type::OPAQUE_SINGLE ) + i, bin_in_bucket );
 					set_dynamic_state( i );
-					draw_constants.draw_list = static_cast<uint32_t>( list );
+					draw_constants.draw_bin = static_cast<uint32_t>( bin );
 					cmd.push_constants( pipeline, draw_constants );
-					draw_list( cmd, draw_commands, list );
+					draw_bin( cmd, draw_commands, bin );
 				}
 			}
 		}

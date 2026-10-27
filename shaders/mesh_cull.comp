@@ -23,8 +23,8 @@ layout( std430, set = 1, binding = 1 ) readonly buffer ssbo2
 	Material materials[];
 };
 
-// Culling only counts each list's commands and records each draw's slot, mesh_commands.comp writes the commands once
-// the lists are packed. TASK_COMMANDS: mesh shader path, one MeshTaskCommand per task workgroup. Otherwise one
+// Culling only counts each bin's commands and reserves each draw's commands in its bin, mesh_commands.comp writes the
+// commands once the bins are packed. TASK_COMMANDS: mesh shader path, one MeshTaskCommand per task workgroup. Otherwise one
 // MeshDrawCommand per draw for the vertex path
 #if TASK_COMMANDS
 #define CommandsBuffer TaskCommandsBuffer
@@ -70,7 +70,7 @@ void cull_draw( uint draw_id )
 	const bool was_visible = uint( visibility_buffer.draws[ draw_id ] ) == 1;
 	if ( !LATE && !was_visible )
 	{
-		slots_buffer.slots[ draw_id ].list = DRAW_NOT_LISTED;
+		slots_buffer.slots[ draw_id ].bin = DRAW_NOT_BINNED;
 		return;
 	}
 
@@ -138,14 +138,14 @@ void cull_draw( uint draw_id )
 		const MeshLOD mesh_lod = get_mesh_lod( mesh_id, lod );
 
 		const uint bucket = materials[ draws_buffer.mesh_draws[ draw_id ].material ].type;
-		const uint list = bucket * MESH_LOD_COUNT + lod;
+		const uint bin = bucket * DRAW_BINS_PER_BUCKET + lod; // The sort key is the LOD
 #if TASK_COMMANDS
 		const uint group_count = ( mesh_lod.meshlets_count + TASK_GROUP_SIZE - 1 ) / TASK_GROUP_SIZE;
-		slots_buffer.slots[ draw_id ].first_command = atomicAdd( commands_buffer.headers[ list ].group_count_x, group_count );
+		slots_buffer.slots[ draw_id ].offset_in_bin = atomicAdd( commands_buffer.headers[ bin ].group_count_x, group_count );
 #else
-		slots_buffer.slots[ draw_id ].first_command = atomicAdd( commands_buffer.list_counts[ list ], 1 );
+		slots_buffer.slots[ draw_id ].offset_in_bin = atomicAdd( commands_buffer.bin_counts[ bin ], 1 );
 #endif
-		slots_buffer.slots[ draw_id ].list = list | ( drawn_early ? DRAW_SLOT_DRAWN_EARLY : 0 );
+		slots_buffer.slots[ draw_id ].bin = bin | ( drawn_early ? DRAW_SLOT_DRAWN_EARLY : 0 );
 
 		if ( !drawn_early )
 		{
@@ -155,7 +155,7 @@ void cull_draw( uint draw_id )
 	}
 	else
 	{
-		slots_buffer.slots[ draw_id ].list = DRAW_NOT_LISTED;
+		slots_buffer.slots[ draw_id ].bin = DRAW_NOT_BINNED;
 	}
 
 	if ( LATE )

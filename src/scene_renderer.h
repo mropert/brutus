@@ -12,9 +12,11 @@ class SceneRenderer
 {
 public:
 	static constexpr auto DRAW_BUCKETS_COUNT = std::to_underlying( material_type::COUNT );
-	// Culling sorts draws into one list per bucket and LOD so that passes draw LOD 0 first, roughly front to back. Lists
-	// are packed in their bucket's commands once their sizes are known (see mesh_commands.comp)
-	static constexpr size_t DRAW_LISTS_COUNT = DRAW_BUCKETS_COUNT * MESH_LOD_COUNT;
+	// Draw commands are split by bucket, the material type: each needs its own pipeline state. Within a bucket, culling
+	// sorts draws into bins by a sort key, today the LOD, so that passes draw roughly front to back. Bins are packed in
+	// their bucket's commands once their sizes are known (see mesh_commands.comp)
+	static constexpr size_t DRAW_BINS_PER_BUCKET = MESH_LOD_COUNT;
+	static constexpr size_t DRAW_BINS_COUNT = DRAW_BUCKETS_COUNT * DRAW_BINS_PER_BUCKET;
 	// Vertical, in radians: 50.70 degrees. It used to be 70 degrees passed as radians by accident, which gave this angle;
 	// kept so that reference images and benchmarks stay comparable
 	static constexpr float FOV = 0.884962f;
@@ -71,14 +73,14 @@ private:
 	// and the 5x5 tent read with bilinear taps (3.5 texels), plus one of slack
 	static constexpr float SHADOW_CASTER_MARGIN_TEXELS = 6.f;
 
-	// A bucket's part of a draw commands buffer, laid out for one render path. Its LOD lists are packed inside
+	// A bucket's part of a draw commands buffer, laid out for one render path. Its bins are packed inside
 	struct DrawCommandsSegment
 	{
 		size_t commands_offset = 0;
 		uint32_t capacity = 0; // Worst case number of commands for the current scene
 	};
 	using DrawCommandsSegments = std::array<DrawCommandsSegment, DRAW_BUCKETS_COUNT>;
-	static constexpr size_t calc_draw_list( size_t bucket, size_t lod ) { return bucket * MESH_LOD_COUNT + lod; }
+	static constexpr size_t calc_draw_bin( size_t bucket, size_t bin_in_bucket ) { return bucket * DRAW_BINS_PER_BUCKET + bin_in_bucket; }
 	template <typename Commands>
 	static DrawCommandsSegments make_empty_draw_commands_segments();
 	// Grows a bucket's capacity, the following buckets' commands move accordingly
@@ -88,13 +90,13 @@ private:
 	{
 		return task_commands ? _task_segments : _draw_mesh_segments;
 	}
-	// Mesh shader path: one indirect draw for the commands of a list, the task shader reads where they start
-	void draw_list( renderer::CommandBuffer& cmd, const renderer::Buffer& draw_commands, size_t list ) const;
-	// Vertex path: one indirect multi draw for all the lists of a bucket, in LOD order
+	// Mesh shader path: one indirect draw for the commands of a bin, the task shader reads where they start
+	void draw_bin( renderer::CommandBuffer& cmd, const renderer::Buffer& draw_commands, size_t bin ) const;
+	// Vertex path: one indirect multi draw for all the bins of a bucket, in bin order
 	void draw_bucket( renderer::CommandBuffer& cmd, const renderer::Buffer& draw_commands, size_t bucket ) const;
 
-	// Culls the draws of a pass into draw_commands, with the barriers around it: culling counts each list and gives each
-	// draw a slot, then the commands are written in their packed lists
+	// Culls the draws of a pass into draw_commands, with the barriers around it: culling counts each bin and reserves
+	// each draw's commands in its bin, then the commands are written in their packed bins
 	void compute_draws( const BindlessManager& bindless_manager,
 						const renderer::PipelineManager& pipelines,
 						renderer::CommandBuffer& cmd,

@@ -43,7 +43,7 @@ layout( push_constant, std430 ) uniform block
 	MeshletVisibilityBuffer meshlet_visibility;
 	uint depth_pyramid;
 	uint meshlet_pass;
-	uint draw_list;
+	uint draw_bin;
 };
 
 // Shadow passes use their own (depth-only) LOD chain, uniform for the whole draw
@@ -76,7 +76,7 @@ void main()
 	meshlets_count = 0;
 	groupMemoryBarrier();
 
-	const MeshTaskCommand command = commands_buffer.commands[ commands_buffer.headers[ draw_list ].first_command + gl_WorkGroupID.x ];
+	const MeshTaskCommand command = commands_buffer.commands[ commands_buffer.headers[ draw_bin ].first_command + gl_WorkGroupID.x ];
 	const uint draw_id = command.draw_id;
 	const uint mesh_id = draws_buffer.mesh_draws[ draw_id ].mesh;
 

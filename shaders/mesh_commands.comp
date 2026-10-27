@@ -9,8 +9,8 @@
 // Uses mesh.glsl
 #include "draw_commands.glsl"
 
-// Writes the commands of the draws mesh_cull.comp listed: each bucket's LOD lists are packed in LOD order from the
-// bucket's first command. TASK_COMMANDS: mesh shader path, one MeshTaskCommand per task workgroup. Otherwise one
+// Writes the commands of the draws mesh_cull.comp binned: each bucket's bins are packed in order from the bucket's first
+// command. TASK_COMMANDS: mesh shader path, one MeshTaskCommand per task workgroup. Otherwise one
 // MeshDrawCommand per draw for the vertex path
 
 layout( local_size_x = 32, local_size_y = 1, local_size_z = 1 ) in;
@@ -36,43 +36,43 @@ layout( push_constant ) uniform block
 	uint bucket_first_commands[ DRAW_BUCKETS_COUNT ];
 };
 
-shared uint list_first_commands[ DRAW_LISTS_COUNT ];
+shared uint bin_first_commands[ DRAW_BINS_COUNT ];
 
 MeshLOD get_mesh_lod( uint mesh_id, uint lod )
 {
 	return pass_constants.shadow_pass != 0 ? meshes[ mesh_id ].shadow_lods[ lod ] : meshes[ mesh_id ].lods[ lod ];
 }
 
-uint get_list_count( uint list )
+uint get_bin_count( uint bin )
 {
 #if TASK_COMMANDS
-	return commands_buffer.headers[ list ].group_count_x;
+	return commands_buffer.headers[ bin ].group_count_x;
 #else
-	return commands_buffer.list_counts[ list ];
+	return commands_buffer.bin_counts[ bin ];
 #endif
 }
 
 void main()
 {
-	// 32 lists: every workgroup computes the prefix sums, the first one also publishes them for the draws
+	// Few bins: every workgroup computes the prefix sums, the first one also publishes them for the draws
 	if ( gl_LocalInvocationIndex < DRAW_BUCKETS_COUNT )
 	{
 		const uint bucket = gl_LocalInvocationIndex;
 		uint first_command = bucket_first_commands[ bucket ];
-		for ( uint lod = 0; lod < MESH_LOD_COUNT; ++lod )
+		for ( uint bin_in_bucket = 0; bin_in_bucket < DRAW_BINS_PER_BUCKET; ++bin_in_bucket )
 		{
-			const uint list = bucket * MESH_LOD_COUNT + lod;
-			list_first_commands[ list ] = first_command;
+			const uint bin = bucket * DRAW_BINS_PER_BUCKET + bin_in_bucket;
+			bin_first_commands[ bin ] = first_command;
 #if TASK_COMMANDS
 			if ( gl_WorkGroupID.x == 0 )
 			{
-				commands_buffer.headers[ list ].group_count_y = 1;
-				commands_buffer.headers[ list ].group_count_z = 1;
-				commands_buffer.headers[ list ].draw_count = 1;
-				commands_buffer.headers[ list ].first_command = first_command;
+				commands_buffer.headers[ bin ].group_count_y = 1;
+				commands_buffer.headers[ bin ].group_count_z = 1;
+				commands_buffer.headers[ bin ].draw_count = 1;
+				commands_buffer.headers[ bin ].first_command = first_command;
 			}
 #endif
-			first_command += get_list_count( list );
+			first_command += get_bin_count( bin );
 		}
 #if !TASK_COMMANDS
 		if ( gl_WorkGroupID.x == 0 )
@@ -89,26 +89,26 @@ void main()
 		return;
 	}
 	const DrawSlot slot = slots_buffer.slots[ draw_id ];
-	if ( slot.list == DRAW_NOT_LISTED )
+	if ( slot.bin == DRAW_NOT_BINNED )
 	{
 		return;
 	}
 
-	const uint list = slot.list & DRAW_SLOT_LIST_MASK;
-	const uint lod = list % MESH_LOD_COUNT;
+	const uint bin = slot.bin & DRAW_SLOT_BIN_MASK;
+	const uint lod = bin % DRAW_BINS_PER_BUCKET; // The sort key is the LOD
 	const MeshLOD mesh_lod = get_mesh_lod( draws_buffer.mesh_draws[ draw_id ].mesh, lod );
-	const uint first_command = list_first_commands[ list ] + slot.first_command;
+	const uint first_command = bin_first_commands[ bin ] + slot.offset_in_bin;
 #if TASK_COMMANDS
 	const uint group_count = ( mesh_lod.meshlets_count + TASK_GROUP_SIZE - 1 ) / TASK_GROUP_SIZE;
 	for ( uint i = 0; i < group_count; ++i )
 	{
 		commands_buffer.commands[ first_command + i ].draw_id = draw_id;
 		commands_buffer.commands[ first_command + i ].lod = lod;
-		commands_buffer.commands[ first_command + i ].drawn_early = ( slot.list & DRAW_SLOT_DRAWN_EARLY ) != 0 ? 1 : 0;
+		commands_buffer.commands[ first_command + i ].drawn_early = ( slot.bin & DRAW_SLOT_DRAWN_EARLY ) != 0 ? 1 : 0;
 		commands_buffer.commands[ first_command + i ].first_meshlet = i * TASK_GROUP_SIZE;
 	}
 #else
-	const uint bucket = list / MESH_LOD_COUNT;
+	const uint bucket = bin / DRAW_BINS_PER_BUCKET;
 	commands_buffer.commands[ first_command ].draw_id = draw_id;
 	commands_buffer.commands[ first_command ].lod = lod;
 	commands_buffer.commands[ first_command ].index_count = mesh_lod.indices_count;
