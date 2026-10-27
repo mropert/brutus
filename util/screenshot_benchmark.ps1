@@ -14,7 +14,7 @@ param(
 	[Parameter(Mandatory)][string]$Out,
 	[int]$WaitSeconds = 25,
 	[string]$Exe = "build\Debug\brutus-vulkan.exe",
-	[string]$Arguments = "benchmark"
+	[string]$Arguments = "--benchmark"
 )
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms

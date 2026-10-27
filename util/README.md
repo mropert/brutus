@@ -3,7 +3,7 @@
 Scripts used to measure and check rendering changes. Run them from the repository root: the app expects it as
 working directory, and so do the scripts.
 
-The `benchmark` startup argument freezes time and places the camera at a fixed spot, which makes frames
+The `--benchmark` startup argument freezes time and places the camera at a fixed spot, which makes frames
 reproducible: two runs of the same build render **bit-identical** frames, so any pixel difference between builds is a
 real change.
 

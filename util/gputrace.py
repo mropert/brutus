@@ -89,7 +89,7 @@ def main():
     parser.add_argument("--out", help="output directory for a new trace")
     parser.add_argument("--parse", help="existing trace output directory to read instead of tracing")
     parser.add_argument("--exe", default=DEFAULT_EXE)
-    parser.add_argument("--args", default="benchmark")
+    parser.add_argument("--args", default="--benchmark")
     parser.add_argument("--ngfx", default=DEFAULT_NGFX)
     parser.add_argument("--frames", type=int, default=3)
     parser.add_argument("--start-after-ms", type=int, default=20000)

@@ -1,9 +1,11 @@
 #define GLM_ENABLE_EXPERIMENTAL // for matrix decompose
 
 #include <SDL3/SDL.h>
+#include <argparse/argparse.hpp>
 #include <array>
 #include <chrono>
 #include <format>
+#include <fstream>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/type_aligned.hpp>
@@ -15,6 +17,7 @@
 #include <numbers>
 #include <numeric>
 #include <print>
+#include <random>
 #include <renderer/details/profiler.h>
 #include <renderer/third_party/tbb.h>
 #include <span>
@@ -306,10 +309,96 @@ void draw_scene( const asset& scene, SceneRenderer& scene_renderer )
 	}
 }
 
+struct crowd_member
+{
+	size_t asset_index;
+	glm::vec3 position;
+	glm::quat rotation;
+	float scale;
+};
+
+// Same crowd on every call: the generator uses its default seed
+std::vector<crowd_member> generate_crowd( size_t asset_count, int x_count, int z_count )
+{
+	std::minstd_rand rand;
+	std::uniform_int_distribution gen( 0zu, asset_count - 1 );
+	std::uniform_int_distribution gen_angle( 0, 360 );
+	std::uniform_real_distribution<float> gen_scale( 0.5f, 1.5f );
+
+	std::vector<crowd_member> crowd;
+	crowd.reserve( static_cast<size_t>( x_count ) * z_count );
+	for ( int z = 0; z < z_count; ++z )
+	{
+		for ( int x = 0; x < x_count; ++x )
+		{
+			const auto pos = glm::vec3( x - ( x_count / 2 ), 0, z - ( z_count / 2 ) );
+			const auto asset_index = gen( rand );
+			// The angle is passed as radians: effectively a random angle
+			const glm::quat rotation = glm::vec3( 0, gen_angle( rand ), 0 );
+			const auto scale = gen_scale( rand );
+			crowd.push_back( { asset_index, pos, rotation, scale } );
+		}
+	}
+	return crowd;
+}
+
+// One CSV line per character, for reproducing the scene in another engine (glTF conventions: right-handed, Y up)
+void dump_crowd( std::span<const crowd_member> crowd, std::span<const char* const> asset_paths, const std::string& path )
+{
+	std::ofstream out( path );
+	std::println( out, "asset,position_x,position_y,position_z,rotation_x,rotation_y,rotation_z,rotation_w,scale" );
+	for ( const auto& member : crowd )
+	{
+		const auto& p = member.position;
+		const auto& r = member.rotation;
+		std::println( out,
+					  "{},{},{},{},{},{},{},{},{}",
+					  asset_paths[ member.asset_index ],
+					  p.x,
+					  p.y,
+					  p.z,
+					  r.x,
+					  r.y,
+					  r.z,
+					  r.w,
+					  member.scale );
+	}
+}
+
 //#define BISTRO
+
+static constexpr std::array CROWD_ASSETS { "assets/player.glb", "assets/sabrina.glb" };
+static constexpr int BENCHMARK_CROWD_SIZE = 100;
 
 int main( int argc, char** argv )
 {
+	argparse::ArgumentParser parser( "brutus" );
+	parser.add_argument( "--benchmark" ).flag().help( "Setup scene and camera for the reference benchmark" );
+#ifndef BISTRO
+	parser.add_argument( "--dump-scene" ).help( "Dump scene meshes and transforms to the specified file" );
+#endif
+
+	try
+	{
+		parser.parse_args( argc, argv );
+	}
+	catch ( const std::exception& err )
+	{
+		std::cerr << err.what() << std::endl;
+		std::cerr << parser;
+		return EINVAL;
+	}
+
+	const bool is_benchmark = parser[ "--benchmark" ] == true;
+
+#ifndef BISTRO
+	if ( const auto scene_file = parser.present( "--dump-scene" ) )
+	{
+		dump_crowd( generate_crowd( CROWD_ASSETS.size(), BENCHMARK_CROWD_SIZE, BENCHMARK_CROWD_SIZE ), CROWD_ASSETS, *scene_file );
+		return 0;
+	}
+#endif
+
 	constexpr bool profile_startup = true;
 
 	if ( profile_startup )
@@ -321,9 +410,6 @@ int main( int argc, char** argv )
 
 	tbb_observer observer { };
 	observer.observe();
-
-	using namespace std::literals;
-	const bool is_benchmark = argc == 2 && argv[ 1 ] == "benchmark"sv;
 
 	gpu_stable_power::Context stable_power( is_benchmark );
 
@@ -376,8 +462,10 @@ int main( int argc, char** argv )
 	index_buffer indices( device, 32 * 1024 * 1024 );
 	std::vector<asset> assets;
 #ifndef BISTRO
-	assets.push_back( load_asset( device, bindless_manager, indices, "assets/player.glb" ) );
-	assets.push_back( load_asset( device, bindless_manager, indices, "assets/sabrina.glb" ) );
+	for ( const auto path : CROWD_ASSETS )
+	{
+		assets.push_back( load_asset( device, bindless_manager, indices, path ) );
+	}
 #else
 	assets.push_back( load_asset( device, bindless_manager, indices, "../niagara_bistro/bistro.gltf" ) );
 	//assets.push_back( load_asset( device, bindless_manager, indices, "assets/player.glb" ) );
@@ -434,12 +522,14 @@ int main( int argc, char** argv )
 	if ( is_benchmark )
 	{
 		time_of_day = 4.f;
-		ui_state.x_miku = 100;
-		ui_state.z_miku = 100;
 		ui_state.paused = true;
+#ifndef BISTRO
+		ui_state.x_miku = BENCHMARK_CROWD_SIZE;
+		ui_state.z_miku = BENCHMARK_CROWD_SIZE;
 		camera.position = { -7.5234f, 2.5384f, 4.8755f };
 		camera.pitch = -0.2960f;
 		camera.yaw = 0.7039f;
+#endif
 	}
 
 	while ( !quit )
@@ -515,23 +605,13 @@ int main( int argc, char** argv )
 		{
 			PROFILER_SCOPE_N( "Generate GPU scene" );
 			scene_renderer.clear_meshes();
-			std::minstd_rand rand;
-			std::uniform_int_distribution gen( 0zu, assets.size() - 1 );
-			std::uniform_int_distribution gen_angle( 0, 360 );
-			std::uniform_real_distribution<float> gen_scale( 0.5f, 1.5f );
-
-			for ( int z = 0; z < ui_state.z_miku; ++z )
+			for ( const auto& member : generate_crowd( assets.size(), ui_state.x_miku, ui_state.z_miku ) )
 			{
-				for ( int x = 0; x < ui_state.x_miku; ++x )
+				const auto& asset = assets[ member.asset_index ];
+				const auto scale = glm::vec3( member.scale );
+				for ( const auto& mesh : asset.meshes )
 				{
-					const auto pos = glm::vec3( x - ( ui_state.x_miku / 2 ), 0, z - ( ui_state.z_miku / 2 ) );
-					const auto& asset = assets[ gen( rand ) ];
-					const glm::quat rotation = glm::vec3( 0, gen_angle( rand ), 0 );
-					const auto scale = gen_scale( rand );
-					for ( const auto& mesh : asset.meshes )
-					{
-						scene_renderer.add_mesh( mesh, pos, rotation, { scale, scale, scale }, asset.materials[ mesh.material_index ] );
-					}
+					scene_renderer.add_mesh( mesh, member.position, member.rotation, scale, asset.materials[ mesh.material_index ] );
 				}
 			}
 			x_miku = ui_state.x_miku;

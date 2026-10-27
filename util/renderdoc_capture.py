@@ -9,7 +9,7 @@ Environment variables:
     BRUTUS_RD_CAPTURE  optional, existing .rdc to analyze instead of capturing a new frame
     BRUTUS_RD_WARMUP   optional, seconds to wait before capturing (default 20, startup loads assets and shaders)
     BRUTUS_EXE         optional, default build/Debug/brutus-vulkan.exe
-    BRUTUS_ARGS        optional, default "benchmark"
+    BRUTUS_ARGS        optional, default "--benchmark"
 
 Outputs in BRUTUS_RD_OUT:
     log.txt       progress and errors (qrenderdoc has no console)
@@ -34,7 +34,7 @@ import renderdoc as rd
 ROOT = os.getcwd()
 OUT = os.environ["BRUTUS_RD_OUT"]
 EXE = os.environ.get("BRUTUS_EXE", os.path.join(ROOT, "build", "Debug", "brutus-vulkan.exe"))
-ARGS = os.environ.get("BRUTUS_ARGS", "benchmark")
+ARGS = os.environ.get("BRUTUS_ARGS", "--benchmark")
 WARMUP = float(os.environ.get("BRUTUS_RD_WARMUP", "20"))
 COUNTERS = [
     rd.GPUCounter.EventGPUDuration,

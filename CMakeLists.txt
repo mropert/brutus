@@ -36,6 +36,7 @@ find_package(TBB CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_package(meshoptimizer CONFIG REQUIRED)
 find_package(mikktspace CONFIG REQUIRED)
+find_package(argparse CONFIG REQUIRED)
 
 if(USE_TRACY)
 	find_package(Tracy CONFIG REQUIRED)
@@ -49,9 +50,19 @@ target_sources(brutus-vulkan PRIVATE
 		src/scene_renderer.cpp
 )
 target_compile_definitions(brutus-vulkan PRIVATE GLM_FORCE_INTRINSICS GLM_FORCE_DEPTH_ZERO_TO_ONE)
-target_link_libraries(brutus-vulkan PRIVATE SDL3::SDL3 fastgltf::fastgltf glm::glm-header-only)
+target_link_libraries(brutus-vulkan PRIVATE
+	argparse::argparse
+	fastgltf::fastgltf
+	glm::glm-header-only
+	gpu_stable_power
+	imgui::imgui
+	meshoptimizer::meshoptimizer
+	mikktspace::mikktspace
+	renderer
+	SDL3::SDL3
+	TBB::tbb
+)
 target_link_libraries(brutus-vulkan PRIVATE $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image-shared>,SDL3_image::SDL3_image-shared,SDL3_image::SDL3_image-static>)
-target_link_libraries(brutus-vulkan PRIVATE renderer gpu_stable_power TBB::tbb imgui::imgui meshoptimizer::meshoptimizer mikktspace::mikktspace)
 
 if(OPTICK_FOUND)
 	target_link_libraries(brutus-vulkan PRIVATE Optick)

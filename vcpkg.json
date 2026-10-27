@@ -1,5 +1,6 @@
 {
   "dependencies": [
+    "argparse",
     "fastgltf",
     "glm",
     {
