@@ -15,7 +15,10 @@ public:
 	// Draw commands are split by bucket, the material type: each needs its own pipeline state. Within a bucket, culling
 	// sorts draws into bins by a sort key, today the LOD, so that passes draw roughly front to back. Bins are packed in
 	// their bucket's commands once their sizes are known (see mesh_commands.comp)
+	// Shaders split a bin index into bucket and bin within it with a division and a modulo: keep this a power of two so
+	// that they compile to a shift and a mask, GPUs emulate integer division with a long instruction sequence
 	static constexpr size_t DRAW_BINS_PER_BUCKET = MESH_LOD_COUNT;
+	static_assert( ( DRAW_BINS_PER_BUCKET & ( DRAW_BINS_PER_BUCKET - 1 ) ) == 0, "See DRAW_BINS_PER_BUCKET" );
 	static constexpr size_t DRAW_BINS_COUNT = DRAW_BUCKETS_COUNT * DRAW_BINS_PER_BUCKET;
 	// Vertical, in radians: 50.70 degrees. It used to be 70 degrees passed as radians by accident, which gave this angle;
 	// kept so that reference images and benchmarks stay comparable

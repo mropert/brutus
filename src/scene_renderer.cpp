@@ -50,13 +50,11 @@ namespace
 		std::array<gpu_draw_mesh_command, MAX_DRAWS> commands;
 	};
 
-	// Mesh shader path, one per task workgroup
+	// Mesh shader path, one per task workgroup, MeshTaskCommand in mesh.glsl
 	struct gpu_task_command
 	{
 		uint32_t draw_id;
-		uint32_t lod;
-		uint32_t drawn_early;
-		uint32_t first_meshlet;
+		uint32_t first_meshlet; // Top bit: drawn early
 	};
 	struct gpu_task_header
 	{

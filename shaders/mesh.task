@@ -80,8 +80,10 @@ void main()
 	const uint draw_id = command.draw_id;
 	const uint mesh_id = draws_buffer.mesh_draws[ draw_id ].mesh;
 
-	const MeshLOD mesh_lod = get_mesh_lod( mesh_id, command.lod );
-	const uint lod_meshlet = command.first_meshlet + gl_LocalInvocationIndex;
+	const uint lod = draw_bin % DRAW_BINS_PER_BUCKET; // The sort key is the LOD
+	const MeshLOD mesh_lod = get_mesh_lod( mesh_id, lod );
+	const bool drawn_early = ( command.first_meshlet & TASK_COMMAND_DRAWN_EARLY ) != 0;
+	const uint lod_meshlet = ( command.first_meshlet & ~TASK_COMMAND_DRAWN_EARLY ) + gl_LocalInvocationIndex;
 	if ( lod_meshlet >= mesh_lod.meshlets_count )
 	{
 		return;
@@ -176,7 +178,7 @@ void main()
 			}
 
 			// Already drawn by the early pass
-			skip = was_visible && command.drawn_early != 0;
+			skip = was_visible && drawn_early;
 		}
 	}
 

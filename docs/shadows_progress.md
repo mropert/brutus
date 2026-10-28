@@ -191,6 +191,9 @@ All numbers are from the `benchmark` scene (10k characters, ~40k draws, fixed ca
    lists). The vertex path now sorts too (one multi draw per bucket in LOD order). Pixel identical on both paths.
    Culling +0.019 ms for the shadows, ~+0.006 early, +0.004 late (10 traced frames each, same session); draws within
    noise. The task commands (256k x 16 B) size the union, not the vertex commands (64k x 28 B = 1.75 MiB).
+   **8-byte task commands** (uncommitted when written): `{ draw_id, first_meshlet | drawn early bit }`, the LOD comes
+   from the bin. Task commands 4 -> 2 MiB per buffer, still above the vertex commands: -10 MiB VRAM over the 5 buffers
+   (storage 41 -> 31 MB). Pixel identical, timings unchanged within noise.
    **Per-LOD draw lists** (`164bab8`, 2026-10-27): culling sorts task commands into one list per bucket
    and LOD, passes draw LOD 0 first. Pixel identical on both paths. Early pass median 4.41 -> 3.82 ms (10 traced frames
    each, separate sessions). +30 MiB VRAM: `MAX_TASK_COMMANDS` 256k -> 640k (the benchmark needs ~615k against ~215k
@@ -207,6 +210,10 @@ All numbers are from the `benchmark` scene (10k characters, ~40k draws, fixed ca
    far band mostly gone. Up to the end of the LOD 0 bin alone, the near characters already show the same hot spots
    (mean 14.8 on 47% of the screen): what remains is overdraw within the nearest draws (hair, skirt and overlapping
    characters), which draw order between bins can't fix.
+   **LOD 0 only prepass** (temporary, 2026-10-28, 2 x 10 traced frames each way, alternating): the LOD 0 bin's shaded
+   draws drop from 0.74-0.94 to 0.36-0.38 ms, but the depth-only prepass of that bin costs 0.52-0.61 ms: early pass
+   median 3.79-3.80 ms without, 3.81-3.84 ms with. Break-even. The near characters' geometry (~1M triangles at 4x MSAA)
+   is as expensive to rasterize again as the overdraw it removes.
 5. **Far cascade**: coarser LOD multiplier (currently `lod_target = 2 * texel_world_size` everywhere), or update it
    every 2-4 frames.
 6. **Index buffer**: Bistro uses 30.7M of 32M indices; raise to 48M (+64 MB) or size it from the loaded assets.

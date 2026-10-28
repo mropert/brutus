@@ -103,11 +103,12 @@ struct MeshDrawCommand
 	uint first_instance;
 };
 
-// Mesh shader path, one per task workgroup: all task workgroups of a pass are a single dispatch
+// Mesh shader path, one per task workgroup: all task workgroups of a bin are a single dispatch. The LOD is the bin's
 struct MeshTaskCommand
 {
 	uint draw_id;
-	uint lod;
-	uint drawn_early; // Late pass only: the early pass already drew the meshlets that were visible last frame
-	uint first_meshlet; // Relative to the LOD, the workgroup handles up to TASK_GROUP_SIZE meshlets from there
+	// Relative to the LOD, the workgroup handles up to TASK_GROUP_SIZE meshlets from there. Late pass only, the top bit
+	// is set when the early pass already drew the meshlets that were visible last frame
+	uint first_meshlet;
 };
+const uint TASK_COMMAND_DRAWN_EARLY = 0x80000000;

@@ -100,12 +100,11 @@ void main()
 	const uint first_command = bin_first_commands[ bin ] + slot.offset_in_bin;
 #if TASK_COMMANDS
 	const uint group_count = ( mesh_lod.meshlets_count + TASK_GROUP_SIZE - 1 ) / TASK_GROUP_SIZE;
+	const uint drawn_early = ( slot.bin & DRAW_SLOT_DRAWN_EARLY ) != 0 ? TASK_COMMAND_DRAWN_EARLY : 0;
 	for ( uint i = 0; i < group_count; ++i )
 	{
 		commands_buffer.commands[ first_command + i ].draw_id = draw_id;
-		commands_buffer.commands[ first_command + i ].lod = lod;
-		commands_buffer.commands[ first_command + i ].drawn_early = ( slot.bin & DRAW_SLOT_DRAWN_EARLY ) != 0 ? 1 : 0;
-		commands_buffer.commands[ first_command + i ].first_meshlet = i * TASK_GROUP_SIZE;
+		commands_buffer.commands[ first_command + i ].first_meshlet = ( i * TASK_GROUP_SIZE ) | drawn_early;
 	}
 #else
 	const uint bucket = bin / DRAW_BINS_PER_BUCKET;
