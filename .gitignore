@@ -1,0 +1,12 @@
+# CMake, Visual Studio and vcpkg output
+/build/
+
+# Assets are not versioned
+/assets/
+
+# Local runtime state written by the app
+/imgui.ini
+/startup_*.opt
+
+# Temporary files from tools and experiments: captures, traces, screenshots, benchmark output
+/scratch/
