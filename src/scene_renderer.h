@@ -35,6 +35,7 @@ public:
 
 	SceneRenderer( renderer::Device& device,
 				   renderer::Texture::Format output_format,
+				   int sample_count,
 				   BindlessManager& bindless_manager,
 				   renderer::PipelineManager& pipeline_manager );
 
@@ -61,7 +62,6 @@ public:
 	const auto& get_statistics() const { return _statistics; }
 
 private:
-	static constexpr auto SAMPLE_COUNT = 4;
 	static constexpr auto COLOR_FORMAT = renderer::Texture::Format::R16G16B16A16_SFLOAT;
 	static constexpr auto DEPTH_FORMAT = renderer::Texture::Format::D32_SFLOAT;
 	static constexpr auto SHADOW_DEPTH_FORMAT = renderer::Texture::Format::D16_UNORM;
@@ -207,8 +207,10 @@ private:
 	};
 	static_assert( sizeof( MeshDraw ) == 64 );
 
+	int _sample_count;
 	renderer::Extent2D _extent;
 	renderer::Extent2D _depth_pyramid_extent;
+	// MSAA targets, only created with more than one sample
 	renderer::raii::Texture _color_texture;
 	renderer::raii::TextureView _color_texture_view;
 	renderer::raii::Texture _depth_texture;

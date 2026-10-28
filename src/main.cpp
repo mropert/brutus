@@ -337,6 +337,11 @@ int main( int argc, char** argv )
 		.default_value( false )
 		.implicit_value( true )
 		.help( "Default to vertex shader rendering even if mesh shaders are available" );
+	command_line.add_argument( "--msaa" )
+		.default_value( 4 )
+		.scan<'i', int>()
+		.choices( 1, 2, 4, 8 )
+		.help( "MSAA sample count of the main passes, 1 renders without resolves" );
 #ifndef BISTRO
 	command_line.add_argument( "--dump-scene" ).help( "Dump scene meshes and transforms to the specified file" );
 #endif
@@ -419,7 +424,7 @@ int main( int argc, char** argv )
 	BindlessManager bindless_manager( device, std::array { MAX_MESHES, MAX_MATERIALS } );
 	renderer::PipelineManager pipelines( device, "shaders", bindless_manager );
 
-	SceneRenderer scene_renderer( device, swapchain_format, bindless_manager, pipelines );
+	SceneRenderer scene_renderer( device, swapchain_format, command_line.get<int>( "--msaa" ), bindless_manager, pipelines );
 
 	// Bistro needs ~27M
 	index_buffer indices( device, 32 * 1024 * 1024 );

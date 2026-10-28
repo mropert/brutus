@@ -371,20 +371,12 @@ using usage = renderer::Texture::Usage;
 
 SceneRenderer::SceneRenderer( renderer::Device& device,
 							  renderer::Texture::Format output_format,
+							  int sample_count,
 							  BindlessManager& bindless_manager,
 							  renderer::PipelineManager& pipelines )
-	: _extent( device.get_extent() )
+	: _sample_count( sample_count )
+	, _extent( device.get_extent() )
 	, _depth_pyramid_extent( round_pow2( _extent.width ), round_pow2( _extent.height ) )
-	, _color_texture( device.create_texture( renderer::Texture::Desc { .format = COLOR_FORMAT,
-																	   .usage = usage::COLOR_ATTACHMENT,
-																	   .extent = _extent,
-																	   .samples = SAMPLE_COUNT } ) )
-	, _color_texture_view( device.create_texture_view( _color_texture, renderer::TextureView::Aspect::COLOR ) )
-	, _depth_texture( device.create_texture( renderer::Texture::Desc { .format = renderer::Texture::Format::D32_SFLOAT,
-																	   .usage = usage::DEPTH_STENCIL_ATTACHMENT,
-																	   .extent = _extent,
-																	   .samples = SAMPLE_COUNT } ) )
-	, _depth_texture_view( device.create_texture_view( _depth_texture, renderer::TextureView::Aspect::DEPTH ) )
 	, _resolved_color_texture( bindless_manager.add_texture( device.create_texture(
 		  renderer::Texture::Desc { .format = COLOR_FORMAT, .usage = usage::COLOR_ATTACHMENT | usage::SAMPLED, .extent = _extent } ) ) )
 	, _resolved_depth_texture( bindless_manager.add_texture(
@@ -452,7 +444,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 	_mesh_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 								   .depth_format = DEPTH_FORMAT,
-								   .sample_count = SAMPLE_COUNT,
+								   .sample_count = _sample_count,
 								   .push_constants_size = sizeof( draw_meshes_constants ) },
 		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines },
 		  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_shaders_defines } } );
@@ -460,7 +452,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 	_mesh_alpha_clip_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 								   .depth_format = DEPTH_FORMAT,
-								   .sample_count = SAMPLE_COUNT,
+								   .sample_count = _sample_count,
 								   .push_constants_size = sizeof( draw_meshes_constants ) },
 		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines },
 		  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_alpha_shaders_defines } } );
@@ -469,7 +461,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 								   .depth_format = DEPTH_FORMAT,
 								   .depth_compare_op = renderer::CompareOp::GREATER_OR_EQUAL,
-								   .sample_count = SAMPLE_COUNT,
+								   .sample_count = _sample_count,
 								   .alpha_blend = true,
 								   .push_constants_size = sizeof( draw_meshes_constants ) },
 		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines },
@@ -487,7 +479,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		_meshlet_pipeline = pipelines.add(
 			renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 									   .depth_format = DEPTH_FORMAT,
-									   .sample_count = SAMPLE_COUNT,
+									   .sample_count = _sample_count,
 									   .push_constants_size = sizeof( draw_meshes_constants ) },
 			{ { .path = "mesh.task", .stage = renderer::ShaderStage::TASK, .defines = mesh_shaders_defines },
 			  { .path = "mesh.mesh", .stage = renderer::ShaderStage::MESH, .defines = mesh_shaders_defines },
@@ -496,7 +488,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		_meshlet_alpha_clip_pipeline = pipelines.add(
 			renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 									   .depth_format = DEPTH_FORMAT,
-									   .sample_count = SAMPLE_COUNT,
+									   .sample_count = _sample_count,
 									   .push_constants_size = sizeof( draw_meshes_constants ) },
 			{ { .path = "mesh.task", .stage = renderer::ShaderStage::TASK, .defines = mesh_shaders_defines },
 			  { .path = "mesh.mesh", .stage = renderer::ShaderStage::MESH, .defines = mesh_shaders_defines },
@@ -506,7 +498,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 			renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 									   .depth_format = DEPTH_FORMAT,
 									   .depth_compare_op = renderer::CompareOp::GREATER_OR_EQUAL,
-									   .sample_count = SAMPLE_COUNT,
+									   .sample_count = _sample_count,
 									   .alpha_blend = true,
 									   .push_constants_size = sizeof( draw_meshes_constants ) },
 			{ { .path = "mesh.task", .stage = renderer::ShaderStage::TASK, .defines = mesh_shaders_defines },
@@ -556,7 +548,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 	_grid_pipeline = pipelines.add( renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 															   .depth_format = DEPTH_FORMAT,
 															   .topology = renderer::Pipeline::PrimitiveTopology::TRIANGLE_STRIP,
-															   .sample_count = SAMPLE_COUNT,
+															   .sample_count = _sample_count,
 															   .push_constants_size = sizeof( grid_constants ) },
 									{ { .path = "grid.vert", .stage = renderer::ShaderStage::VERTEX },
 									  { .path = "grid.frag", .stage = renderer::ShaderStage::FRAGMENT } } );
@@ -591,6 +583,21 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 																	  renderer::TextureView::Aspect::DEPTH,
 																	  -1,
 																	  static_cast<int>( layer ) );
+	}
+
+	// With a single sample, passes render straight into the resolved textures
+	if ( _sample_count > 1 )
+	{
+		_color_texture = device.create_texture( renderer::Texture::Desc { .format = COLOR_FORMAT,
+																		  .usage = usage::COLOR_ATTACHMENT,
+																		  .extent = _extent,
+																		  .samples = _sample_count } );
+		_color_texture_view = device.create_texture_view( _color_texture, renderer::TextureView::Aspect::COLOR );
+		_depth_texture = device.create_texture( renderer::Texture::Desc { .format = renderer::Texture::Format::D32_SFLOAT,
+																		  .usage = usage::DEPTH_STENCIL_ATTACHMENT,
+																		  .extent = _extent,
+																		  .samples = _sample_count } );
+		_depth_texture_view = device.create_texture_view( _depth_texture, renderer::TextureView::Aspect::DEPTH );
 	}
 }
 
@@ -763,7 +770,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 	const auto frame_constants_address = _frame_constant_buffers.get_device_address() + ( frame_index * sizeof( frame_constants ) );
 
 	{
-		const auto constants = build_main_pass_constants( camera, _extent, SAMPLE_COUNT );
+		const auto constants = build_main_pass_constants( camera, _extent, static_cast<uint32_t>( _sample_count ) );
 		memcpy( static_cast<pass_constants*>( _pass_constant_buffers.get_mapped_address() ) + frame_index,
 				&constants,
 				sizeof( constants ) );
@@ -793,15 +800,29 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 							renderer::ResourceState::SHADER_STORAGE_READ_WRITE );
 	}
 
+	// The main passes render into the MSAA targets, then resolve. With a single sample they render straight into the
+	// resolved textures
+	const bool msaa = _sample_count > 1;
+	const renderer::Texture color_target = msaa ? _color_texture : _resolved_color_texture.texture;
+	const renderer::TextureView color_target_view = msaa ? _color_texture_view : _resolved_color_texture.handles.view;
+	const renderer::Texture depth_target = msaa ? _depth_texture : _resolved_depth_texture.texture;
+	const renderer::TextureView depth_target_view = msaa ? _depth_texture_view : _resolved_depth_texture.handles.view;
+
 	{
 		const auto label = cmd.debug_label( "Opaque Early" );
+		renderer::RenderInfo render_info { .color_target = { .target = color_target_view, .clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } } },
+										   .depth_target = { .target = depth_target_view, .clear_value = { { 0.f } } } };
 		{
 			const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::CULLING_EARLY );
-			cmd.texture_barrier( _color_texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::COLOR_ATTACHMENT );
-			cmd.texture_barrier( _depth_texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
-			cmd.texture_barrier( _resolved_depth_texture.texture,
-								 renderer::ResourceState::UNDEFINED,
-								 renderer::ResourceState::DEPTH_ATTACHMENT );
+			cmd.texture_barrier( color_target, renderer::ResourceState::UNDEFINED, renderer::ResourceState::COLOR_ATTACHMENT );
+			cmd.texture_barrier( depth_target, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
+			if ( msaa )
+			{
+				cmd.texture_barrier( _resolved_depth_texture.texture,
+									 renderer::ResourceState::UNDEFINED,
+									 renderer::ResourceState::DEPTH_ATTACHMENT );
+				render_info.depth_target.resolve_target = _resolved_depth_texture.handles.view;
+			}
 
 			compute_draws( bindless_manager,
 						   pipelines,
@@ -818,10 +839,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		}
 
 		const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::DRAW_OPAQUES_EARLY );
-		cmd.begin_rendering( { .color_target = { .target = _color_texture_view, .clear_value = { { 0.1f, 0.1f, 0.1f, 1.f } } },
-							   .depth_target = { .target = _depth_texture_view,
-												 .resolve_target = _resolved_depth_texture.handles.view,
-												 .clear_value = { { 0.f } } } } );
+		cmd.begin_rendering( render_info );
 		draw_opaques( bindless_manager,
 					  pipelines,
 					  cmd,
@@ -894,7 +912,12 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 								renderer::ResourceState::SHADER_STORAGE_READ_WRITE,
 								renderer::ResourceState::SHADER_STORAGE_READ_WRITE );
 		}
-		cmd.begin_rendering( { .color_target = { .target = _color_texture_view }, .depth_target = { .target = _depth_texture_view } } );
+		if ( !msaa )
+		{
+			// The depth pyramid read the depth target itself, nothing was resolved
+			cmd.texture_barrier( depth_target, renderer::ResourceState::COMPUTE_SHADER_READ, renderer::ResourceState::DEPTH_ATTACHMENT );
+		}
+		cmd.begin_rendering( { .color_target = { .target = color_target_view }, .depth_target = { .target = depth_target_view } } );
 		draw_opaques( bindless_manager,
 					  pipelines,
 					  cmd,
@@ -909,7 +932,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 	{
 		const auto label = cmd.debug_label( "Transparents" );
 		const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::DRAW_TRANSPARENTS );
-		cmd.begin_rendering( { .color_target = { .target = _color_texture_view }, .depth_target = { .target = _depth_texture_view } } );
+		cmd.begin_rendering( { .color_target = { .target = color_target_view }, .depth_target = { .target = depth_target_view } } );
 		if ( !index_buffer )
 		{
 			draw_transparent_meshlets( bindless_manager,
@@ -941,11 +964,16 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		PROFILER_GPU_EVENT( "Draw Grid" );
 		const auto label = cmd.debug_label( "Grid" );
 		const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::DRAW_GRID );
-		cmd.texture_barrier( _resolved_color_texture.texture,
-							 renderer::ResourceState::UNDEFINED,
-							 renderer::ResourceState::COLOR_ATTACHMENT );
-		cmd.begin_rendering( { .color_target = { .target = _color_texture_view, .resolve_target = _resolved_color_texture.handles.view },
-							   .depth_target = { .target = _depth_texture_view } } );
+		renderer::RenderInfo render_info { .color_target = { .target = color_target_view },
+										   .depth_target = { .target = depth_target_view } };
+		if ( msaa )
+		{
+			cmd.texture_barrier( _resolved_color_texture.texture,
+								 renderer::ResourceState::UNDEFINED,
+								 renderer::ResourceState::COLOR_ATTACHMENT );
+			render_info.color_target.resolve_target = _resolved_color_texture.handles.view;
+		}
+		cmd.begin_rendering( render_info );
 
 		cmd.set_dynamic_state( { .viewport = _extent } );
 		cmd.bind_pipeline( pipelines.get( _grid_pipeline ), bindless_manager );
@@ -1239,7 +1267,7 @@ SceneRenderer::setup_shadow_cascades( const Camera& camera, glm::vec3 main_light
 	constexpr float shadow_near_depth = 0.1f;
 	ShadowCascades cascades { .splits = compute_shadow_cascade_splits( cascade_count, shadow_near_depth, shadow_distance ),
 							  .count = cascade_count };
-	const auto camera_constants = build_main_pass_constants( camera, _extent, SAMPLE_COUNT );
+	const auto camera_constants = build_main_pass_constants( camera, _extent, static_cast<uint32_t>( _sample_count ) );
 
 	for ( size_t cascade = 0; cascade < cascade_count; ++cascade )
 	{
