@@ -159,8 +159,9 @@ All numbers are from the `benchmark` scene (10k characters, ~40k draws, fixed ca
    Receiver planes could also use the measured range (fewer casters).
 3. **Shader occupancy**: depth-only `mesh.mesh` variant for shadows (it fetches the full vertex and writes every
    attribute today); main mesh shader outputs (material per primitive, packed normal/tangent) and quantized vertices;
-   task shader uses `groupMemoryBarrier()` where it needs `barrier()` and returns early before it (works because the
-   workgroup is one subgroup): switch to subgroup ballot compaction; fragment shader after Nsight stall reasons.
+   ~~task shader barriers and early return~~ (fixed 2026-10-28: it also emitted from lane 0 only, undefined behavior
+   per SPV_EXT_mesh_shader, every invocation must execute `EmitMeshTasksEXT` once in uniform control flow); next, sort
+   the payload's meshlets front to back; fragment shader after Nsight stall reasons.
 4. Later: depth prepass experiment (overdraw, and it would give SDSM this frame's depth), contact shadows.
 
 ### Draw pass and shadow cost

@@ -71,25 +71,10 @@ bool coneCullOrthographic( vec3 cone_axis, float cone_cutoff, vec3 view_directio
 	return dot( view_direction, cone_axis ) >= cone_cutoff;
 }
 
-void main()
+// True when this pass draws the meshlet: it passes culling and, in the late pass, wasn't drawn by the early pass.
+// The late pass also records the meshlet's visibility for the next frame
+bool should_draw_meshlet( uint draw_id, uint mesh_id, uint meshlet_id, bool drawn_early )
 {
-	meshlets_count = 0;
-	groupMemoryBarrier();
-
-	const MeshTaskCommand command = commands_buffer.commands[ commands_buffer.headers[ draw_bin ].first_command + gl_WorkGroupID.x ];
-	const uint draw_id = command.draw_id;
-	const uint mesh_id = draws_buffer.mesh_draws[ draw_id ].mesh;
-
-	const uint lod = draw_bin % DRAW_BINS_PER_BUCKET; // The sort key is the LOD
-	const MeshLOD mesh_lod = get_mesh_lod( mesh_id, lod );
-	const bool drawn_early = ( command.first_meshlet & TASK_COMMAND_DRAWN_EARLY ) != 0;
-	const uint lod_meshlet = ( command.first_meshlet & ~TASK_COMMAND_DRAWN_EARLY ) + gl_LocalInvocationIndex;
-	if ( lod_meshlet >= mesh_lod.meshlets_count )
-	{
-		return;
-	}
-
-	const uint meshlet_id = lod_meshlet + mesh_lod.meshlets_offset;
 	const Meshlet meshlet = meshes[ mesh_id ].mb.meshlets[ meshlet_id ];
 
 	const vec3 meshlet_center = rotate_by_quaternion( meshlet.bounding_sphere.xyz, draws_buffer.mesh_draws[ draw_id ].rotation )
@@ -182,17 +167,41 @@ void main()
 		}
 	}
 
-	if ( visible && !skip )
+	return visible && !skip;
+}
+
+void main()
+{
+	if ( gl_LocalInvocationIndex == 0 )
 	{
-		const uint index = atomicAdd( meshlets_count, 1 );
-		payload.meshlets[ index ] = meshlet_id;
+		meshlets_count = 0;
 	}
+	barrier();
 
-	groupMemoryBarrier();
+	const MeshTaskCommand command = commands_buffer.commands[ commands_buffer.headers[ draw_bin ].first_command + gl_WorkGroupID.x ];
+	const uint draw_id = command.draw_id;
+	const uint mesh_id = draws_buffer.mesh_draws[ draw_id ].mesh;
 
+	const uint lod = draw_bin % DRAW_BINS_PER_BUCKET; // The sort key is the LOD
+	const MeshLOD mesh_lod = get_mesh_lod( mesh_id, lod );
+	const bool drawn_early = ( command.first_meshlet & TASK_COMMAND_DRAWN_EARLY ) != 0;
+	const uint lod_meshlet = ( command.first_meshlet & ~TASK_COMMAND_DRAWN_EARLY ) + gl_LocalInvocationIndex;
+	// No early return: every invocation must reach EmitMeshTasksEXT (mandated by task shader spec, else UB).
+	// Invocations past the LOD's last meshlet draw nothing
+	if ( lod_meshlet < mesh_lod.meshlets_count )
+	{
+		const uint meshlet_id = lod_meshlet + mesh_lod.meshlets_offset;
+		if ( should_draw_meshlet( draw_id, mesh_id, meshlet_id, drawn_early ) )
+		{
+			const uint index = atomicAdd( meshlets_count, 1 );
+			payload.meshlets[ index ] = meshlet_id;
+		}
+	}
 	if ( gl_LocalInvocationIndex == 0 )
 	{
 		payload.draw_id = draw_id;
-		EmitMeshTasksEXT( meshlets_count, 1, 1 );
 	}
+	barrier();
+
+	EmitMeshTasksEXT( meshlets_count, 1, 1 );
 }
