@@ -222,9 +222,13 @@ All numbers are from the `benchmark` scene (10k characters, ~40k draws, fixed ca
    third of the LOD 0 prepass ceiling. Pixel identical (RenderDoc resolved color). Next: order the task workgroups of
    a draw too (spatially coherent meshlet groups with bounds).
    RenderDoc's quad overdraw overlay doesn't see this: taken again after the sort (`--msaa 1`), its statistics match
-   the `2d9bbb8` heatmap exactly (mean 18.37, LOD 0 bin 14.77), while PS invocations dropped 14%. It seems to test each
-   draw against the depth before that draw, so it shows overdraw between draws but not order within a draw. Use PS
-   invocations or the bin timings for that.
+   the `2d9bbb8` heatmap exactly (mean 18.37, LOD 0 bin 14.77), while PS invocations dropped 14%. With a temporary
+   full depth prepass before the early pass, the same overlay drops to a mean of 1.72 (max 5): it does depth test,
+   against the depth the pass starts with and what earlier draws wrote. RenderDoc's source (`vk_overlay.cpp`,
+   `VulkanQuadOverdrawCallback`) confirms why: each draw of the pass is replayed first with the overdraw pipeline, depth
+   test kept but depth writes off, then for real. So it sees order between draws (passes, LOD bins) but never within a
+   draw. Use PS invocations or the bin timings for that. The overlay also only runs on single-sample targets (it's
+   skipped unless the overlay's sample count is 1), hence `--msaa 1`.
 5. **Far cascade**: coarser LOD multiplier (currently `lod_target = 2 * texel_world_size` everywhere), or update it
    every 2-4 frames.
 6. **Index buffer**: Bistro uses 30.7M of 32M indices; raise to 48M (+64 MB) or size it from the loaded assets.
