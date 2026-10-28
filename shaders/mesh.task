@@ -52,7 +52,8 @@ MeshLOD get_mesh_lod( uint mesh_id, uint lod )
 	return pass_constants.shadow_pass != 0 ? meshes[ mesh_id ].shadow_lods[ lod ] : meshes[ mesh_id ].lods[ lod ];
 }
 
-shared uint meshlets_count;
+// Each invocation's sort key, view depth or +infinity when it draws nothing
+shared float meshlet_keys[ TASK_GROUP_SIZE ];
 
 taskPayloadSharedEXT MeshletTaskPayload payload;
 
@@ -73,13 +74,15 @@ bool coneCullOrthographic( vec3 cone_axis, float cone_cutoff, vec3 view_directio
 
 // True when this pass draws the meshlet: it passes culling and, in the late pass, wasn't drawn by the early pass.
 // The late pass also records the meshlet's visibility for the next frame
-bool should_draw_meshlet( uint draw_id, uint mesh_id, uint meshlet_id, bool drawn_early )
+bool should_draw_meshlet( uint draw_id, uint mesh_id, uint meshlet_id, bool drawn_early, out float view_depth )
 {
 	const Meshlet meshlet = meshes[ mesh_id ].mb.meshlets[ meshlet_id ];
 
 	const vec3 meshlet_center = rotate_by_quaternion( meshlet.bounding_sphere.xyz, draws_buffer.mesh_draws[ draw_id ].rotation )
 			* draws_buffer.mesh_draws[ draw_id ].scale
 		+ draws_buffer.mesh_draws[ draw_id ].translation;
+	// View space looks down -Z, for the orthographic shadow views too
+	view_depth = -( pass_constants.view_matrix * vec4( meshlet_center, 1 ) ).z;
 
 	const float meshlet_radius = meshlet.bounding_sphere.w
 		* max( draws_buffer.mesh_draws[ draw_id ].scale.x,
@@ -172,12 +175,6 @@ bool should_draw_meshlet( uint draw_id, uint mesh_id, uint meshlet_id, bool draw
 
 void main()
 {
-	if ( gl_LocalInvocationIndex == 0 )
-	{
-		meshlets_count = 0;
-	}
-	barrier();
-
 	const MeshTaskCommand command = commands_buffer.commands[ commands_buffer.headers[ draw_bin ].first_command + gl_WorkGroupID.x ];
 	const uint draw_id = command.draw_id;
 	const uint mesh_id = draws_buffer.mesh_draws[ draw_id ].mesh;
@@ -188,14 +185,28 @@ void main()
 	const uint lod_meshlet = ( command.first_meshlet & ~TASK_COMMAND_DRAWN_EARLY ) + gl_LocalInvocationIndex;
 	// No early return: every invocation must reach EmitMeshTasksEXT (mandated by task shader spec, else UB).
 	// Invocations past the LOD's last meshlet draw nothing
-	if ( lod_meshlet < mesh_lod.meshlets_count )
+	const uint meshlet_id = lod_meshlet + mesh_lod.meshlets_offset;
+	float key = INFINITY;
+	float view_depth;
+	if ( lod_meshlet < mesh_lod.meshlets_count && should_draw_meshlet( draw_id, mesh_id, meshlet_id, drawn_early, view_depth ) )
 	{
-		const uint meshlet_id = lod_meshlet + mesh_lod.meshlets_offset;
-		if ( should_draw_meshlet( draw_id, mesh_id, meshlet_id, drawn_early ) )
-		{
-			const uint index = atomicAdd( meshlets_count, 1 );
-			payload.meshlets[ index ] = meshlet_id;
-		}
+		key = view_depth;
+	}
+	meshlet_keys[ gl_LocalInvocationIndex ] = key;
+	barrier();
+
+	// Front to back: each drawn meshlet's place in the payload is the number of nearer ones, ties broken by invocation
+	uint rank = 0;
+	uint count = 0;
+	for ( uint i = 0; i < TASK_GROUP_SIZE; ++i )
+	{
+		const float other = meshlet_keys[ i ];
+		rank += ( other < key || ( other == key && i < gl_LocalInvocationIndex ) ) ? 1 : 0;
+		count += isinf( other ) ? 0 : 1;
+	}
+	if ( !isinf( key ) )
+	{
+		payload.meshlets[ rank ] = meshlet_id;
 	}
 	if ( gl_LocalInvocationIndex == 0 )
 	{
@@ -203,5 +214,5 @@ void main()
 	}
 	barrier();
 
-	EmitMeshTasksEXT( meshlets_count, 1, 1 );
+	EmitMeshTasksEXT( count, 1, 1 );
 }

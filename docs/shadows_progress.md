@@ -215,6 +215,12 @@ All numbers are from the `benchmark` scene (10k characters, ~40k draws, fixed ca
    draws drop from 0.74-0.94 to 0.36-0.38 ms, but the depth-only prepass of that bin costs 0.52-0.61 ms: early pass
    median 3.79-3.80 ms without, 3.81-3.84 ms with. Break-even. The near characters' geometry (~1M triangles at 4x MSAA)
    is as expensive to rasterize again as the overdraw it removes.
+   **Front to back meshlets within a task workgroup** (uncommitted when written): the task shader ranks its drawn
+   meshlets by view depth (count of nearer keys in shared memory) instead of appending them with an atomic. LOD 0 PS
+   invocations 3.72M -> 3.20M (RenderDoc). Early bins (2 x 10 traced frames each): LOD 0 median 0.78 -> 0.70 ms,
+   LOD 1 0.36-0.38 -> 0.32-0.34, LOD 2 0.60-0.64 -> 0.55-0.59, LOD 3-6 and the cascades unchanged: ~-0.17 ms, a
+   third of the LOD 0 prepass ceiling. Pixel identical (RenderDoc resolved color). Next: order the task workgroups of
+   a draw too (spatially coherent meshlet groups with bounds).
 5. **Far cascade**: coarser LOD multiplier (currently `lod_target = 2 * texel_world_size` everywhere), or update it
    every 2-4 frames.
 6. **Index buffer**: Bistro uses 30.7M of 32M indices; raise to 48M (+64 MB) or size it from the loaded assets.

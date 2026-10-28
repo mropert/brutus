@@ -1,3 +1,7 @@
+// GLSL doesn't provide this constant, unlike C. Since GLSL 4.40 (section 4.7.1), dividing a non-zero value by zero gives
+// an infinity: glslang folds this into the +infinity constant
+const float INFINITY = 1.0 / 0.0;
+
 vec3 rotate_by_quaternion( vec3 v, vec4 q )
 {
 	return v + 2.0 * cross( q.xyz, cross( q.xyz, v ) + q.w * v );
