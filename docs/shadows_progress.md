@@ -4,7 +4,8 @@ Handoff notes for continuing the shadow quality and draw pass performance work. 
 [util/README.md](../util/README.md); this file covers the state of the work, what's left, and the working process.
 
 All numbers are from the `benchmark` scene (10k characters, ~40k draws, fixed camera and time) on an RTX 2080 SUPER
-(8 GB, 214 MB BAR, no resizable BAR), Debug build, GPU Trace at locked base clocks, mesh shader path unless stated.
+(8 GB, 214 MB BAR, no resizable BAR), GPU Trace at locked base clocks, mesh shader path unless stated. Before
+2026-10-27 traces ran the Debug build, since then mostly Release (`--exe`): GPU times match at locked clocks.
 
 ## Done so far
 
@@ -47,6 +48,14 @@ All numbers are from the `benchmark` scene (10k characters, ~40k draws, fixed ca
 | vk-renderer `ca9b0cc`; `b028c4e` | (user) raii `Buffer`/`Texture`/`TextureView` move assignment frees what the target held |
 | `2602c6a` | Small triangle culling in every pass: bounding box scaled by `SceneConstants::sample_count` (standard sample locations for 1/2/4/8 samples project to (k + 0.5) / N per axis). Main pass -3.5% triangles, no measurable time change, kept for a single path |
 | `0c601d0` | 8 LOD levels (was 6), error driven: no index target, relative error limits doubling from 0.0025 to 0.16. Shadow chain much coarser (frame 7.42 -> 6.79 ms), main chain barely changes. `upload_lods` throws when the index buffer is full |
+| `7592996` | Shadow culling batched: one commands buffer per cascade, all culling dispatches then all draws (shadow map 0.67 -> 0.62 ms) |
+| `164bab8` | Draws sorted into one bin per bucket and LOD, LOD 0 first, a debug label per bin (early pass median 4.41 -> 3.82 ms) |
+| `b11ad66` | Two-pass command generation: culling counts bins and records each draw's slot, `mesh_commands.comp` packs the bins in their bucket and writes the commands (back to 4 MiB per commands buffer). Vertex path sorted too |
+| `2d9bbb8` | Naming: bucket (material type, pipeline state) > bin (draw order by a sort key, today the LOD) > command |
+| `316845e` | 8-byte task commands (`draw_id`, `first_meshlet` with the drawn-early bit, LOD from the bin): -10 MiB VRAM |
+| `1808416` | Task shader emits from every invocation in uniform control flow (lane 0 only was undefined behavior), real barriers |
+| `64ca18b` | Task shader ranks its meshlets by view depth in the payload (front to back): LOD 0 bin 0.78 -> 0.70 ms, LOD 0 PS invocations -14%. `INFINITY` in `math.glsl` |
+| `ac6310d` | `--msaa 1/2/4/8` (default 4); one sample renders straight into the resolved textures |
 
 ## Current state: shadows
 
@@ -108,15 +117,25 @@ All numbers are from the `benchmark` scene (10k characters, ~40k draws, fixed ca
 - **Culling**: per draw in `mesh_cull.comp` (frustum, LOD, mesh-level HZB in the late pass), then per meshlet in
   `mesh.task` (frustum, cone, two-phase HZB with visibility bits). Both passes must select the same LOD. Bits aren't
   reset on scene changes (the late pass corrects them); the 100x100 crowd uses ~12M bits (1.5 MB, capacity 32M).
-- **Dispatch**: one `vkCmdDrawMeshTasksIndirectCountEXT` per bucket (draw count 1 stored in the header), task
-  workgroups read `commands[ gl_WorkGroupID.x ]`. ~2 draw calls per pass instead of ~7k. No Y split: this GPU allows 4M
-  groups in X, the spec only guarantees 65,535.
-- **Command buffers**: `gpu_draw_commands` union, buckets are ranges of one `commands` array. `_draw_mesh_segments` /
-  `_task_segments` hold each bucket's commands offset and worst case capacity, header offsets come from
-  `calc_header_offset<Layout>( bucket )`. Task path clears only the headers; vertex path clears only the counts when
-  draw indirect count is supported.
-- **Timings** (10 traced frames, `0c601d0`): frame ~6.8 ms (9.43 before task records, 7.42 before the 8 LODs). Shadow
-  pass ~1.8, early pass ~4.5, late pass ~0.08 ms. Vertex path last measured at ~7.8 ms before the 8 LODs.
+- **Commands** (since `b11ad66`): buckets (material type: opaque/alpha x single/double sided) are ranges of one
+  `commands` array sized for the scene's worst case (`DrawCommandsSegment`, CPU known). Within a bucket, culling sorts
+  draws into `DRAW_BINS_PER_BUCKET` bins by a sort key (the LOD; keep it a power of two). `mesh_cull.comp` counts each
+  bin (`atomicAdd` of the draw's task workgroups) and records each draw's bin and offset in it (`DrawSlot`, by draw
+  id); `mesh_commands.comp` prefix sums the bin counts from the bucket's start and writes the commands (a counting
+  sort). Layouts in `shaders/draw_commands.glsl`. Commands buffers: 2 MiB of task commands (256k x 8 B) + 512 KiB of
+  slots each, 5 buffers (main + one per cascade).
+- **Dispatch**: mesh path, one `vkCmdDrawMeshTasksIndirectCountEXT` per bin, LOD 0 first (the task shader reads its
+  bin's first command from the bin header, `draw_bin` push constant); vertex path, one multi draw per bucket with its
+  bins in order. No Y split: this GPU allows 4M groups in X, the spec only guarantees 65,535.
+- **Task shader**: every invocation reaches `EmitMeshTasksEXT` (uniform control flow, required by the spec); visible
+  meshlets are ranked by view depth into the payload, so mesh workgroups draw front to back within a task workgroup.
+- **Timings** (Release, 2 x 10 traced frames, `64ca18b`): frame ~4.7-5.4 ms, early pass median ~3.4-3.7 ms, shadow
+  map ~0.64 ms, late pass ~0.1 ms. Early pass per bin: LOD 0 0.70 (0.67-0.84), LOD 1 0.33, LOD 2 0.56, LOD 3 0.67,
+  LOD 4 0.68, LOD 5 0.25, LOD 6 0.08, LOD 7 0.07 ms (0.4-0.8 ms in about a third of frames: end of pass work, DRAM
+  76%). Before the bins (`0c601d0`): frame ~6.8 ms, early pass ~4.5 ms.
+- **Limiters** (Nsight unit metrics, per range): LOD 0-2 bins shading bound (SM 56-74%, pixel warps 53-78%, ~1.9 ms);
+  LOD 3-6 bins primitive engine bound (PES 51-64%, SM 12-26%, ~1.7 ms); shadow cascades ZROP/raster bound (ZROP 49-60%,
+  SM 4-11%, ~0.56 ms, so a depth-only shadow mesh shader wouldn't help); grid and tonemap bandwidth bound.
 - **Counters** (RenderDoc, default view): early pass 8.52M rasterized triangles (12.68M without meshlet culling),
   10.76M fragment invocations for ~1.4M covered pixels (~7x), 3.49M mesh invocations, 328k task invocations. Task lane
   use is 54% in the main pass (17 of 32 meshlets per group) and 23% in cascade 3 (7 of 32), but task invocations are a
@@ -148,7 +167,29 @@ All numbers are from the `benchmark` scene (10k characters, ~40k draws, fixed ca
 2. **Screen-space contact shadows** for strand-scale features (bangs, collar) that no reasonable shadow map catches.
 3. Optional: per-character shadow maps for close-ups, 4096² as an "ultra" setting.
 
-### Next steps (plan agreed 2026-10-27)
+### Next steps (updated 2026-10-29)
+
+Shadows are fast and visually acceptable for now: SDSM is tabled, the early opaque pass is the focus.
+
+1. **Far LODs (LOD 3-6 bins, primitive engine bound, ~1.7 ms)**: fewer triangles through LOD selection with a smaller
+   normal weight in the selection error (0.1-0.25, computed at the same index count; position-only was too loose, see
+   Draw pass and shadow cost), then smaller mesh shader outputs (material per primitive or from the draw, packed
+   normal/tangent, half UVs). Check current mesh/task/fragment register counts alongside.
+2. **Near LODs (LOD 0-2 bins, shading bound, ~1.9 ms)**: order task workgroups within a draw. Needs spatially coherent
+   groups of up to 32 meshlets per LOD (`meshopt_partitionClusters` if our meshoptimizer has it, or a spatial sort) with
+   a bounding sphere each, then `mesh_commands.comp` writes a draw's task commands sorted by group depth (~10-20 per
+   draw). Measure with PS invocations and the bin timings, not RenderDoc's overdraw overlay. Ceiling: the LOD 0 prepass
+   brought the bin to 0.37 ms.
+3. **Visibility buffer**: the direction for this kind of scene (dense geometry, shading getting heavier). Roughly break
+   even today (an ID pass costs ~2.5 ms like the full prepass), pays off with heavier shading. Open points: MSAA edges
+   (per distinct triangle shading) vs temporal AA, analytic derivatives once mips are sampled, material binning. Worth
+   measuring quad overshading (helper lanes) first.
+4. **Startup**: Debug startup ~11.1 s, of which ~6.5 s waiting for pipelines (shader compilation is ~60x slower in
+   Debug, likely the Debug shaderc build); Release ~1.76 s. SPIR-V caching or a Release shader compiler in Debug (user
+   has ideas).
+5. Tabled: SDSM (below), contact shadows.
+
+Previous plan (2026-10-27), kept for SDSM details:
 
 1. ~~FOV fix~~, ~~caster culling against cascade receivers~~ (done).
 2. **SDSM**: first `--shadow-near` / `--shadow-split-lambda` options to measure quality and cost, then a min/max
@@ -306,6 +347,17 @@ Measured against the Unity 6.3 URP reproduction (`../Renderer Compare`, results 
   pixels, so attribute weights also change which LOD is picked, not only how it's simplified.
 - Normal mapped lighting needs a geometric term: a surface whose geometry faces away from the light is in its own
   shadow whatever the normal map says (the leak existed before shadow maps, they made it visible).
+- **In-app GPU timings are only clock-stable in Debug**: the stable power library refuses Release builds, so Release
+  UI timings follow boost clocks (~0.5 ms off for the same work). Compare with GPU Trace, Debug, or Release built with
+  `GPU_STABLE_POWER_ENABLED=1`.
+- NVIDIA inserts a wait-for-idle when a queue switches between compute and graphics work ("subchannel switch",
+  documented for Ampere/Ada, presumably Turing): batch dispatches together and draws together.
+- Depth prepasses don't pay here: geometry is the expensive part (full prepass +1 ms net, LOD 0 only break-even).
+- 4x MSAA costs roughly 1.1 ms of the early pass (in-app Release timings, approximate).
+- RenderDoc's quad overdraw overlay only works at 1 sample and tests each draw against the depth before it: it shows
+  order between draws, never within a draw (see Draw pass and shadow cost, item 4).
+- `EmitMeshTasksEXT` must be executed by every task invocation, once, in uniform control flow (SPV_EXT_mesh_shader);
+  `spirv-val` and the validation layers don't catch it.
 
 ## Reproducing the benchmark in another engine
 
@@ -427,7 +479,12 @@ Verification loop used for every change, from the repository root:
    invocations; `actions.txt` shows the indirect draws with their group counts). Reading buffers from a capture (e.g.
    indirect commands) works from a qrenderdoc Python script using `BufferDescription.gpuAddress` and push constants.
 5. Cost: `python util/gputrace.py --out <dir> --metrics`, compare against a previous trace dir. Use 10 frames (two
-   runs) when a difference is small: the main pass varies +-0.3-0.5 ms frame to frame.
+   runs) when a difference is small: the main pass varies +-0.3-0.5 ms frame to frame. The script traces
+   `build/Debug` unless `--exe` is given: pass the build under test. Compare per-bin timings rather than the whole
+   early pass. Report the memory delta of every change too.
+   Temporary outputs (traces, captures, screenshots, backups) go to the git-ignored `scratch/` folder. When the
+   desktop is in use, screenshots can capture other windows: compare RenderDoc color dumps instead
+   (`renderdoc_capture.py` saves the resolved color target).
 6. Prefer command line options to source edits for comparisons (`brutus-vulkan.exe --help` lists them): they need no
    rebuild and can't be left behind. When a test or benchmark keeps needing the same edit, suggest an option for it.
    Temporary experiments are marked `// TEMP EXPERIMENT, revert`, checked with `grep -rn "TEMP EXPERIMENT" src shaders`.
