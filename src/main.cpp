@@ -324,7 +324,7 @@ void dump_crowd( std::span<const crowd_member> crowd, std::span<const char* cons
 	}
 }
 
-#define BISTRO
+//#define BISTRO
 
 static constexpr std::array CROWD_ASSETS { "assets/player.glb", "assets/sabrina.glb" };
 static constexpr int BENCHMARK_CROWD_SIZE = 100;

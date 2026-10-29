@@ -382,6 +382,7 @@ class Assets::load_job
 		mesh_attribute tangents;
 		mesh_attribute uvs;
 		mesh_attribute indices;
+		size_t gltf_index;
 	};
 
 	// LODs simplified from a LOD 0 index buffer stored elsewhere
@@ -644,11 +645,13 @@ private:
 				{
 					throw renderer::Error( "Unsupported mesh with multiple primitives" );
 				}
-				if ( mesh.primitives[ 0 ].materialIndex )
+				if ( !mesh.primitives[ 0 ].materialIndex )
 				{
-					_materials_usage[ *mesh.primitives[ 0 ].materialIndex ] = 1;
+					throw renderer::Error( "Unsupported mesh without material" );
 				}
+				_materials_usage[ *mesh.primitives[ 0 ].materialIndex ] = 1;
 				auto& m = _parsed_meshes.emplace_back();
+				m.gltf_index = i;
 
 				for ( const auto& attribute : mesh.primitives[ 0 ].attributes )
 				{
@@ -987,7 +990,7 @@ private:
 	void upload_meshes()
 	{
 		PROFILER_SCOPE();
-		_meshes.resize( _parsed_meshes.size() );
+		_meshes.resize( _asset.meshes.size() );
 		for ( size_t i = 0; i < _parsed_meshes.size(); ++i )
 		{
 			upload_mesh( i );
@@ -999,7 +1002,7 @@ private:
 	{
 		PROFILER_SCOPE();
 		const auto& upload_data = _mesh_upload_data[ mesh_index ];
-		auto& mesh = _meshes[ mesh_index ];
+		auto& mesh = _meshes[ _parsed_meshes[ mesh_index ].gltf_index ];
 
 		const auto bounds = meshopt_computeSphereBounds( &upload_data.vertices[ 0 ].position.x,
 														 upload_data.vertices.size(),
@@ -1140,10 +1143,10 @@ private:
 	{
 		PROFILER_SCOPE();
 		std::vector<glm::vec4> bounding_spheres;
-		bounding_spheres.reserve( _meshes.size() );
-		for ( const auto& mesh : _meshes )
+		bounding_spheres.reserve( _parsed_meshes.size() );
+		for ( const auto& parsed_mesh : _parsed_meshes )
 		{
-			bounding_spheres.push_back( mesh.gpu_data.bounding_sphere );
+			bounding_spheres.push_back( _meshes[ parsed_mesh.gltf_index ].gpu_data.bounding_sphere );
 		}
 		const auto bounds = meshopt_computeSphereBounds( &bounding_spheres[ 0 ].x,
 														 bounding_spheres.size(),
@@ -1212,13 +1215,13 @@ private:
 			}
 		}
 
-		for ( size_t i = 0; i < _meshes.size(); ++i )
+		for ( const auto& parsed_mesh : _parsed_meshes )
 		{
-			_meshes[ i ].handle = _bindless_manager.add_buffer_entry( _meshes[ i ].gpu_data );
-			_meshes[ i ].material = _materials[ *_asset.meshes[ i ].primitives[ 0 ].materialIndex ].handle;
+			auto& mesh = _meshes[ parsed_mesh.gltf_index ];
+			mesh.handle = _bindless_manager.add_buffer_entry( mesh.gpu_data );
+			mesh.material = _materials[ *_asset.meshes[ parsed_mesh.gltf_index ].primitives[ 0 ].materialIndex ].handle;
 		}
 
-		// TODO: remove unused meshes and materials?
 		const overloads make_transform(
 			[]( const fastgltf::TRS& TRS )
 			{
@@ -1273,8 +1276,27 @@ private:
 						std::back_inserter( roots ),
 						[]( size_t i ) { return static_cast<uint32_t>( i ); } );
 
-		return loaded_asset { std::move( _meshes ),
-							  std::move( _materials ),
+		// Both arrays match the glTF ones, with gaps for what isn't used: keep only what was loaded, in handle order
+		std::vector<mesh> meshes;
+		meshes.reserve( _parsed_meshes.size() );
+		for ( auto& mesh : _meshes )
+		{
+			if ( mesh.handle )
+			{
+				meshes.push_back( std::move( mesh ) );
+			}
+		}
+		std::vector<material> materials;
+		for ( auto& material : _materials )
+		{
+			if ( material.handle )
+			{
+				materials.push_back( std::move( material ) );
+			}
+		}
+
+		return loaded_asset { std::move( meshes ),
+							  std::move( materials ),
 							  glm::vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ),
 							  std::move( nodes ),
 							  std::move( roots ) };
