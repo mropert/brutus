@@ -85,7 +85,11 @@ reproduce.
   plain quad count (not multiples of 4).
 - RenderDoc per-draw counter values shuffle between replays (culling atomics change draw order), only per-pass totals
   are stable. RenderDoc replays counters for a few minutes on large captures, it isn't stuck.
-- Bistro takes much longer to load (texture decompression): give screenshots 45-60 s.
+- Bistro (`--scene ../niagara_bistro/bistro.gltf`) takes much longer to load (texture decompression): give
+  screenshots 45-60 s, and prefer Release.
+- `image_diff.ps1` rounds its percentages: a few hundred changed pixels print as 0.00%. Check the mean difference or
+  count pixels exactly before calling a change pixel identical.
+- PowerShell variable names ignore case: a script with a `$A` parameter and an `$a` local silently breaks.
 - Back to back app launches occasionally fail with `0xC0000142`: wait a few seconds between runs and retry.
 
 ## GPU and Vulkan findings

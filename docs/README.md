@@ -11,5 +11,6 @@ One file per feature stream, with its state, plan, experiments and findings:
 
 - [shadows.md](shadows.md): cascaded shadow maps, caster culling, filtering.
 - [draw_performance.md](draw_performance.md): the draw pass (culling, LODs, draw commands and bins, overdraw).
+- [scenes.md](scenes.md): loading and describing scenes (the crowd, glTF scenes with their camera and sun, Bistro).
 
 A new stream gets its own file, following the same layout (done so far, current state, plan, experiments, findings).
