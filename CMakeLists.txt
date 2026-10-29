@@ -11,7 +11,8 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(MSVC)
-	add_compile_options(/Zi /MP /W4 /WX)
+	# C5262: implicit switch fall-through, off by default even at /W4
+	add_compile_options(/Zi /MP /W4 /w15262 /WX)
 	add_link_options(/DEBUG)
 
 	add_library(Optick INTERFACE)
@@ -23,7 +24,7 @@ if(MSVC)
 	debug ${OPTICK_DIR}/lib/x64/debug/OptickCore.lib
 	optimized ${OPTICK_DIR}/lib/x64/release/OptickCore.lib)
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-	add_compile_options(-W -Wall -Werror)
+	add_compile_options(-W -Wall -Wimplicit-fallthrough -Werror)
 endif()
 
 add_subdirectory(submodules/vk-renderer)
