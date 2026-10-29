@@ -46,6 +46,7 @@ add_executable(brutus-vulkan)
 target_sources(brutus-vulkan PRIVATE
 		src/asset.cpp
 		src/camera.cpp
+		src/dds_parser.cpp
 		src/main.cpp
 		src/scene_renderer.cpp
 )
