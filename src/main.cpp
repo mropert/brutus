@@ -92,6 +92,7 @@ struct ui_data
 	int shadow_cascades = SceneRenderer::SHADOW_CASCADE_MAX;
 	bool show_shadow_cascades = false;
 	bool paused = false;
+	bool crowd; // The crowd scene, its size can be changed
 	bool vsync;
 	bool stable_power;
 	bool mesh_shading;
@@ -230,9 +231,12 @@ void draw_ui( ui_data& data,
 			ImGui::EndDisabled();
 		}
 		ImGui::Checkbox( "PBR", &data.pbr );
-		ImGui::Text( "Instance count" );
-		ImGui::SliderInt( "x", &data.x_miku, 1, 100 );
-		ImGui::SliderInt( "z", &data.z_miku, 1, 100 );
+		if ( data.crowd )
+		{
+			ImGui::Text( "Instance count" );
+			ImGui::SliderInt( "x", &data.x_miku, 1, 100 );
+			ImGui::SliderInt( "z", &data.z_miku, 1, 100 );
+		}
 		ImGui::SliderInt( "LOD pixel tolerance", &data.lod_pixel_tolerance, 1, 8 );
 	}
 	ImGui::End();
@@ -322,8 +326,6 @@ void dump_crowd( std::span<const crowd_member> crowd, std::span<const char* cons
 	}
 }
 
-//#define BISTRO
-
 static constexpr std::array CROWD_ASSETS { "assets/player.glb", "assets/sabrina.glb" };
 static constexpr int BENCHMARK_CROWD_SIZE = 100;
 
@@ -340,9 +342,8 @@ int main( int argc, char** argv )
 		.scan<'i', int>()
 		.choices( 1, 2, 4, 8 )
 		.help( "MSAA sample count of the main passes, 1 renders without resolves" );
-#ifndef BISTRO
-	command_line.add_argument( "--dump-scene" ).help( "Dump scene meshes and transforms to the specified file" );
-#endif
+	command_line.add_argument( "--scene" ).help( "glTF scene to render instead of the crowd" );
+	command_line.add_argument( "--dump-scene" ).help( "Dump the crowd's meshes and transforms to the specified file" );
 
 	try
 	{
@@ -356,14 +357,18 @@ int main( int argc, char** argv )
 	}
 
 	const bool is_benchmark = command_line[ "--benchmark" ] == true;
+	const auto scene_path = command_line.present( "--scene" );
 
-#ifndef BISTRO
 	if ( const auto scene_file = command_line.present( "--dump-scene" ) )
 	{
+		if ( scene_path )
+		{
+			std::cerr << "--dump-scene only dumps the crowd, it can't be combined with --scene" << std::endl;
+			return EINVAL;
+		}
 		dump_crowd( generate_crowd( CROWD_ASSETS.size(), BENCHMARK_CROWD_SIZE, BENCHMARK_CROWD_SIZE ), CROWD_ASSETS, *scene_file );
 		return 0;
 	}
-#endif
 
 	constexpr bool profile_startup = true;
 
@@ -426,15 +431,18 @@ int main( int argc, char** argv )
 
 	// Bistro needs ~27M
 	Assets assets( device, bindless_manager, 32 * 1024 * 1024 );
-#ifndef BISTRO
-	std::vector<scene> models;
-	for ( const auto path : CROWD_ASSETS )
+	std::vector<scene> crowd_models;
+	if ( scene_path )
 	{
-		models.push_back( assets.load( path ) );
+		draw_scene( assets, assets.load( *scene_path ), scene_renderer );
 	}
-#else
-	const auto scene = assets.load( "../niagara_bistro/bistro.gltf" );
-#endif
+	else
+	{
+		for ( const auto path : CROWD_ASSETS )
+		{
+			crowd_models.push_back( assets.load( path ) );
+		}
+	}
 
 	std::array<renderer::raii::TimestampQuery, renderer::MAX_FRAMES_IN_FLIGHT> timestamp_queries { nullptr, nullptr };
 	std::array<renderer::raii::StatisticsQuery, renderer::MAX_FRAMES_IN_FLIGHT> statistics_queries { nullptr, nullptr };
@@ -445,12 +453,8 @@ int main( int argc, char** argv )
 		statistics_queries = { device.create_statistics_query(), device.create_statistics_query() };
 	};
 
-#ifdef BISTRO
-	draw_scene( assets, scene, scene_renderer );
-#else
 	int x_miku = 0;
 	int z_miku = 0;
-#endif
 
 	pipelines.wait_ready();
 
@@ -480,7 +484,8 @@ int main( int argc, char** argv )
 	bool relative_mouse = false;
 	// XXX: we disable occlusion culling support entirely if minmax sampler aren't supported
 	// TODO: emulate it in shaders with a gather4 instead
-	ui_data ui_state { .vsync = vsync,
+	ui_data ui_state { .crowd = !scene_path,
+					   .vsync = vsync,
 					   .stable_power = stable_power.is_enabled(),
 					   .mesh_shading = props.mesh_shader_support && command_line[ "--use-vertex-shader" ] == false,
 					   .occlusion_culling = props.minmax_filter_support };
@@ -489,13 +494,14 @@ int main( int argc, char** argv )
 	{
 		time_of_day = 4.f;
 		ui_state.paused = true;
-#ifndef BISTRO
-		ui_state.x_miku = BENCHMARK_CROWD_SIZE;
-		ui_state.z_miku = BENCHMARK_CROWD_SIZE;
-		camera.position = { -7.5234f, 2.5384f, 4.8755f };
-		camera.pitch = -0.2960f;
-		camera.yaw = 0.7039f;
-#endif
+		if ( ui_state.crowd )
+		{
+			ui_state.x_miku = BENCHMARK_CROWD_SIZE;
+			ui_state.z_miku = BENCHMARK_CROWD_SIZE;
+			camera.position = { -7.5234f, 2.5384f, 4.8755f };
+			camera.pitch = -0.2960f;
+			camera.yaw = 0.7039f;
+		}
 	}
 
 	while ( !quit )
@@ -566,17 +572,15 @@ int main( int argc, char** argv )
 			stats = device.get_query_results( statistics_queries[ image_index ] );
 		}
 
-#ifndef BISTRO
-		if ( x_miku != ui_state.x_miku || z_miku != ui_state.z_miku )
+		if ( ui_state.crowd && ( x_miku != ui_state.x_miku || z_miku != ui_state.z_miku ) )
 		{
 			PROFILER_SCOPE_N( "Generate GPU scene" );
 			draw_scene( assets,
-						make_crowd_scene( models, generate_crowd( models.size(), ui_state.x_miku, ui_state.z_miku ) ),
+						make_crowd_scene( crowd_models, generate_crowd( crowd_models.size(), ui_state.x_miku, ui_state.z_miku ) ),
 						scene_renderer );
 			x_miku = ui_state.x_miku;
 			z_miku = ui_state.z_miku;
 		}
-#endif
 		pipelines.update();
 
 		ImGui_ImplVulkan_NewFrame();

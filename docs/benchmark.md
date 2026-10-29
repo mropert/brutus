@@ -5,7 +5,7 @@ The `--benchmark` scene, shared by every feature stream, and how to reproduce it
 ## Reproducing the benchmark in another engine
 
 Goal: the same scene in Unity or Godot to compare frame time, triangle counts and visuals. Everything below is what
-`main.cpp` / `scene_renderer.cpp` set up for `brutus-vulkan.exe --benchmark` (non-Bistro build), with what the Unity port
+`main.cpp` / `scene_renderer.cpp` set up for `brutus-vulkan.exe --benchmark` (the crowd, without `--scene`), with what the Unity port
 taught us.
 
 A Unity 6.3 URP reproduction exists in `../Renderer Compare` (local git repository): editor scripts that import the
@@ -28,8 +28,8 @@ default Mesh LOD threshold, 9.6 - 10.8 ms at threshold 2 (near characters unchan
   radians: it's effectively a random angle, not degrees.
 - **Transforms are not portable as an algorithm**: `std::minstd_rand` (default seed) is fully specified, but
   `std::uniform_int_distribution` / `std::uniform_real_distribution` are implementation defined, so another engine
-  can't regenerate the same crowd. Export it instead: `brutus-vulkan.exe --dump-scene <file>` (non-Bistro build, no
-  device created) writes the benchmark crowd as CSV, one line per character: asset path, position, rotation quaternion
+  can't regenerate the same crowd. Export it instead: `brutus-vulkan.exe --dump-scene <file>` (no device
+  created, refused with `--scene`) writes the benchmark crowd as CSV, one line per character: asset path, position, rotation quaternion
   (x, y, z, w), scale, in glTF conventions. It shares `generate_crowd()` with the renderer, so it stays in sync.
 - **Meshes keep their glTF node transforms**: each asset's node hierarchy is flattened at load, then every mesh's
   world transform is combined with the character's translation/rotation/scale (skinned meshes sit at the asset's

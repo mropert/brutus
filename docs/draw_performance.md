@@ -65,7 +65,7 @@ their own notes: [shadows.md](shadows.md).
   chain): 2 px = -1.1 ms frame, mid-distance faces slightly softer; 4 px = -1.7 ms, near faces' mouths distort.
   Distant faces look smeared at 1 px already (collapses slide UVs along the surface without geometric error).
 - **Memory** (UI, benchmark, `316845e`): VRAM ~660 MB, storage buffers 31 MB, index buffer 128 MB (32M indices),
-  textures 510 MB (414 bindless + MSAA color/depth). Bistro (`#define BISTRO`): VRAM ~3.2 GB, textures 2.9 GB, storage
+  textures 510 MB (414 bindless + MSAA color/depth). Bistro (`--scene ../niagara_bistro/bistro.gltf`): VRAM ~3.2 GB, textures 2.9 GB, storage
   181 MB, **30.7M of 32M indices** (overflow throws "Index buffer is full"), ~4.9k visible draws. Bistro still needs
   camera defaults for the benchmark (user to provide a "Copy camera" snippet).
 - **Startup** (2026-10-28, 3 runs each): Release ~1.76 s; Debug ~11.1 s, of which ~6.5 s waiting for pipelines:
