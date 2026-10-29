@@ -241,30 +241,30 @@ void draw_ui( ui_data& data,
 	ImGui::End();
 }
 
-void draw_node( const asset& scene, uint32_t node_index, SceneRenderer& scene_renderer, const glm::mat4& transform )
+void draw_node( const Assets& assets, const scene& scene, uint32_t node_index, SceneRenderer& scene_renderer, const glm::mat4& transform )
 {
 	const auto local_transform = transform * scene.nodes[ node_index ].transform;
-	if ( scene.nodes[ node_index ].mesh != size_t( -1 ) )
+	if ( scene.nodes[ node_index ].mesh )
 	{
-		const auto& mesh = scene.meshes[ scene.nodes[ node_index ].mesh ];
+		const auto& mesh = assets.get_mesh( scene.nodes[ node_index ].mesh );
 		glm::vec3 scale, translation, skew;
 		glm::vec4 perspective;
 		glm::quat rotation;
 		glm::decompose( local_transform, scale, rotation, translation, skew, perspective );
-		scene_renderer.add_mesh( mesh, translation, rotation, scale, scene.materials[ mesh.material_index ] );
+		scene_renderer.add_mesh( mesh, translation, rotation, scale, assets.get_material( mesh.material ) );
 	}
 	for ( const auto child : scene.nodes[ node_index ].children )
 	{
-		draw_node( scene, child, scene_renderer, local_transform );
+		draw_node( assets, scene, child, scene_renderer, local_transform );
 	}
 }
 
-void draw_scene( const asset& scene, SceneRenderer& scene_renderer )
+void draw_scene( const Assets& assets, const scene& scene, SceneRenderer& scene_renderer )
 {
 	scene_renderer.clear_meshes();
-	for ( const auto root : scene.scene_roots )
+	for ( const auto root : scene.roots )
 	{
-		draw_node( scene, root, scene_renderer, glm::mat4( 1.f ) );
+		draw_node( assets, scene, root, scene_renderer, glm::mat4( 1.f ) );
 	}
 }
 
@@ -324,7 +324,7 @@ void dump_crowd( std::span<const crowd_member> crowd, std::span<const char* cons
 	}
 }
 
-//#define BISTRO
+#define BISTRO
 
 static constexpr std::array CROWD_ASSETS { "assets/player.glb", "assets/sabrina.glb" };
 static constexpr int BENCHMARK_CROWD_SIZE = 100;
@@ -427,15 +427,15 @@ int main( int argc, char** argv )
 	SceneRenderer scene_renderer( device, swapchain_format, command_line.get<int>( "--msaa" ), bindless_manager, pipelines );
 
 	// Bistro needs ~27M
-	index_buffer indices( device, 32 * 1024 * 1024 );
-	std::vector<asset> assets;
+	Assets assets( device, bindless_manager, 32 * 1024 * 1024 );
 #ifndef BISTRO
+	std::vector<Assets::model> models;
 	for ( const auto path : CROWD_ASSETS )
 	{
-		assets.push_back( load_asset( device, bindless_manager, indices, path ) );
+		models.emplace_back( assets.load_model( path ) );
 	}
 #else
-	assets.push_back( load_asset( device, bindless_manager, indices, "../niagara_bistro/bistro.gltf" ) );
+	const auto scene = assets.load_scene( "../niagara_bistro/bistro.gltf" );
 	//assets.push_back( load_asset( device, bindless_manager, indices, "assets/player.glb" ) );
 #endif
 
@@ -449,7 +449,7 @@ int main( int argc, char** argv )
 	};
 
 #ifdef BISTRO
-	draw_scene( assets[ 0 ], scene_renderer );
+	draw_scene( assets, scene, scene_renderer );
 #else
 	int x_miku = 0;
 	int z_miku = 0;
@@ -574,13 +574,14 @@ int main( int argc, char** argv )
 		{
 			PROFILER_SCOPE_N( "Generate GPU scene" );
 			scene_renderer.clear_meshes();
-			for ( const auto& member : generate_crowd( assets.size(), ui_state.x_miku, ui_state.z_miku ) )
+			for ( const auto& member : generate_crowd( models.size(), ui_state.x_miku, ui_state.z_miku ) )
 			{
-				const auto& asset = assets[ member.asset_index ];
+				const auto& asset = models[ member.asset_index ];
 				const auto scale = glm::vec3( member.scale );
-				for ( const auto& mesh : asset.meshes )
+				for ( const auto& handle : asset.meshes )
 				{
-					scene_renderer.add_mesh( mesh, member.position, member.rotation, scale, asset.materials[ mesh.material_index ] );
+					const auto& mesh = assets.get_mesh( handle );
+					scene_renderer.add_mesh( mesh, member.position, member.rotation, scale, assets.get_material( mesh.material ) );
 				}
 			}
 			x_miku = ui_state.x_miku;
@@ -616,7 +617,7 @@ int main( int argc, char** argv )
 							   *command_buffer,
 							   swapchain_image,
 							   swapchain_image_view,
-							   mesh_shading ? nullptr : &indices.buffer,
+							   mesh_shading ? nullptr : &assets.get_indices().buffer,
 							   timestamp_queries[ image_index ],
 							   camera,
 							   main_light,

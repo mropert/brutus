@@ -7,6 +7,7 @@
 #include <renderer/bindless.h>
 #include <renderer/buffer.h>
 #include <renderer/device.h>
+#include <span>
 #include <vector>
 
 static constexpr size_t MESH_LOD_COUNT = 8;
@@ -87,7 +88,7 @@ struct mesh
 {
 	renderer::raii::Buffer data_buffer; // vertex + meshlets
 	mesh_handle handle;
-	size_t material_index;
+	material_handle material;
 	uint32_t meshlets_count; // All main LODs, excluding the shadow LODs
 	uint32_t max_task_groups; // Task workgroups needed by its largest LOD, main or shadow
 	// Data below is only for debugging purposes, a CPU side copy of the GPU-side descriptor
@@ -106,16 +107,43 @@ struct scene_node
 {
 	std::vector<uint32_t> children; // Use small vector once we get one
 	glm::mat4 transform;
-	size_t mesh = static_cast<size_t>( -1 );
+	mesh_handle mesh;
 };
 
-struct asset
+struct scene
 {
-	std::vector<mesh> meshes;
-	std::vector<material> materials;
-	glm::vec4 bounding_sphere;
 	std::vector<scene_node> nodes;
-	std::vector<uint32_t> scene_roots;
+	std::vector<uint32_t> roots;
 };
 
-asset load_asset( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& index_buffer, std::filesystem::path path );
+class Assets
+{
+public:
+	struct model
+	{
+		std::vector<mesh_handle> meshes;
+	};
+
+	Assets( renderer::Device& device, BindlessManager& bindless_manager, size_t max_indices );
+
+	model load_model( const std::filesystem::path& path );
+	scene load_scene( const std::filesystem::path& path );
+
+	const material& get_material( material_handle h ) const { return _materials[ h.index ]; }
+	const mesh& get_mesh( mesh_handle h ) const { return _meshes[ h.index ]; }
+	std::span<const material> get_materials() const { return _materials; }
+	std::span<const mesh> get_meshes() const { return _meshes; }
+
+	const index_buffer& get_indices() const { return _indices; }
+
+private:
+	struct loaded_asset;
+	class load_job;
+	void add_content( loaded_asset& asset );
+
+	renderer::Device& _device;
+	BindlessManager& _bindless_manager;
+	std::vector<material> _materials;
+	std::vector<mesh> _meshes;
+	index_buffer _indices;
+};

@@ -355,7 +355,16 @@ private:
 	state _state = state::UPLOADING;
 };
 
-class asset_load_job
+struct Assets::loaded_asset
+{
+	std::vector<mesh> meshes;
+	std::vector<material> materials;
+	glm::vec4 bounding_sphere;
+	std::vector<scene_node> nodes;
+	std::vector<uint32_t> scene_roots;
+};
+
+class Assets::load_job
 {
 	struct mesh_attribute
 	{
@@ -413,7 +422,7 @@ class asset_load_job
 	};
 
 public:
-	asset_load_job( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& index_buffer, std::filesystem::path path )
+	load_job( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& index_buffer, std::filesystem::path path )
 		: _device( device )
 		, _bindless_manager( bindless_manager )
 		, _index_buffer( index_buffer )
@@ -423,7 +432,7 @@ public:
 	{
 	}
 
-	asset run()
+	loaded_asset run()
 	{
 		PROFILER_SCOPE();
 		parse();
@@ -1039,9 +1048,6 @@ private:
 		mesh.gpu_data.meshlet_triangles = mesh.data_buffer.get_device_address() + offset;
 		_mesh_upload.queue( upload_data.meshlet_triangles, mesh.data_buffer, offset );
 		offset += upload_data.meshlet_triangles.size() * sizeof( uint8_t );
-
-		mesh.handle = _bindless_manager.add_buffer_entry( mesh.gpu_data );
-		mesh.material_index = *_asset.meshes[ mesh_index ].primitives[ 0 ].materialIndex;
 	}
 
 	// Upload the chain indices (LOD 0 first) to the index buffer and fill the matching LOD descriptors
@@ -1130,7 +1136,7 @@ private:
 		_texture_upload.submit();
 	}
 
-	asset finalize()
+	loaded_asset finalize()
 	{
 		PROFILER_SCOPE();
 		std::vector<glm::vec4> bounding_spheres;
@@ -1206,7 +1212,13 @@ private:
 			}
 		}
 
-		// TODO: remove unused meshes and materials
+		for ( size_t i = 0; i < _meshes.size(); ++i )
+		{
+			_meshes[ i ].handle = _bindless_manager.add_buffer_entry( _meshes[ i ].gpu_data );
+			_meshes[ i ].material = _materials[ *_asset.meshes[ i ].primitives[ 0 ].materialIndex ].handle;
+		}
+
+		// TODO: remove unused meshes and materials?
 		const overloads make_transform(
 			[]( const fastgltf::TRS& TRS )
 			{
@@ -1247,9 +1259,11 @@ private:
 							end( node.children ),
 							std::back_inserter( children ),
 							[]( size_t i ) { return static_cast<uint32_t>( i ); } );
-			nodes.push_back( scene_node { .children = std::move( children ),
-										  .transform = std::visit( make_transform, node.transform ),
-										  .mesh = node.meshIndex.value_or( -1 ) } );
+			nodes.push_back( scene_node { .children = std::move( children ), .transform = std::visit( make_transform, node.transform ) } );
+			if ( node.meshIndex.has_value() )
+			{
+				nodes.back().mesh = _meshes[ *node.meshIndex ].handle;
+			}
 		}
 
 		std::vector<uint32_t> roots;
@@ -1259,11 +1273,11 @@ private:
 						std::back_inserter( roots ),
 						[]( size_t i ) { return static_cast<uint32_t>( i ); } );
 
-		return asset { std::move( _meshes ),
-					   std::move( _materials ),
-					   glm::vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ),
-					   std::move( nodes ),
-					   std::move( roots ) };
+		return loaded_asset { std::move( _meshes ),
+							  std::move( _materials ),
+							  glm::vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ),
+							  std::move( nodes ),
+							  std::move( roots ) };
 	}
 
 	std::size_t get_texture_count() const { return _textures.size(); }
@@ -1289,9 +1303,52 @@ private:
 	std::vector<mesh> _meshes;
 };
 
-asset load_asset( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& index_buffer, std::filesystem::path path )
+Assets::Assets( renderer::Device& device, BindlessManager& bindless_manager, size_t max_indices )
+	: _device( device )
+	, _bindless_manager( bindless_manager )
+	, _indices( device, max_indices )
+{
+}
+
+Assets::model Assets::load_model( const std::filesystem::path& path )
 {
 	PROFILER_SCOPE();
-	asset_load_job job( device, bindless_manager, index_buffer, std::move( path ) );
-	return job.run();
+	load_job job( _device, _bindless_manager, _indices, std::move( path ) );
+	auto asset = job.run();
+	model m;
+	m.meshes.reserve( asset.meshes.size() );
+	// add_content() steals meshes, copy the handles _before_ calling it
+	for ( const auto& mesh : asset.meshes )
+	{
+		m.meshes.emplace_back( mesh.handle );
+	}
+	add_content( asset );
+	return m;
+}
+
+
+scene Assets::load_scene( const std::filesystem::path& path )
+{
+	PROFILER_SCOPE();
+	load_job job( _device, _bindless_manager, _indices, std::move( path ) );
+	auto asset = job.run();
+	add_content( asset );
+	return { .nodes = std::move( asset.nodes ), .roots = std::move( asset.scene_roots ) };
+}
+
+void Assets::add_content( loaded_asset& asset )
+{
+	for ( auto& material : asset.materials )
+	{
+		// This assert should hold unless materials are loaded through another path
+		// If that becomes the case we should revisit our architecture
+		assert( material.handle.index == _materials.size() );
+		_materials.emplace_back( std::move( material ) );
+	}
+	for ( auto& mesh : asset.meshes )
+	{
+		// Same as for materials
+		assert( mesh.handle.index == _meshes.size() );
+		_meshes.emplace_back( std::move( mesh ) );
+	}
 }
