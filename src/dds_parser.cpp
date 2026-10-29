@@ -1,6 +1,8 @@
 #include "dds_parser.h"
 
+#include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <memory>
 #include <string_view>
@@ -40,13 +42,6 @@ namespace dds::details
 		}
 	};
 
-	enum class caps
-	{
-		// Technically we should check TEXTURE and COMPLEX
-		// But Microsoft themselves advise against relying on those being set...
-		MIPMAP = 0x400000
-	};
-
 	struct header
 	{
 		uint32_t size;
@@ -58,16 +53,11 @@ namespace dds::details
 		uint32_t mipMapCount;
 		uint32_t reserved1[ 11 ];
 		pixel_format spf;
-		caps caps;
+		uint32_t caps;
 		uint32_t caps2;
 		uint32_t caps3;
 		uint32_t caps4;
 		uint32_t reserved2;
-
-		constexpr bool has_caps( details::caps wanted ) const
-		{
-			return ( std::to_underlying( caps ) & std::to_underlying( wanted ) ) == std::to_underlying( wanted );
-		}
 	};
 
 	enum class format : uint32_t
@@ -196,7 +186,7 @@ namespace dds::details
 		A4B4G4R4_UNORM = 191,
 	};
 
-	enum class dimension
+	enum class dimension : uint32_t
 	{
 		UNKNOWN = 0,
 		BUFFER = 1,
@@ -207,11 +197,21 @@ namespace dds::details
 
 	struct header_dxt10
 	{
+		enum class misc_flags_t : uint32_t
+		{
+			TEXTURECUBE = 0x4
+		};
+
 		format dxgiFormat;
 		dimension resourceDimension;
-		uint32_t miscFlag;
+		misc_flags_t miscFlag;
 		uint32_t arraySize;
 		uint32_t miscFlags2;
+
+		constexpr bool has_misc_flags( misc_flags_t wanted ) const
+		{
+			return ( std::to_underlying( miscFlag ) & std::to_underlying( wanted ) ) == std::to_underlying( wanted );
+		}
 	};
 
 	static constexpr uint32_t magic = 0x20534444;
@@ -226,20 +226,21 @@ namespace dds::details
 	static_assert( alignof( header ) == sizeof( uint32_t ) );
 	static_assert( alignof( header_dxt10 ) == sizeof( uint32_t ) );
 	static_assert( alignof( file_dxt10 ) == sizeof( uint32_t ) );
+	static_assert( sizeof( pixel_format ) == 32 );
 	static_assert( sizeof( header ) == 124 );
 	static_assert( sizeof( header_dxt10 ) == 20 );
 }
 
-static inline const auto cast_file( std::span<const std::byte> bytes )
+static auto cast_file( std::span<const std::byte> bytes )
 {
 #ifdef __cpp_lib_start_lifetime_as
-	return std::start_lifetime_as<const dds::details::file_dxt10>( bytes.data() );
+	return std::start_lifetime_as<dds::details::file_dxt10>( bytes.data() );
 #else
 	return reinterpret_cast<const dds::details::file_dxt10*>( bytes.data() );
 #endif
 }
 
-static inline constexpr renderer::Texture::Format to_renderer_format( dds::details::format format )
+static constexpr renderer::Texture::Format to_renderer_format( dds::details::format format )
 {
 	switch ( format )
 	{
@@ -264,10 +265,13 @@ DDSFile::DDSFile( std::span<const std::byte> bytes )
 	if ( file->magic != dds::details::magic )
 		throw renderer::Error( "Buffer is not a DDS file (bad magic)" );
 
+	if ( file->header.size != sizeof( dds::details::header ) || file->header.spf.size != sizeof( dds::details::pixel_format ) )
+		throw renderer::Error( "Corrupted DDS header (bad header sizes)" );
+
 	using namespace std::literals;
 	if ( !file->header.spf.has_flags( dds::details::pixel_format::flags_t::FOURCC )
 		 || std::string_view( file->header.spf.fourCC ) != "DX10"sv )
-		throw renderer::Error( "Buffer is not a DXT10 DDS file (legacy is unsupported legacy format)" );
+		throw renderer::Error( "Buffer is not a DXT10 DDS file (legacy DDS is unsupported)" );
 
 	_desc.format = to_renderer_format( file->header_dxt10.dxgiFormat );
 	if ( _desc.format == renderer::Texture::Format::UNDEFINED )
@@ -279,13 +283,19 @@ DDSFile::DDSFile( std::span<const std::byte> bytes )
 	if ( file->header_dxt10.arraySize != 1 )
 		throw renderer::Error( "Unsupported texture array" );
 
+	if ( file->header_dxt10.has_misc_flags( dds::details::header_dxt10::misc_flags_t::TEXTURECUBE ) )
+		throw renderer::Error( "Unsupported cubemap texture" );
+
 	_desc.extent.width = file->header.width;
 	_desc.extent.height = file->header.height;
+	if ( _desc.extent.width == 0 || _desc.extent.height == 0 )
+		throw renderer::Error( "Invalid texture extent (zero width or height)" );
 
-	if ( file->header.has_caps( dds::details::caps::MIPMAP ) )
-	{
-		_desc.mips = static_cast<int>( file->header.mipMapCount );
-	}
+	// Same as Microsoft's own loader: ignore the MIPMAP caps bit, which writers don't always set, and treat 0 as 1
+	const uint32_t mips = std::max( file->header.mipMapCount, 1u );
+	if ( mips > static_cast<uint32_t>( std::bit_width( std::max( _desc.extent.width, _desc.extent.height ) ) ) )
+		throw renderer::Error( "Invalid mip count (more mips than the full chain)" );
+	_desc.mips = static_cast<int>( mips );
 
 	const auto size = _desc.get_size();
 	if ( sizeof( dds::details::file_dxt10 ) + size > _bytes.size_bytes() )

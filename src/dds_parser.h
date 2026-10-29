@@ -2,7 +2,6 @@
 
 #include <renderer/texture.h>
 #include <span>
-#include <stdexcept>
 
 class DDSFile
 {
