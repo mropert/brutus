@@ -6,6 +6,7 @@
 #include <fastgltf/core.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtx/quaternion.hpp>
 #include <istream>
 #include <meshoptimizer.h>
@@ -360,9 +361,45 @@ struct Assets::loaded_asset
 	std::vector<mesh> meshes;
 	std::vector<material> materials;
 	glm::vec4 bounding_sphere;
-	std::vector<scene_node> nodes;
-	std::vector<uint32_t> scene_roots;
+	std::vector<scene_instance> instances;
 };
+
+namespace
+{
+	glm::mat4 calc_node_transform( const fastgltf::Node& node )
+	{
+		const overloads make_transform(
+			[]( const fastgltf::TRS& TRS )
+			{
+				const auto scale = glm::scale( glm::mat4( 1.f ), { TRS.scale.x(), TRS.scale.y(), TRS.scale.z() } );
+				// glm quaternion constructor takes w first because why not?
+				const auto rotation = glm::toMat4( glm::quat( TRS.rotation.w(), TRS.rotation.x(), TRS.rotation.y(), TRS.rotation.z() ) );
+				const auto translation = glm::translate( glm::mat4( 1.f ),
+														 { TRS.translation.x(), TRS.translation.y(), TRS.translation.z() } );
+				return translation * rotation * scale;
+			},
+			[]( const fastgltf::math::fmat4x4& matrix )
+			{
+				return glm::mat4( matrix[ 0 ][ 0 ],
+								  matrix[ 0 ][ 1 ],
+								  matrix[ 0 ][ 2 ],
+								  matrix[ 0 ][ 3 ],
+								  matrix[ 1 ][ 0 ],
+								  matrix[ 1 ][ 1 ],
+								  matrix[ 1 ][ 2 ],
+								  matrix[ 1 ][ 3 ],
+								  matrix[ 2 ][ 0 ],
+								  matrix[ 2 ][ 1 ],
+								  matrix[ 2 ][ 2 ],
+								  matrix[ 2 ][ 3 ],
+								  matrix[ 3 ][ 0 ],
+								  matrix[ 3 ][ 1 ],
+								  matrix[ 3 ][ 2 ],
+								  matrix[ 3 ][ 3 ] );
+			} );
+		return std::visit( make_transform, node.transform );
+	}
+}
 
 class Assets::load_job
 {
@@ -459,6 +496,29 @@ private:
 		for ( const auto node : _asset.nodes[ node_index ].children )
 		{
 			add_meshes( node );
+		}
+	}
+
+	size_t get_scene_index() const { return _asset.defaultScene.value_or( 0 ); }
+
+	void add_instances( std::vector<scene_instance>& instances, size_t node_index, const glm::mat4& parent_transform ) const
+	{
+		const auto& node = _asset.nodes[ node_index ];
+		const auto transform = parent_transform * calc_node_transform( node );
+		if ( node.meshIndex )
+		{
+			// glTF ignores a skinned mesh node's transform: its joints place it, in the bind pose at the scene root
+			const auto mesh_transform = node.skinIndex ? glm::mat4( 1.f ) : transform;
+			glm::vec3 scale, translation, skew;
+			glm::vec4 perspective;
+			glm::quat rotation;
+			glm::decompose( mesh_transform, scale, rotation, translation, skew, perspective );
+			instances.push_back(
+				{ .translation = translation, .rotation = rotation, .scale = scale, .mesh = _meshes[ *node.meshIndex ].handle } );
+		}
+		for ( const auto child : node.children )
+		{
+			add_instances( instances, child, transform );
 		}
 	}
 
@@ -626,12 +686,9 @@ private:
 		}
 
 		_meshes_usage.resize( _asset.meshes.size() );
-		for ( const auto& scene : _asset.scenes )
+		for ( const auto node : _asset.scenes[ get_scene_index() ].nodeIndices )
 		{
-			for ( const auto& node : scene.nodeIndices )
-			{
-				add_meshes( node );
-			}
+			add_meshes( node );
 		}
 
 		_materials_usage.resize( _asset.materials.size(), 0 );
@@ -1222,59 +1279,11 @@ private:
 			mesh.material = _materials[ *_asset.meshes[ parsed_mesh.gltf_index ].primitives[ 0 ].materialIndex ].handle;
 		}
 
-		const overloads make_transform(
-			[]( const fastgltf::TRS& TRS )
-			{
-				const auto scale = glm::scale( glm::mat4( 1.f ), { TRS.scale.x(), TRS.scale.y(), TRS.scale.z() } );
-				// glm quaternion constructor takes w first because why not?
-				const auto rotation = glm::toMat4( glm::quat( TRS.rotation.w(), TRS.rotation.x(), TRS.rotation.y(), TRS.rotation.z() ) );
-				const auto translation = glm::translate( glm::mat4( 1.f ),
-														 { TRS.translation.x(), TRS.translation.y(), TRS.translation.z() } );
-				return translation * rotation * scale;
-			},
-			[]( const fastgltf::math::fmat4x4& matrix )
-			{
-				return glm::mat4( matrix[ 0 ][ 0 ],
-								  matrix[ 0 ][ 1 ],
-								  matrix[ 0 ][ 2 ],
-								  matrix[ 0 ][ 3 ],
-								  matrix[ 1 ][ 0 ],
-								  matrix[ 1 ][ 1 ],
-								  matrix[ 1 ][ 2 ],
-								  matrix[ 1 ][ 3 ],
-								  matrix[ 2 ][ 0 ],
-								  matrix[ 2 ][ 1 ],
-								  matrix[ 2 ][ 2 ],
-								  matrix[ 2 ][ 3 ],
-								  matrix[ 3 ][ 0 ],
-								  matrix[ 3 ][ 1 ],
-								  matrix[ 3 ][ 2 ],
-								  matrix[ 3 ][ 3 ] );
-			} );
-
-		std::vector<scene_node> nodes;
-		nodes.reserve( _asset.nodes.size() );
-		for ( const auto& node : _asset.nodes )
+		std::vector<scene_instance> instances;
+		for ( const auto root : _asset.scenes[ get_scene_index() ].nodeIndices )
 		{
-			std::vector<uint32_t> children;
-			children.reserve( node.children.size() );
-			std::transform( begin( node.children ),
-							end( node.children ),
-							std::back_inserter( children ),
-							[]( size_t i ) { return static_cast<uint32_t>( i ); } );
-			nodes.push_back( scene_node { .children = std::move( children ), .transform = std::visit( make_transform, node.transform ) } );
-			if ( node.meshIndex.has_value() )
-			{
-				nodes.back().mesh = _meshes[ *node.meshIndex ].handle;
-			}
+			add_instances( instances, root, glm::mat4( 1.f ) );
 		}
-
-		std::vector<uint32_t> roots;
-		roots.reserve( _asset.scenes[ 0 ].nodeIndices.size() );
-		std::transform( begin( _asset.scenes[ 0 ].nodeIndices ),
-						end( _asset.scenes[ 0 ].nodeIndices ),
-						std::back_inserter( roots ),
-						[]( size_t i ) { return static_cast<uint32_t>( i ); } );
 
 		// Both arrays match the glTF ones, with gaps for what isn't used: keep only what was loaded, in handle order
 		std::vector<mesh> meshes;
@@ -1298,8 +1307,7 @@ private:
 		return loaded_asset { std::move( meshes ),
 							  std::move( materials ),
 							  glm::vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ),
-							  std::move( nodes ),
-							  std::move( roots ) };
+							  std::move( instances ) };
 	}
 
 	std::size_t get_texture_count() const { return _textures.size(); }
@@ -1332,30 +1340,13 @@ Assets::Assets( renderer::Device& device, BindlessManager& bindless_manager, siz
 {
 }
 
-Assets::model Assets::load_model( const std::filesystem::path& path )
+scene Assets::load( const std::filesystem::path& path )
 {
 	PROFILER_SCOPE();
-	load_job job( _device, _bindless_manager, _indices, std::move( path ) );
-	auto asset = job.run();
-	model m;
-	m.meshes.reserve( asset.meshes.size() );
-	// add_content() steals meshes, copy the handles _before_ calling it
-	for ( const auto& mesh : asset.meshes )
-	{
-		m.meshes.emplace_back( mesh.handle );
-	}
-	add_content( asset );
-	return m;
-}
-
-
-scene Assets::load_scene( const std::filesystem::path& path )
-{
-	PROFILER_SCOPE();
-	load_job job( _device, _bindless_manager, _indices, std::move( path ) );
+	load_job job( _device, _bindless_manager, _indices, path );
 	auto asset = job.run();
 	add_content( asset );
-	return { .nodes = std::move( asset.nodes ), .roots = std::move( asset.scene_roots ) };
+	return { .instances = std::move( asset.instances ) };
 }
 
 void Assets::add_content( loaded_asset& asset )

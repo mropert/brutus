@@ -3,6 +3,7 @@
 #include <array>
 #include <filesystem>
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_aligned.hpp>
 #include <renderer/bindless.h>
 #include <renderer/buffer.h>
@@ -103,31 +104,26 @@ struct material
 	gpu_material gpu_data;
 };
 
-struct scene_node
+struct scene_instance
 {
-	std::vector<uint32_t> children; // Use small vector once we get one
-	glm::mat4 transform;
+	glm::vec3 translation;
+	glm::quat rotation;
+	glm::vec3 scale;
 	mesh_handle mesh;
 };
 
+// A file's mesh nodes with their world transforms, the node hierarchy is flattened at load
 struct scene
 {
-	std::vector<scene_node> nodes;
-	std::vector<uint32_t> roots;
+	std::vector<scene_instance> instances;
 };
 
 class Assets
 {
 public:
-	struct model
-	{
-		std::vector<mesh_handle> meshes;
-	};
-
 	Assets( renderer::Device& device, BindlessManager& bindless_manager, size_t max_indices );
 
-	model load_model( const std::filesystem::path& path );
-	scene load_scene( const std::filesystem::path& path );
+	scene load( const std::filesystem::path& path );
 
 	const material& get_material( material_handle h ) const { return _materials[ h.index ]; }
 	const mesh& get_mesh( mesh_handle h ) const { return _meshes[ h.index ]; }

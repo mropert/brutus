@@ -1,5 +1,3 @@
-#define GLM_ENABLE_EXPERIMENTAL // for matrix decompose
-
 #include <SDL3/SDL.h>
 #include <argparse/argparse.hpp>
 #include <array>
@@ -9,7 +7,6 @@
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/type_aligned.hpp>
-#include <glm/gtx/matrix_decompose.hpp>
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_vulkan.h>
@@ -241,30 +238,13 @@ void draw_ui( ui_data& data,
 	ImGui::End();
 }
 
-void draw_node( const Assets& assets, const scene& scene, uint32_t node_index, SceneRenderer& scene_renderer, const glm::mat4& transform )
-{
-	const auto local_transform = transform * scene.nodes[ node_index ].transform;
-	if ( scene.nodes[ node_index ].mesh )
-	{
-		const auto& mesh = assets.get_mesh( scene.nodes[ node_index ].mesh );
-		glm::vec3 scale, translation, skew;
-		glm::vec4 perspective;
-		glm::quat rotation;
-		glm::decompose( local_transform, scale, rotation, translation, skew, perspective );
-		scene_renderer.add_mesh( mesh, translation, rotation, scale, assets.get_material( mesh.material ) );
-	}
-	for ( const auto child : scene.nodes[ node_index ].children )
-	{
-		draw_node( assets, scene, child, scene_renderer, local_transform );
-	}
-}
-
 void draw_scene( const Assets& assets, const scene& scene, SceneRenderer& scene_renderer )
 {
 	scene_renderer.clear_meshes();
-	for ( const auto root : scene.roots )
+	for ( const auto& instance : scene.instances )
 	{
-		draw_node( assets, scene, root, scene_renderer, glm::mat4( 1.f ) );
+		const auto& mesh = assets.get_mesh( instance.mesh );
+		scene_renderer.add_mesh( mesh, instance.translation, instance.rotation, instance.scale, assets.get_material( mesh.material ) );
 	}
 }
 
@@ -299,6 +279,24 @@ std::vector<crowd_member> generate_crowd( size_t asset_count, int x_count, int z
 		}
 	}
 	return crowd;
+}
+
+// Places the models' instances at each member's transform
+scene make_crowd_scene( std::span<const scene> models, std::span<const crowd_member> crowd )
+{
+	scene crowd_scene;
+	for ( const auto& member : crowd )
+	{
+		for ( const auto& instance : models[ member.asset_index ].instances )
+		{
+			// Exact composition of the two transforms: the member's scale is uniform
+			crowd_scene.instances.push_back( { .translation = member.position + member.rotation * ( member.scale * instance.translation ),
+											   .rotation = member.rotation * instance.rotation,
+											   .scale = member.scale * instance.scale,
+											   .mesh = instance.mesh } );
+		}
+	}
+	return crowd_scene;
 }
 
 // One CSV line per character, for reproducing the scene in another engine (glTF conventions: right-handed, Y up)
@@ -429,14 +427,13 @@ int main( int argc, char** argv )
 	// Bistro needs ~27M
 	Assets assets( device, bindless_manager, 32 * 1024 * 1024 );
 #ifndef BISTRO
-	std::vector<Assets::model> models;
+	std::vector<scene> models;
 	for ( const auto path : CROWD_ASSETS )
 	{
-		models.emplace_back( assets.load_model( path ) );
+		models.push_back( assets.load( path ) );
 	}
 #else
-	const auto scene = assets.load_scene( "../niagara_bistro/bistro.gltf" );
-	//assets.push_back( load_asset( device, bindless_manager, indices, "assets/player.glb" ) );
+	const auto scene = assets.load( "../niagara_bistro/bistro.gltf" );
 #endif
 
 	std::array<renderer::raii::TimestampQuery, renderer::MAX_FRAMES_IN_FLIGHT> timestamp_queries { nullptr, nullptr };
@@ -573,17 +570,9 @@ int main( int argc, char** argv )
 		if ( x_miku != ui_state.x_miku || z_miku != ui_state.z_miku )
 		{
 			PROFILER_SCOPE_N( "Generate GPU scene" );
-			scene_renderer.clear_meshes();
-			for ( const auto& member : generate_crowd( models.size(), ui_state.x_miku, ui_state.z_miku ) )
-			{
-				const auto& asset = models[ member.asset_index ];
-				const auto scale = glm::vec3( member.scale );
-				for ( const auto& handle : asset.meshes )
-				{
-					const auto& mesh = assets.get_mesh( handle );
-					scene_renderer.add_mesh( mesh, member.position, member.rotation, scale, assets.get_material( mesh.material ) );
-				}
-			}
+			draw_scene( assets,
+						make_crowd_scene( models, generate_crowd( models.size(), ui_state.x_miku, ui_state.z_miku ) ),
+						scene_renderer );
 			x_miku = ui_state.x_miku;
 			z_miku = ui_state.z_miku;
 		}

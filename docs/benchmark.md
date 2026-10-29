@@ -31,11 +31,12 @@ default Mesh LOD threshold, 9.6 - 10.8 ms at threshold 2 (near characters unchan
   can't regenerate the same crowd. Export it instead: `brutus-vulkan.exe --dump-scene <file>` (non-Bistro build, no
   device created) writes the benchmark crowd as CSV, one line per character: asset path, position, rotation quaternion
   (x, y, z, w), scale, in glTF conventions. It shares `generate_crowd()` with the renderer, so it stays in sync.
-- **Meshes are placed directly with the character transform**: every mesh (glTF primitive) of the asset gets the
-  character's translation/rotation/scale; glTF node transforms are ignored in this mode (only the Bistro path walks
-  the node hierarchy). If an asset's nodes aren't identity, the other engine's import must flatten them the same way.
-  For both assets the node transforms cancel out (Sketchfab's Z-up rotations): every mesh's world matrix is identity,
-  so taking each mesh at identity matches.
+- **Meshes keep their glTF node transforms**: each asset's node hierarchy is flattened at load, then every mesh's
+  world transform is combined with the character's translation/rotation/scale (skinned meshes sit at the asset's
+  root, as glTF specifies). For both assets the node transforms cancel out (Sketchfab's Z-up rotations): Miku's
+  meshes are skinned, Sabrina's world transforms are identity within 1.6e-7, so an engine that imports the hierarchy
+  or takes each mesh at identity matches. Until `b3880f4` the transforms were ignored; taking them into account
+  changed 673 isolated pixels of the benchmark frame.
 - **Ground**: an infinite unlit grid on y = 0 (`grid.frag`) that receives shadows. A large plane is close enough; its
   cost is negligible, but it's needed to check that shadow bias doesn't detach shadows at the feet.
 - **Time is paused**: no animation, the characters are static in their bind pose.
