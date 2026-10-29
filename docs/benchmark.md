@@ -50,7 +50,7 @@ default Mesh LOD threshold, 9.6 - 10.8 ms at threshold 2 (near characters unchan
 - **Pose**: position `( -7.5234, 2.5384, 4.8755 )`, pitch -0.2960, yaw 0.7039 (radians). Rotation is yaw about -Y
   then pitch about X, so forward = `( sin yaw cos pitch, sin pitch, -cos yaw cos pitch )` = `( 0.6190, -0.2917,
   -0.7292 )`: look at `( -6.9044, 2.2467, 4.1463 )`, up = +Y, no roll.
-- **Projection**: vertical FOV **50.70°** (`SceneRenderer::FOV`: it used to be 70 passed to `tan()` as radians, `a1cfe26` kept the angle), 1920 x 1080 (aspect 16:9, 80.2° horizontal), near
+- **Projection**: vertical FOV **50.70°** (`Camera::DEFAULT_FOV`: it used to be 70 passed to `tan()` as radians, `a1cfe26` kept the angle), 1920 x 1080 (aspect 16:9, 80.2° horizontal), near
   0.01 m, infinite far (reverse Z). Other views from these notes use the same convention (UI "Copy camera"). Unity has
   no infinite far plane: 1000 m loses nothing in this view.
 

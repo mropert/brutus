@@ -1,10 +1,13 @@
 #pragma once
 
+#include "camera.h"
+
 #include <array>
 #include <filesystem>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_aligned.hpp>
+#include <optional>
 #include <renderer/bindless.h>
 #include <renderer/buffer.h>
 #include <renderer/device.h>
@@ -116,6 +119,9 @@ struct scene_instance
 struct scene
 {
 	std::vector<scene_instance> instances;
+	// The first perspective camera and directional light found, without roll for the camera
+	std::optional<Camera> camera;
+	std::optional<glm::vec3> sun_direction; // The direction the light travels
 };
 
 class Assets

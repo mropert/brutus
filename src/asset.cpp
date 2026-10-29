@@ -361,7 +361,7 @@ struct Assets::loaded_asset
 	std::vector<mesh> meshes;
 	std::vector<material> materials;
 	glm::vec4 bounding_sphere;
-	std::vector<scene_instance> instances;
+	scene contents;
 };
 
 namespace
@@ -501,10 +501,27 @@ private:
 
 	size_t get_scene_index() const { return _asset.defaultScene.value_or( 0 ); }
 
-	void add_instances( std::vector<scene_instance>& instances, size_t node_index, const glm::mat4& parent_transform ) const
+	void add_node( scene& contents, size_t node_index, const glm::mat4& parent_transform ) const
 	{
 		const auto& node = _asset.nodes[ node_index ];
 		const auto transform = parent_transform * calc_node_transform( node );
+		// Cameras and lights look down their node's -Z
+		const auto forward = glm::normalize( glm::vec3( transform * glm::vec4( 0.f, 0.f, -1.f, 0.f ) ) );
+		if ( node.cameraIndex && !contents.camera )
+		{
+			const auto perspective = std::get_if<fastgltf::Camera::Perspective>( &_asset.cameras[ *node.cameraIndex ].camera );
+			if ( perspective )
+			{
+				contents.camera = Camera { .position = glm::vec3( transform[ 3 ] ),
+										   .pitch = std::asin( glm::clamp( forward.y, -1.f, 1.f ) ),
+										   .yaw = std::atan2( forward.x, -forward.z ),
+										   .fov = perspective->yfov };
+			}
+		}
+		if ( node.lightIndex && !contents.sun_direction && _asset.lights[ *node.lightIndex ].type == fastgltf::LightType::Directional )
+		{
+			contents.sun_direction = forward;
+		}
 		if ( node.meshIndex )
 		{
 			// glTF ignores a skinned mesh node's transform: its joints place it, in the bind pose at the scene root
@@ -513,12 +530,12 @@ private:
 			glm::vec4 perspective;
 			glm::quat rotation;
 			glm::decompose( mesh_transform, scale, rotation, translation, skew, perspective );
-			instances.push_back(
+			contents.instances.push_back(
 				{ .translation = translation, .rotation = rotation, .scale = scale, .mesh = _meshes[ *node.meshIndex ].handle } );
 		}
 		for ( const auto child : node.children )
 		{
-			add_instances( instances, child, transform );
+			add_node( contents, child, transform );
 		}
 	}
 
@@ -663,7 +680,7 @@ private:
 	{
 		PROFILER_SCOPE();
 
-		fastgltf::Parser parser( fastgltf::Extensions::KHR_materials_specular );
+		fastgltf::Parser parser( fastgltf::Extensions::KHR_materials_specular | fastgltf::Extensions::KHR_lights_punctual );
 		fastgltf::GltfDataBuffer data;
 		{
 			PROFILER_SCOPE_N( "gltf_read_io" );
@@ -1279,10 +1296,10 @@ private:
 			mesh.material = _materials[ *_asset.meshes[ parsed_mesh.gltf_index ].primitives[ 0 ].materialIndex ].handle;
 		}
 
-		std::vector<scene_instance> instances;
+		scene contents;
 		for ( const auto root : _asset.scenes[ get_scene_index() ].nodeIndices )
 		{
-			add_instances( instances, root, glm::mat4( 1.f ) );
+			add_node( contents, root, glm::mat4( 1.f ) );
 		}
 
 		// Both arrays match the glTF ones, with gaps for what isn't used: keep only what was loaded, in handle order
@@ -1307,7 +1324,7 @@ private:
 		return loaded_asset { std::move( meshes ),
 							  std::move( materials ),
 							  glm::vec4( bounds.center[ 0 ], bounds.center[ 1 ], bounds.center[ 2 ], bounds.radius ),
-							  std::move( instances ) };
+							  std::move( contents ) };
 	}
 
 	std::size_t get_texture_count() const { return _textures.size(); }
@@ -1346,7 +1363,7 @@ scene Assets::load( const std::filesystem::path& path )
 	load_job job( _device, _bindless_manager, _indices, path );
 	auto asset = job.run();
 	add_content( asset );
-	return { .instances = std::move( asset.instances ) };
+	return std::move( asset.contents );
 }
 
 void Assets::add_content( loaded_asset& asset )

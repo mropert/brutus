@@ -20,9 +20,6 @@ public:
 	static constexpr size_t DRAW_BINS_PER_BUCKET = MESH_LOD_COUNT;
 	static_assert( ( DRAW_BINS_PER_BUCKET & ( DRAW_BINS_PER_BUCKET - 1 ) ) == 0, "See DRAW_BINS_PER_BUCKET" );
 	static constexpr size_t DRAW_BINS_COUNT = DRAW_BUCKETS_COUNT * DRAW_BINS_PER_BUCKET;
-	// Vertical, in radians: 50.70 degrees. It used to be 70 degrees passed as radians by accident, which gave this angle;
-	// kept so that reference images and benchmarks stay comparable
-	static constexpr float FOV = 0.884962f;
 	static constexpr uint32_t SHADOW_CASCADE_MAX = 4;
 	// Task workgroups per bucket and pass, checked against the worst case of all draws at their largest LOD
 	static constexpr uint32_t MAX_TASK_COMMANDS = 256 * 1024;

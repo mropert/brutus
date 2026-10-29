@@ -209,7 +209,7 @@ namespace
 	{
 		const glm::mat4 view = camera.calc_view_matrix();
 		// https://nlguillemot.wordpress.com/2016/12/07/reversed-z-in-opengl/
-		const auto f = 1.0f / tan( SceneRenderer::FOV / 2.0f );
+		const auto f = 1.0f / tan( camera.fov / 2.0f );
 		const auto aspect_ratio = static_cast<float>( extent.width ) / extent.height;
 		glm::mat4 projection( f / aspect_ratio, 0.0f, 0.0f, 0.0f, 0.0f, f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.01f, 0.0f );
 
@@ -254,7 +254,7 @@ namespace
 	{
 		const glm::mat4 inverse_camera_view = glm::inverse( camera.calc_view_matrix() );
 		const auto aspect_ratio = static_cast<float>( scene_extent.width ) / scene_extent.height;
-		const float tanY = tanf( SceneRenderer::FOV * 0.5f );
+		const float tanY = tanf( camera.fov * 0.5f );
 		const float tanX = tanY * aspect_ratio;
 		std::array<glm::vec3, 8> corners;
 		size_t i = 0;
@@ -832,7 +832,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 						   _draw_visibility_buffer,
 						   _draw_statistics_buffer.get_device_address(),
 						   _draw_commands_buffer,
-						   lod_pixel_tolerance / ( _extent.height / ( 2 * std::tan( FOV * 0.5f ) ) ),
+						   lod_pixel_tolerance / ( _extent.height / ( 2 * std::tan( camera.fov * 0.5f ) ) ),
 						   true,
 						   meshlet_occlusion,
 						   use_mesh_shader );
@@ -899,7 +899,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 						   _draw_visibility_buffer,
 						   _draw_statistics_buffer.get_device_address(),
 						   _draw_commands_buffer,
-						   lod_pixel_tolerance / ( _extent.height / ( 2 * std::tan( FOV * 0.5f ) ) ),
+						   lod_pixel_tolerance / ( _extent.height / ( 2 * std::tan( camera.fov * 0.5f ) ) ),
 						   false,
 						   meshlet_occlusion,
 						   use_mesh_shader );

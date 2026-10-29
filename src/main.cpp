@@ -432,9 +432,11 @@ int main( int argc, char** argv )
 	// Bistro needs ~27M
 	Assets assets( device, bindless_manager, 32 * 1024 * 1024 );
 	std::vector<scene> crowd_models;
+	scene gltf_scene;
 	if ( scene_path )
 	{
-		draw_scene( assets, assets.load( *scene_path ), scene_renderer );
+		gltf_scene = assets.load( *scene_path );
+		draw_scene( assets, gltf_scene, scene_renderer );
 	}
 	else
 	{
@@ -480,6 +482,16 @@ int main( int argc, char** argv )
 	auto time = std::chrono::steady_clock::now();
 	constexpr float day_period = 10.f;
 	float time_of_day = 0.f;
+	// The sun orbits around the vertical axis at a fixed elevation (0 = horizon, pi / 2 = zenith), starting from the
+	// scene's sun if it has one
+	float sun_elevation = glm::radians( 60.f );
+	float sun_start_azimuth = 0.f;
+	if ( gltf_scene.sun_direction )
+	{
+		const auto to_sun = -*gltf_scene.sun_direction;
+		sun_elevation = std::asin( to_sun.y );
+		sun_start_azimuth = std::atan2( to_sun.z, to_sun.x );
+	}
 
 	bool relative_mouse = false;
 	// XXX: we disable occlusion culling support entirely if minmax sampler aren't supported
@@ -490,18 +502,24 @@ int main( int argc, char** argv )
 					   .mesh_shading = props.mesh_shader_support && command_line[ "--use-vertex-shader" ] == false,
 					   .occlusion_culling = props.minmax_filter_support };
 
-	if ( is_benchmark )
+	if ( !ui_state.crowd )
+	{
+		// Start with the scene's own lighting and view
+		ui_state.paused = true;
+		if ( gltf_scene.camera )
+		{
+			camera = *gltf_scene.camera;
+		}
+	}
+	else if ( is_benchmark )
 	{
 		time_of_day = 4.f;
 		ui_state.paused = true;
-		if ( ui_state.crowd )
-		{
-			ui_state.x_miku = BENCHMARK_CROWD_SIZE;
-			ui_state.z_miku = BENCHMARK_CROWD_SIZE;
-			camera.position = { -7.5234f, 2.5384f, 4.8755f };
-			camera.pitch = -0.2960f;
-			camera.yaw = 0.7039f;
-		}
+		ui_state.x_miku = BENCHMARK_CROWD_SIZE;
+		ui_state.z_miku = BENCHMARK_CROWD_SIZE;
+		camera.position = { -7.5234f, 2.5384f, 4.8755f };
+		camera.pitch = -0.2960f;
+		camera.yaw = 0.7039f;
 	}
 
 	while ( !quit )
@@ -548,8 +566,8 @@ int main( int argc, char** argv )
 
 		camera.position += glm::vec3( camera.calc_rotation_matrix() * glm::vec4( camera_velocity, 0.f ) ) * delta_time;
 		// Sun as a point on a sphere: fixed elevation above the horizon, azimuth orbiting over time.
-		const float sun_elevation = glm::radians( 60.f ); // height in the sky (0 = horizon, 90 = zenith)
-		const float sun_azimuth = time_of_day * std::numbers::pi_v<float> * 2.f / day_period; // full circle over one period
+		const float sun_azimuth = sun_start_azimuth
+			+ time_of_day * std::numbers::pi_v<float> * 2.f / day_period; // full circle over one period
 		// Unit vector pointing *toward* the sun. Elevation lives in the angle, so it survives normalize().
 		const glm::vec3 to_sun( std::cosf( sun_elevation ) * std::cosf( sun_azimuth ),
 								std::sinf( sun_elevation ),
