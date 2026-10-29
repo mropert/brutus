@@ -30,6 +30,9 @@
     "vulkan-memory-allocator",
     "vulkan-validationlayers"
   ],
+  "overrides": [
+    { "name": "fastgltf", "version": "0.9.1" }
+  ],
   "features": {
     "tracy": {
       "description": "Enable Tracy profiler support",

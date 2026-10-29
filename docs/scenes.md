@@ -45,13 +45,15 @@ Bistro. Shared rules and measurement setup: [working_process.md](working_process
   tool), game cameras stay level.
 - **Sun**: `KHR_lights_punctual` directional, 6830 lux, elevation 68.5°, azimuth ~130°.
 - **Materials** (next): 234 use `KHR_materials_pbrSpecularGlossiness` (`*_diff.png` diffuse, `*_spec.png`
-  specular-glossiness, factors), 18 `KHR_materials_transmission`, 2 none. fastgltf 0.9.0 (vcpkg) doesn't parse
-  specular-glossiness: fixed upstream after the user's report, not in vcpkg yet.
+  specular-glossiness, factors), 18 `KHR_materials_transmission`, 2 none. fastgltf 0.9.0 compiled
+  specular-glossiness out (`FASTGLTF_ENABLE_DEPRECATED_EXT`, off in vcpkg); 0.9.1 (2026-09-27) always has it, after
+  the user's report. `vcpkg.json` pins fastgltf to 0.9.1 with an `overrides` entry, ahead of our baseline: drop it
+  when the baseline moves past it.
 
 ## Plan
 
-- **Bistro materials**: a fastgltf with specular-glossiness (newer release or vcpkg overlay port at the fixed commit),
-  then a specular-glossiness shading path. Check what Lumberyard's `_spec` textures hold first.
+- **Bistro materials**: parse `KHR_materials_pbrSpecularGlossiness` (fastgltf 0.9.1), then a specular-glossiness
+  shading path. Check what Lumberyard's `_spec` textures hold first.
 - **Match a reference image** once materials work: ORCA's daytime
   [Bistro_Exterior_1](https://d29g4g2dyqv443.cloudfront.net/sites/default/files/akamai/Bistro_Exterior_1.png)
   (corner of "Le Petit Coin" with the Vespa, camera not published: fly there and "Copy camera"). Its verticals look
@@ -71,5 +73,9 @@ Bistro. Shared rules and measurement setup: [working_process.md](working_process
 
 - pbrt-v4's `bistro_vespa` camera (eye `(-9.7, 2.5, 4.3)`, 45° vertical) doesn't match this glTF's coordinates, nor
   mirrored in X: the pbrt and RTXDI conversions don't share a frame.
+- vcpkg can pin one port without forking: an `overrides` entry in `vcpkg.json` takes any version from the
+  registry's version history (newer than the baseline too), the rest stays on the baseline. For changes to a port's
+  build (e.g. CMake options), an overlay port (`"overlay-ports"` in `vcpkg-configuration.json`, the port's folder
+  copied into the repository) replaces the recipe.
 - The ORCA README says its re-authored "Specular" textures pack occlusion, roughness and metalness; this glTF's
   Lumberyard `_spec` textures may differ.
