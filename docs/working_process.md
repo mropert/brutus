@@ -38,9 +38,10 @@ From the repository root, for every change:
 1. Build: `cmake --build build --config Debug --target brutus-vulkan` (check the exit code, not only the last output
    line) and `python util/compile_shaders.py` (shaders are compiled at runtime, a failed first compile throws and shows
    an `abort()` popup). Build Release too when tracing it.
-2. Smoke run for validation output (nothing printed is clean): `timeout 25 ./build/Debug/brutus-vulkan.exe --benchmark >
-   out.txt 2>&1` from Git Bash (from PowerShell use `C:\Program Files\Git\usr\bin\timeout.exe`, Windows' `timeout` is
-   something else). Exit code 124 means it was still running when stopped.
+2. Smoke run for validation output (nothing printed is clean). The messages go to stdout (vk-bootstrap's default
+   messenger uses `printf`), which is buffered when redirected: a killed process loses them, so `timeout` runs prove
+   nothing. Close the window instead so the app exits and flushes: `Start-Process` with `-RedirectStandardOutput`,
+   wait, `CloseMainWindow()`, `WaitForExit()` (give Bistro in Debug ~150 s to load).
 3. Correctness: `util/screenshot_benchmark.ps1` + `util/image_diff.ps1` against the previous build; refactors must be
    pixel identical (frames are deterministic). Check both paths: add `--use-vertex-shader` to the arguments for the
    vertex path (every script takes extra arguments). If a diff shows only a strip at the bottom, the taskbar was
