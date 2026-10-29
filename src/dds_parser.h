@@ -2,18 +2,18 @@
 
 #include <renderer/texture.h>
 #include <span>
+#include <stdexcept>
 
-class dds_file
+class DDSFile
 {
 public:
-	explicit dds_file( std::span<const std::byte> bytes );
+	// Throws renderer::Error on failure
+	explicit DDSFile( std::span<const std::byte> bytes );
 
-	// Calling any accessor when this returns false is UB
-	explicit constexpr operator bool() const { return !_bytes.empty(); }
-
-	renderer::Texture::Desc get_desc() const;
+	const renderer::Texture::Desc& get_desc() const { return _desc; }
 	std::span<const std::byte> get_data() const;
 
 private:
 	std::span<const std::byte> _bytes;
+	renderer::Texture::Desc _desc;
 };

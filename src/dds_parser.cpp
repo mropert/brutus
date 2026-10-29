@@ -1,8 +1,8 @@
 #include "dds_parser.h"
 
 #include <array>
-#include <bit>
 #include <cstdint>
+#include <memory>
 #include <string_view>
 
 #if defined( __BIG_ENDIAN__ ) || ( defined( __BYTE_ORDER__ ) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ )
@@ -40,6 +40,13 @@ namespace dds::details
 		}
 	};
 
+	enum class caps
+	{
+		// Technically we should check TEXTURE and COMPLEX
+		// But Microsoft themselves advise against relying on those being set...
+		MIPMAP = 0x400000
+	};
+
 	struct header
 	{
 		uint32_t size;
@@ -51,11 +58,16 @@ namespace dds::details
 		uint32_t mipMapCount;
 		uint32_t reserved1[ 11 ];
 		pixel_format spf;
-		uint32_t caps;
+		caps caps;
 		uint32_t caps2;
 		uint32_t caps3;
 		uint32_t caps4;
 		uint32_t reserved2;
+
+		constexpr bool has_caps( details::caps wanted ) const
+		{
+			return ( std::to_underlying( caps ) & std::to_underlying( wanted ) ) == std::to_underlying( wanted );
+		}
 	};
 
 	enum class format : uint32_t
@@ -214,44 +226,73 @@ namespace dds::details
 	static_assert( alignof( header ) == sizeof( uint32_t ) );
 	static_assert( alignof( header_dxt10 ) == sizeof( uint32_t ) );
 	static_assert( alignof( file_dxt10 ) == sizeof( uint32_t ) );
+	static_assert( sizeof( header ) == 124 );
+	static_assert( sizeof( header_dxt10 ) == 20 );
 }
 
-dds_file::dds_file( std::span<const std::byte> bytes )
+static inline const auto cast_file( std::span<const std::byte> bytes )
 {
-	if ( bytes.size_bytes() < sizeof( dds::details::file_dxt10 ) )
-		return;
+#ifdef __cpp_lib_start_lifetime_as
+	return std::start_lifetime_as<const dds::details::file_dxt10>( bytes.data() );
+#else
+	return reinterpret_cast<const dds::details::file_dxt10*>( bytes.data() );
+#endif
+}
 
-	const auto file = std::bit_cast<const dds::details::file_dxt10*>( bytes.data() );
+static inline constexpr renderer::Texture::Format to_renderer_format( dds::details::format format )
+{
+	switch ( format )
+	{
+		case dds::details::format::BC7_UNORM:
+			return renderer::Texture::Format::BC7_UNORM;
+		case dds::details::format::BC7_UNORM_SRGB:
+			return renderer::Texture::Format::BC7_SRGB;
+	}
+	return renderer::Texture::Format::UNDEFINED;
+}
+
+DDSFile::DDSFile( std::span<const std::byte> bytes )
+	: _bytes( bytes )
+{
+	if ( std::bit_cast<uintptr_t>( _bytes.data() ) % alignof( dds::details::file_dxt10 ) != 0 )
+		throw renderer::Error( "Buffer isn't aligned to the alignment of a DXT10 file" );
+
+	if ( _bytes.size_bytes() < sizeof( dds::details::file_dxt10 ) )
+		throw renderer::Error( "Buffer is smaller than the size of a DXT10 file header" );
+
+	const auto file = cast_file( _bytes );
 	if ( file->magic != dds::details::magic )
-		return;
+		throw renderer::Error( "Buffer is not a DDS file (bad magic)" );
 
 	using namespace std::literals;
 	if ( !file->header.spf.has_flags( dds::details::pixel_format::flags_t::FOURCC )
 		 || std::string_view( file->header.spf.fourCC ) != "DX10"sv )
-		return;
+		throw renderer::Error( "Buffer is not a DXT10 DDS file (legacy is unsupported legacy format)" );
 
-	// Only set once we passed all sanity checks
-	_bytes = bytes;
-}
+	_desc.format = to_renderer_format( file->header_dxt10.dxgiFormat );
+	if ( _desc.format == renderer::Texture::Format::UNDEFINED )
+		throw renderer::Error( "Unsupported texture format" );
 
-renderer::Texture::Desc dds_file::get_desc() const
-{
-	renderer::Texture::Desc desc;
-	const auto file = std::bit_cast<const dds::details::file_dxt10*>( _bytes.data() );
-	switch ( file->header_dxt10.dxgiFormat )
+	if ( file->header_dxt10.resourceDimension != dds::details::dimension::TEXTURE2D )
+		throw renderer::Error( "Unsupported texture dimensions (only 2D is supported)" );
+
+	if ( file->header_dxt10.arraySize != 1 )
+		throw renderer::Error( "Unsupported texture array" );
+
+	_desc.extent.width = file->header.width;
+	_desc.extent.height = file->header.height;
+
+	if ( file->header.has_caps( dds::details::caps::MIPMAP ) )
 	{
-		case dds::details::format::BC7_UNORM:
-			desc.format = renderer::Texture::Format::BC7_UNORM;
-		case dds::details::format::BC7_UNORM_SRGB:
-			desc.format = renderer::Texture::Format::BC7_SRGB;
+		_desc.mips = static_cast<int>( file->header.mipMapCount );
 	}
-	desc.extent.height = file->header.height;
-	desc.extent.width = file->header.width;
-	desc.mips = static_cast<int>( file->header.mipMapCount );
-	return desc;
+
+	const auto size = _desc.get_size();
+	if ( sizeof( dds::details::file_dxt10 ) + size > _bytes.size_bytes() )
+		throw renderer::Error( "DDS File is truncated" );
 }
 
-std::span<const std::byte> dds_file::get_data() const
+std::span<const std::byte> DDSFile::get_data() const
 {
 	return _bytes.subspan( sizeof( dds::details::file_dxt10 ) );
 }
