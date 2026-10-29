@@ -17,7 +17,13 @@ struct Material
 	uint metallic_roughness_index;
 	uint specular_index;
 	uint type;
+	uint workflow;
+	vec4 specular_glossiness;
+	uint specular_glossiness_index;
 };
+
+const uint MATERIAL_WORKFLOW_METALLIC_ROUGHNESS = 0;
+const uint MATERIAL_WORKFLOW_SPECULAR_GLOSSINESS = 1;
 
 struct MeshLOD
 {

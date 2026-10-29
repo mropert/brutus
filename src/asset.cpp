@@ -680,7 +680,8 @@ private:
 	{
 		PROFILER_SCOPE();
 
-		fastgltf::Parser parser( fastgltf::Extensions::KHR_materials_specular | fastgltf::Extensions::KHR_lights_punctual );
+		fastgltf::Parser parser( fastgltf::Extensions::KHR_materials_specular | fastgltf::Extensions::KHR_lights_punctual
+								 | fastgltf::Extensions::KHR_materials_pbrSpecularGlossiness );
 		fastgltf::GltfDataBuffer data;
 		{
 			PROFILER_SCOPE_N( "gltf_read_io" );
@@ -780,24 +781,44 @@ private:
 			if ( _materials_usage[ i ] )
 			{
 				const auto& material = _asset.materials[ i ];
-				if ( material.pbrData.baseColorTexture )
+				if ( material.specularGlossiness )
 				{
-					add_texture_usage( material.pbrData.baseColorTexture->textureIndex, true );
+					// Both workflows fill base_color and albedo_texture: only one can be used. glTF allows a metallic-roughness
+					// fallback next to specular-glossiness, but we can't tell its factors from the defaults
+					if ( material.pbrData.baseColorTexture || material.pbrData.metallicRoughnessTexture || material.specular )
+					{
+						throw renderer::Error( "Unsupported material with both metallic-roughness and specular-glossiness" );
+					}
+					if ( material.specularGlossiness->diffuseTexture )
+					{
+						add_texture_usage( material.specularGlossiness->diffuseTexture->textureIndex, true );
+					}
+					if ( material.specularGlossiness->specularGlossinessTexture )
+					{
+						add_texture_usage( material.specularGlossiness->specularGlossinessTexture->textureIndex, true );
+					}
+				}
+				else
+				{
+					if ( material.pbrData.baseColorTexture )
+					{
+						add_texture_usage( material.pbrData.baseColorTexture->textureIndex, true );
+					}
+					if ( material.pbrData.metallicRoughnessTexture )
+					{
+						add_texture_usage( material.pbrData.metallicRoughnessTexture->textureIndex, false );
+					}
+					if ( material.specular )
+					{
+						if ( material.specular->specularTexture )
+						{
+							add_texture_usage( material.specular->specularTexture->textureIndex, false );
+						}
+					}
 				}
 				if ( material.normalTexture )
 				{
 					add_texture_usage( material.normalTexture->textureIndex, false );
-				}
-				if ( material.pbrData.metallicRoughnessTexture )
-				{
-					add_texture_usage( material.pbrData.metallicRoughnessTexture->textureIndex, false );
-				}
-				if ( material.specular )
-				{
-					if ( material.specular->specularTexture )
-					{
-						add_texture_usage( material.specular->specularTexture->textureIndex, false );
-					}
 				}
 				// We ignore emissive for now
 			}
@@ -1181,8 +1202,8 @@ private:
 					{
 						throw renderer::Error( SDL_GetError() );
 					}
-					// XXX: INDEX1MSB should probably be turned into R8_UNORM
-					else if ( _images[ index ]->format == SDL_PIXELFORMAT_INDEX8 || _images[ index ]->format == SDL_PIXELFORMAT_INDEX1MSB )
+					// Palettes and grayscale are expanded to RGBA. XXX: grayscale and INDEX1MSB should probably be turned into R8_UNORM
+					else if ( sdl_gpu_format( _images[ index ]->format ) == SDL_PIXELFORMAT_UNKNOWN )
 					{
 						sdl::raii::Surface converted_image( SDL_ConvertSurface( _images[ index ].get(), SDL_PIXELFORMAT_RGBA32 ) );
 						if ( !converted_image )
@@ -1236,38 +1257,64 @@ private:
 			if ( _materials_usage[ i ] )
 			{
 				auto& material = _materials[ i ];
-				if ( _asset.materials[ i ].pbrData.baseColorTexture )
-				{
-					material.gpu_data.albedo_texture = _textures[ _asset.materials[ i ].pbrData.baseColorTexture->textureIndex ]
-														   .handles.sampled_texture;
-				}
-
 				if ( _asset.materials[ i ].normalTexture )
 				{
 					material.gpu_data.normal_texture = _textures[ _asset.materials[ i ].normalTexture->textureIndex ]
 														   .handles.sampled_texture;
 				}
 
-				if ( _asset.materials[ i ].pbrData.metallicRoughnessTexture )
+				// parse() checked that a material uses only one workflow
+				if ( const auto& specular_glossiness = _asset.materials[ i ].specularGlossiness )
 				{
-					material.gpu_data
-						.metallic_roughness_texture = _textures[ _asset.materials[ i ].pbrData.metallicRoughnessTexture->textureIndex ]
-														  .handles.sampled_texture;
-				}
-				if ( _asset.materials[ i ].specular )
-				{
-					if ( _asset.materials[ i ].specular->specularTexture )
+					material.gpu_data.workflow = material_workflow::SPECULAR_GLOSSINESS;
+					if ( specular_glossiness->diffuseTexture )
 					{
-						material.gpu_data.specular_texture = _textures[ _asset.materials[ i ].specular->specularTexture->textureIndex ]
-																 .handles.sampled_texture;
+						material.gpu_data.albedo_texture = _textures[ specular_glossiness->diffuseTexture->textureIndex ]
+															   .handles.sampled_texture;
 					}
+					if ( specular_glossiness->specularGlossinessTexture )
+					{
+						material.gpu_data
+							.specular_glossiness_texture = _textures[ specular_glossiness->specularGlossinessTexture->textureIndex ]
+															   .handles.sampled_texture;
+					}
+					material.gpu_data.base_color = glm::vec4( specular_glossiness->diffuseFactor.x(),
+															  specular_glossiness->diffuseFactor.y(),
+															  specular_glossiness->diffuseFactor.z(),
+															  specular_glossiness->diffuseFactor.w() );
+					material.gpu_data.specular_glossiness = glm::vec4( specular_glossiness->specularFactor.x(),
+																	   specular_glossiness->specularFactor.y(),
+																	   specular_glossiness->specularFactor.z(),
+																	   specular_glossiness->glossinessFactor );
 				}
-				material.gpu_data.base_color.x = _asset.materials[ i ].pbrData.baseColorFactor.x();
-				material.gpu_data.base_color.y = _asset.materials[ i ].pbrData.baseColorFactor.y();
-				material.gpu_data.base_color.z = _asset.materials[ i ].pbrData.baseColorFactor.z();
-				material.gpu_data.base_color.w = _asset.materials[ i ].pbrData.baseColorFactor.w();
-				material.gpu_data.metalness = _asset.materials[ i ].pbrData.metallicFactor;
-				material.gpu_data.roughness = _asset.materials[ i ].pbrData.roughnessFactor;
+				else
+				{
+					if ( _asset.materials[ i ].pbrData.baseColorTexture )
+					{
+						material.gpu_data.albedo_texture = _textures[ _asset.materials[ i ].pbrData.baseColorTexture->textureIndex ]
+															   .handles.sampled_texture;
+					}
+					if ( _asset.materials[ i ].pbrData.metallicRoughnessTexture )
+					{
+						material.gpu_data
+							.metallic_roughness_texture = _textures[ _asset.materials[ i ].pbrData.metallicRoughnessTexture->textureIndex ]
+															  .handles.sampled_texture;
+					}
+					if ( _asset.materials[ i ].specular )
+					{
+						if ( _asset.materials[ i ].specular->specularTexture )
+						{
+							material.gpu_data.specular_texture = _textures[ _asset.materials[ i ].specular->specularTexture->textureIndex ]
+																	 .handles.sampled_texture;
+						}
+					}
+					material.gpu_data.base_color.x = _asset.materials[ i ].pbrData.baseColorFactor.x();
+					material.gpu_data.base_color.y = _asset.materials[ i ].pbrData.baseColorFactor.y();
+					material.gpu_data.base_color.z = _asset.materials[ i ].pbrData.baseColorFactor.z();
+					material.gpu_data.base_color.w = _asset.materials[ i ].pbrData.baseColorFactor.w();
+					material.gpu_data.metalness = _asset.materials[ i ].pbrData.metallicFactor;
+					material.gpu_data.roughness = _asset.materials[ i ].pbrData.roughnessFactor;
+				}
 				switch ( _asset.materials[ i ].alphaMode )
 				{
 

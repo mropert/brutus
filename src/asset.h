@@ -28,17 +28,28 @@ enum class material_type : uint32_t
 	COUNT
 };
 
+// Matches MATERIAL_WORKFLOW_* in mesh.glsl
+enum class material_workflow : uint32_t
+{
+	METALLIC_ROUGHNESS = 0,
+	SPECULAR_GLOSSINESS // KHR_materials_pbrSpecularGlossiness
+};
+
 struct gpu_material
 {
-	glm::aligned_vec4 base_color;
+	glm::aligned_vec4 base_color; // Diffuse color for specular-glossiness
 	float metalness;
 	float roughness;
-	renderer::BindlessSampledTexture albedo_texture;
+	renderer::BindlessSampledTexture albedo_texture; // Diffuse texture for specular-glossiness
 	renderer::BindlessSampledTexture normal_texture;
 	renderer::BindlessSampledTexture metallic_roughness_texture;
 	renderer::BindlessSampledTexture specular_texture;
 	material_type type;
+	material_workflow workflow = material_workflow::METALLIC_ROUGHNESS;
+	glm::aligned_vec4 specular_glossiness; // Specular-glossiness only: xyz is the specular color, w the glossiness
+	renderer::BindlessSampledTexture specular_glossiness_texture; // Same layout, multiplies specular_glossiness
 };
+static_assert( sizeof( gpu_material ) == 80 );
 
 struct gpu_mesh_lod
 {
