@@ -52,6 +52,7 @@ public:
 				 float lod_pixel_tolerance,
 				 float shadow_distance,
 				 uint32_t shadow_cascade_count,
+				 bool show_grid,
 				 bool show_shadow_cascades,
 				 bool use_pbr,
 				 bool use_occlusion_culling );

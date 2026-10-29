@@ -93,6 +93,7 @@ struct ui_data
 	bool show_shadow_cascades = false;
 	bool paused = false;
 	bool crowd; // The crowd scene, its size can be changed
+	bool grid; // The ground plane, only useful in scenes without their own ground
 	bool vsync;
 	bool stable_power;
 	bool mesh_shading;
@@ -206,6 +207,7 @@ void draw_ui( ui_data& data,
 		ImGui::SliderFloat( "Shadow distance", &data.shadow_distance, 5.f, 100.f, "%.3f", ImGuiSliderFlags_AlwaysClamp );
 		ImGui::SliderInt( "Shadow cascades", &data.shadow_cascades, 0, SceneRenderer::SHADOW_CASCADE_MAX );
 		ImGui::Checkbox( "Show shadow cascades", &data.show_shadow_cascades );
+		ImGui::Checkbox( "Ground grid", &data.grid );
 		if ( ImGui::Button( data.paused ? "Unpause" : "Pause" ) )
 		{
 			data.paused = !data.paused;
@@ -497,6 +499,7 @@ int main( int argc, char** argv )
 	// XXX: we disable occlusion culling support entirely if minmax sampler aren't supported
 	// TODO: emulate it in shaders with a gather4 instead
 	ui_data ui_state { .crowd = !scene_path,
+					   .grid = !scene_path,
 					   .vsync = vsync,
 					   .stable_power = stable_power.is_enabled(),
 					   .mesh_shading = props.mesh_shader_support && command_line[ "--use-vertex-shader" ] == false,
@@ -636,6 +639,7 @@ int main( int argc, char** argv )
 							   static_cast<float>( ui_state.lod_pixel_tolerance ),
 							   ui_state.shadow_distance,
 							   static_cast<uint32_t>( ui_state.shadow_cascades ),
+							   ui_state.grid,
 							   ui_state.show_shadow_cascades,
 							   ui_state.pbr,
 							   occlusion_culling );

@@ -32,6 +32,8 @@ Bistro. Shared rules and measurement setup: [working_process.md](working_process
   directional light gives `elevation = asin( to_sun.y )`, `start azimuth = atan2( to_sun.z, to_sun.x )`, the exact
   inverse of the arc, so time 0 is the file's direction. glTF scenes start paused. Intensity stays on the UI slider
   (the file's lux aren't mapped to our units), color is ignored.
+- **Ground grid**: a UI toggle, on for the crowd and off for glTF scenes (they have their own ground). The grid pass
+  also resolves MSAA, so it runs without the grid: its "Grid draw" timing is then the resolve alone.
 - **One primitive per mesh**: the loader throws otherwise, and a mesh carries its material. No file we load shares
   vertex data between meshes or primitives.
 
@@ -48,7 +50,6 @@ Bistro. Shared rules and measurement setup: [working_process.md](working_process
 
 ## Plan
 
-- **Ground grid** off for glTF scenes.
 - **Bistro materials**: a fastgltf with specular-glossiness (newer release or vcpkg overlay port at the fixed commit),
   then a specular-glossiness shading path. Check what Lumberyard's `_spec` textures hold first.
 - **Match a reference image** once materials work: ORCA's daytime

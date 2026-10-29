@@ -691,6 +691,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 							float lod_pixel_tolerance,
 							float shadow_distance,
 							uint32_t shadow_cascade_count,
+							bool show_grid,
 							bool show_shadow_cascades,
 							bool use_pbr,
 							bool use_occlusion_culling )
@@ -973,13 +974,16 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 								 renderer::ResourceState::COLOR_ATTACHMENT );
 			render_info.color_target.resolve_target = _resolved_color_texture.handles.view;
 		}
+		// The pass also resolves MSAA: it runs without the grid too
 		cmd.begin_rendering( render_info );
-
-		cmd.set_dynamic_state( { .viewport = _extent } );
-		cmd.bind_pipeline( pipelines.get( _grid_pipeline ), bindless_manager );
-		cmd.push_constants( pipelines.get( _grid_pipeline ),
-							grid_constants { .frame_constants = frame_constants_address, .pass_constants = pass_constants_address } );
-		cmd.draw( 4 );
+		if ( show_grid )
+		{
+			cmd.set_dynamic_state( { .viewport = _extent } );
+			cmd.bind_pipeline( pipelines.get( _grid_pipeline ), bindless_manager );
+			cmd.push_constants( pipelines.get( _grid_pipeline ),
+								grid_constants { .frame_constants = frame_constants_address, .pass_constants = pass_constants_address } );
+			cmd.draw( 4 );
+		}
 		cmd.end_rendering();
 	}
 
