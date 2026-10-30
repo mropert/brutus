@@ -2,6 +2,8 @@
 
 #include "asset.h"
 
+#include "dds_parser.h"
+
 #include <SDL3_image/SDL_image.h>
 #include <fastgltf/core.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -111,6 +113,14 @@ renderer::raii::Texture make_image_from_surface( renderer::Device& device, const
 															.usage = TexUsage::TRANSFER_SRC | TexUsage::TRANSFER_DST | TexUsage::SAMPLED,
 															.extent = extent,
 															.mips = calc_mip_levels( extent ) } );
+}
+
+renderer::raii::Texture make_image_from_dds( renderer::Device& device, const DDSFile& dds )
+{
+	PROFILER_SCOPE();
+	auto desc = dds.get_desc();
+	desc.usage = renderer::Texture::Usage::TRANSFER_DST | renderer::Texture::Usage::SAMPLED;
+	return device.create_texture( desc );
 }
 
 
@@ -278,6 +288,7 @@ public:
 		const auto pitch = static_cast<int>( surface.w * get_format_size( sdl_to_vulkan_format( gpu_format ) ) );
 		const auto size = static_cast<size_t>( pitch * surface.h );
 		assert( size < _size );
+		align_offset( renderer::Texture::get_texel_block_size( texture.get_format() ) );
 		if ( size + _offset > _size )
 		{
 			flush_full();
@@ -300,6 +311,30 @@ public:
 									  renderer::ResourceState::SHADER_READ,
 									  texture.get_mips() - 1 );
 		_offset += size;
+	}
+
+	// DDS files come with their mips, copied as is
+	void queue( const DDSFile& dds, renderer::Texture& texture )
+	{
+		assert( _state == state::UPLOADING );
+		const auto& desc = dds.get_desc();
+		const auto size = desc.get_size();
+		assert( size < _size );
+		// Mip sizes are multiples of the block size, so aligning the first one aligns them all
+		align_offset( renderer::Texture::get_texel_block_size( texture.get_format() ) );
+		if ( size + _offset > _size )
+		{
+			flush_full();
+		}
+		const auto ptr = static_cast<std::byte*>( _upload_buffer.get_mapped_address() );
+		memcpy( ptr + _offset, dds.get_data().data(), size );
+		_cmd_buffer->texture_barrier( texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::TRANSFER_DST );
+		for ( int mip = 0; mip < texture.get_mips(); ++mip )
+		{
+			_cmd_buffer->copy_buffer_to_texture( _upload_buffer, _offset, texture, mip );
+			_offset += desc.get_mip_size( mip );
+		}
+		_cmd_buffer->texture_barrier( texture, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::SHADER_READ );
 	}
 
 	void submit()
@@ -335,6 +370,8 @@ public:
 	}
 
 private:
+	void align_offset( size_t alignment ) { _offset = ( _offset + alignment - 1 ) / alignment * alignment; }
+
 	void flush_full()
 	{
 		submit();
@@ -453,11 +490,21 @@ class Assets::load_job
 		SRGB
 	};
 
+	enum class image_usage : uint8_t
+	{
+		UNUSED,
+		DECODED, // Decoded by SDL_image, mips generated on the GPU
+		DDS
+	};
+
 	struct data_source
 	{
 		std::span<const std::byte> data;
 		std::unique_ptr<std::byte[]> buffer;
 	};
+
+	// A decoded surface, or a DDS file uploaded as is and parsed once its sRGB usage is known
+	using loaded_image = std::variant<std::monostate, sdl::raii::Surface, data_source>;
 
 public:
 	load_job( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& index_buffer, std::filesystem::path path )
@@ -539,17 +586,23 @@ private:
 		}
 	}
 
+	// Prefers the DDS image when there is one: block compressed with precomputed mips
+	static size_t get_image_index( const fastgltf::Texture& texture )
+	{
+		return texture.ddsImageIndex ? *texture.ddsImageIndex : *texture.imageIndex;
+	}
+
 	void add_texture_usage( size_t index, bool sRGB )
 	{
 		const auto usage = sRGB ? texture_usage::SRGB : texture_usage::LINEAR;
 		if ( _textures_usage[ index ] == texture_usage::UNUSED )
 		{
-			const auto image_index = *_asset.textures[ index ].imageIndex;
-			if ( _images_usage[ image_index ] )
+			const auto image_index = get_image_index( _asset.textures[ index ] );
+			if ( _images_usage[ image_index ] != image_usage::UNUSED )
 			{
 				throw renderer::Error( "Unsupported multiple texture references to the same image" );
 			}
-			_images_usage[ image_index ] = 1;
+			_images_usage[ image_index ] = _asset.textures[ index ].ddsImageIndex ? image_usage::DDS : image_usage::DECODED;
 			_textures_usage[ index ] = usage;
 		}
 		else if ( _textures_usage[ index ] != usage )
@@ -681,7 +734,7 @@ private:
 		PROFILER_SCOPE();
 
 		fastgltf::Parser parser( fastgltf::Extensions::KHR_materials_specular | fastgltf::Extensions::KHR_lights_punctual
-								 | fastgltf::Extensions::KHR_materials_pbrSpecularGlossiness );
+								 | fastgltf::Extensions::KHR_materials_pbrSpecularGlossiness | fastgltf::Extensions::MSFT_texture_dds );
 		fastgltf::GltfDataBuffer data;
 		{
 			PROFILER_SCOPE_N( "gltf_read_io" );
@@ -774,7 +827,7 @@ private:
 			}
 		}
 
-		_images_usage.resize( _asset.images.size(), 0 );
+		_images_usage.resize( _asset.images.size(), image_usage::UNUSED );
 		_textures_usage.resize( _asset.textures.size(), texture_usage::UNUSED );
 		for ( size_t i = 0; i < _materials_usage.size(); ++i )
 		{
@@ -1188,32 +1241,36 @@ private:
 		PROFILER_SCOPE();
 		_images.resize( _images_usage.size() );
 
-		tbb::parallel_for(
-			0uz,
-			_images_usage.size(),
-			[ & ]( size_t index )
+		tbb::parallel_for( 0uz, _images_usage.size(), [ & ]( size_t index ) { decompress_texture( index ); } );
+	}
+
+	void decompress_texture( size_t index )
+	{
+		PROFILER_SCOPE_N( "decompress_tex" );
+		if ( _images_usage[ index ] == image_usage::DDS )
+		{
+			_images[ index ] = load( _asset.images[ index ].data, true );
+		}
+		else if ( _images_usage[ index ] == image_usage::DECODED )
+		{
+			const auto source = load( _asset.images[ index ].data, true );
+			sdl::raii::Surface surface( IMG_Load_IO( SDL_IOFromConstMem( source.data.data(), source.data.size() ), true ) );
+			if ( !surface )
 			{
-				PROFILER_SCOPE_N( "decompress_tex" );
-				if ( _images_usage[ index ] )
+				throw renderer::Error( SDL_GetError() );
+			}
+			// Palettes and grayscale are expanded to RGBA. XXX: grayscale and INDEX1MSB should probably be turned into R8_UNORM
+			else if ( sdl_gpu_format( surface->format ) == SDL_PIXELFORMAT_UNKNOWN )
+			{
+				sdl::raii::Surface converted_image( SDL_ConvertSurface( surface.get(), SDL_PIXELFORMAT_RGBA32 ) );
+				if ( !converted_image )
 				{
-					const auto source = load( _asset.images[ index ].data, true );
-					_images[ index ].reset( IMG_Load_IO( SDL_IOFromConstMem( source.data.data(), source.data.size() ), true ) );
-					if ( !_images[ index ] )
-					{
-						throw renderer::Error( SDL_GetError() );
-					}
-					// Palettes and grayscale are expanded to RGBA. XXX: grayscale and INDEX1MSB should probably be turned into R8_UNORM
-					else if ( sdl_gpu_format( _images[ index ]->format ) == SDL_PIXELFORMAT_UNKNOWN )
-					{
-						sdl::raii::Surface converted_image( SDL_ConvertSurface( _images[ index ].get(), SDL_PIXELFORMAT_RGBA32 ) );
-						if ( !converted_image )
-						{
-							throw renderer::Error( SDL_GetError() );
-						}
-						_images[ index ] = std::move( converted_image );
-					}
+					throw renderer::Error( SDL_GetError() );
 				}
-			} );
+				surface = std::move( converted_image );
+			}
+			_images[ index ] = std::move( surface );
+		}
 	}
 
 	void upload_textures()
@@ -1224,10 +1281,22 @@ private:
 		{
 			if ( _textures_usage[ i ] != texture_usage::UNUSED )
 			{
-				const auto image_index = *_asset.textures[ i ].imageIndex;
-				auto tex = make_image_from_surface( _device, *_images[ image_index ], _textures_usage[ i ] == texture_usage::SRGB );
-				_texture_upload.queue( *_images[ image_index ], tex );
-				_textures[ i ] = _bindless_manager.add_texture( std::move( tex ) );
+				const auto& image = _images[ get_image_index( _asset.textures[ i ] ) ];
+				const auto sRGB = _textures_usage[ i ] == texture_usage::SRGB;
+				if ( const auto dds_source = std::get_if<data_source>( &image ) )
+				{
+					const DDSFile dds( dds_source->data, sRGB );
+					auto tex = make_image_from_dds( _device, dds );
+					_texture_upload.queue( dds, tex );
+					_textures[ i ] = _bindless_manager.add_texture( std::move( tex ) );
+				}
+				else
+				{
+					const auto& surface = std::get<sdl::raii::Surface>( image );
+					auto tex = make_image_from_surface( _device, *surface, sRGB );
+					_texture_upload.queue( *surface, tex );
+					_textures[ i ] = _bindless_manager.add_texture( std::move( tex ) );
+				}
 			}
 		}
 
@@ -1385,13 +1454,13 @@ private:
 	gpu_upload_job _texture_upload;
 	fastgltf::Asset _asset;
 	std::vector<uint8_t> _meshes_usage; // Could be a dynamic bitset
-	std::vector<uint8_t> _images_usage; // Could be a dynamic bitset
+	std::vector<image_usage> _images_usage;
 	std::vector<texture_usage> _textures_usage;
 	std::vector<uint8_t> _materials_usage; // Could be a dynamic bitset
 	std::vector<mesh_data> _parsed_meshes;
 	std::vector<mesh_upload_data> _mesh_upload_data;
 	std::vector<data_source> _buffers;
-	std::vector<sdl::raii::Surface> _images;
+	std::vector<loaded_image> _images;
 	std::vector<renderer::BindlessTexture> _textures;
 	std::vector<material> _materials;
 	std::vector<mesh> _meshes;

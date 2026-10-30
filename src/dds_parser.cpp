@@ -240,19 +240,25 @@ static auto cast_file( std::span<const std::byte> bytes )
 #endif
 }
 
-static constexpr renderer::Texture::Format to_renderer_format( dds::details::format format )
+static constexpr renderer::Texture::Format to_renderer_format( dds::details::format format, bool sRGB )
 {
 	switch ( format )
 	{
+		case dds::details::format::BC7_TYPELESS:
+			return sRGB ? renderer::Texture::Format::BC7_SRGB : renderer::Texture::Format::BC7_UNORM;
 		case dds::details::format::BC7_UNORM:
+			if ( sRGB )
+				throw renderer::Error( "DDS texture is linear but used as sRGB" );
 			return renderer::Texture::Format::BC7_UNORM;
 		case dds::details::format::BC7_UNORM_SRGB:
+			if ( !sRGB )
+				throw renderer::Error( "DDS texture is sRGB but used as linear" );
 			return renderer::Texture::Format::BC7_SRGB;
 	}
 	return renderer::Texture::Format::UNDEFINED;
 }
 
-DDSFile::DDSFile( std::span<const std::byte> bytes )
+DDSFile::DDSFile( std::span<const std::byte> bytes, bool sRGB )
 	: _bytes( bytes )
 {
 	if ( std::bit_cast<uintptr_t>( _bytes.data() ) % alignof( dds::details::file_dxt10 ) != 0 )
@@ -273,7 +279,7 @@ DDSFile::DDSFile( std::span<const std::byte> bytes )
 		 || std::string_view( file->header.spf.fourCC ) != "DX10"sv )
 		throw renderer::Error( "Buffer is not a DXT10 DDS file (legacy DDS is unsupported)" );
 
-	_desc.format = to_renderer_format( file->header_dxt10.dxgiFormat );
+	_desc.format = to_renderer_format( file->header_dxt10.dxgiFormat, sRGB );
 	if ( _desc.format == renderer::Texture::Format::UNDEFINED )
 		throw renderer::Error( "Unsupported texture format" );
 
