@@ -9,6 +9,19 @@
 #include <renderer/details/profiler.h>
 #include <renderer/device.h>
 
+struct SceneRenderer::draw_meshes_constants
+{
+	renderer::BufferHandle frame_constants;
+	renderer::BufferHandle pass_constants;
+	renderer::BufferHandle draws_buffer;
+	renderer::BufferHandle commands_buffer;
+	// Task shader only
+	renderer::BufferHandle meshlet_visibility;
+	renderer::BindlessSampledTexture depth_pyramid;
+	uint32_t meshlet_pass = 0;
+	uint32_t draw_bin = 0;
+};
+
 namespace
 {
 	uint32_t calc_group_count( uint32_t count )
@@ -30,18 +43,6 @@ namespace
 	renderer::Pipeline::CullMode bucket_cull_mode( int index_in_pair )
 	{
 		return index_in_pair == 0 ? renderer::Pipeline::CullMode::BACK : renderer::Pipeline::CullMode::NONE;
-	}
-
-	// Pipeline and first bucket of a bucket pair, for the passes that write depth
-	struct depth_writing_pass
-	{
-		const char* label;
-		renderer::PipelineHandle pipeline;
-		material_type first_bucket;
-	};
-	std::array<depth_writing_pass, 2> get_opaque_passes( renderer::PipelineHandle opaque, renderer::PipelineHandle alpha_tested )
-	{
-		return { { { "Opaque", opaque, material_type::OPAQUE_SINGLE }, { "Alpha tested", alpha_tested, material_type::MASK_SINGLE } } };
 	}
 
 	static constexpr auto MAX_DRAWS = 65536;
@@ -111,19 +112,6 @@ namespace
 		using Command = typename decltype( Commands::commands )::value_type;
 		return static_cast<uint32_t>( ( commands_offset - offsetof( Commands, commands ) ) / sizeof( Command ) );
 	}
-
-	struct draw_meshes_constants
-	{
-		renderer::BufferHandle frame_constants;
-		renderer::BufferHandle pass_constants;
-		renderer::BufferHandle draws_buffer;
-		renderer::BufferHandle commands_buffer;
-		// Task shader only
-		renderer::BufferHandle meshlet_visibility;
-		renderer::BindlessSampledTexture depth_pyramid;
-		uint32_t meshlet_pass = 0;
-		uint32_t draw_bin = 0;
-	};
 
 	struct grid_constants
 	{
@@ -453,7 +441,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		{ "USE_ALPHA", "true" }
 	};
 
-	_mesh_pipeline = pipelines.add(
+	const auto mesh_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 								   .depth_format = DEPTH_FORMAT,
 								   .sample_count = _sample_count,
@@ -461,7 +449,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines },
 		  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_shaders_defines } } );
 
-	_mesh_alpha_clip_pipeline = pipelines.add(
+	const auto mesh_alpha_clip_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 								   .depth_format = DEPTH_FORMAT,
 								   .sample_count = _sample_count,
@@ -469,7 +457,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines },
 		  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_alpha_shaders_defines } } );
 
-	_mesh_alpha_blend_pipeline = pipelines.add(
+	const auto mesh_alpha_blend_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 								   .depth_format = DEPTH_FORMAT,
 								   .depth_compare_op = renderer::CompareOp::GREATER_OR_EQUAL,
@@ -479,14 +467,14 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines },
 		  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_shaders_defines } } );
 
-	_shadowmap_mesh_pipeline = pipelines.add(
+	const auto shadowmap_mesh_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .depth_format = SHADOW_DEPTH_FORMAT,
 								   .depth_compare_op = renderer::CompareOp::LESS,
 								   .depth_clamp = true,
 								   .push_constants_size = sizeof( draw_meshes_constants ) },
 		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines } } );
 
-	_shadowmap_mesh_alpha_clip_pipeline = pipelines.add(
+	const auto shadowmap_mesh_alpha_clip_pipeline = pipelines.add(
 		renderer::Pipeline::Desc { .depth_format = SHADOW_DEPTH_FORMAT,
 								   .depth_compare_op = renderer::CompareOp::LESS,
 								   .depth_clamp = true,
@@ -494,9 +482,15 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		{ { .path = "mesh.vert", .stage = renderer::ShaderStage::VERTEX, .defines = mesh_shaders_defines },
 		  { .path = "shadow_alpha_test.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_shaders_defines } } );
 
+	// Without mesh shaders, the steps keep invalid meshlet pipelines that draw_buckets() never reads
+	renderer::PipelineHandle meshlet_pipeline;
+	renderer::PipelineHandle meshlet_alpha_clip_pipeline;
+	renderer::PipelineHandle meshlet_alpha_blend_pipeline;
+	renderer::PipelineHandle shadowmap_meshlet_pipeline;
+	renderer::PipelineHandle shadowmap_meshlet_alpha_clip_pipeline;
 	if ( device.get_properties().mesh_shader_support )
 	{
-		_meshlet_pipeline = pipelines.add(
+		meshlet_pipeline = pipelines.add(
 			renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 									   .depth_format = DEPTH_FORMAT,
 									   .sample_count = _sample_count,
@@ -505,7 +499,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 			  { .path = "mesh.mesh", .stage = renderer::ShaderStage::MESH, .defines = mesh_shaders_defines },
 			  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_shaders_defines } } );
 
-		_meshlet_alpha_clip_pipeline = pipelines.add(
+		meshlet_alpha_clip_pipeline = pipelines.add(
 			renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 									   .depth_format = DEPTH_FORMAT,
 									   .sample_count = _sample_count,
@@ -514,7 +508,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 			  { .path = "mesh.mesh", .stage = renderer::ShaderStage::MESH, .defines = mesh_shaders_defines },
 			  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_alpha_shaders_defines } } );
 
-		_meshlet_alpha_blend_pipeline = pipelines.add(
+		meshlet_alpha_blend_pipeline = pipelines.add(
 			renderer::Pipeline::Desc { .color_format = COLOR_FORMAT,
 									   .depth_format = DEPTH_FORMAT,
 									   .depth_compare_op = renderer::CompareOp::GREATER_OR_EQUAL,
@@ -525,7 +519,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 			  { .path = "mesh.mesh", .stage = renderer::ShaderStage::MESH, .defines = mesh_shaders_defines },
 			  { .path = "mesh.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_shaders_defines } } );
 
-		_shadowmap_meshlet_pipeline = pipelines.add(
+		shadowmap_meshlet_pipeline = pipelines.add(
 			renderer::Pipeline::Desc { .depth_format = SHADOW_DEPTH_FORMAT,
 									   .depth_compare_op = renderer::CompareOp::LESS,
 									   .depth_clamp = true,
@@ -533,7 +527,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 			{ { .path = "mesh.task", .stage = renderer::ShaderStage::TASK, .defines = mesh_shaders_defines },
 			  { .path = "mesh.mesh", .stage = renderer::ShaderStage::MESH, .defines = mesh_shaders_defines } } );
 
-		_shadowmap_meshlet_alpha_clip_pipeline = pipelines.add(
+		shadowmap_meshlet_alpha_clip_pipeline = pipelines.add(
 			renderer::Pipeline::Desc { .depth_format = SHADOW_DEPTH_FORMAT,
 									   .depth_compare_op = renderer::CompareOp::LESS,
 									   .depth_clamp = true,
@@ -542,6 +536,32 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 			  { .path = "mesh.mesh", .stage = renderer::ShaderStage::MESH, .defines = mesh_shaders_defines },
 			  { .path = "shadow_alpha_test.frag", .stage = renderer::ShaderStage::FRAGMENT, .defines = mesh_shaders_defines } } );
 	}
+
+	_opaque_steps = { { { .label = "Opaque",
+						  .meshlet_pipeline = meshlet_pipeline,
+						  .mesh_pipeline = mesh_pipeline,
+						  .first_bucket = material_type::OPAQUE_SINGLE },
+						{ .label = "Alpha tested",
+						  .meshlet_pipeline = meshlet_alpha_clip_pipeline,
+						  .mesh_pipeline = mesh_alpha_clip_pipeline,
+						  .first_bucket = material_type::MASK_SINGLE } } };
+	_shadow_steps = { { { .label = "Opaque",
+						  .meshlet_pipeline = shadowmap_meshlet_pipeline,
+						  .mesh_pipeline = shadowmap_mesh_pipeline,
+						  .first_bucket = material_type::OPAQUE_SINGLE },
+						{ .label = "Alpha tested",
+						  .meshlet_pipeline = shadowmap_meshlet_alpha_clip_pipeline,
+						  .mesh_pipeline = shadowmap_mesh_alpha_clip_pipeline,
+						  .first_bucket = material_type::MASK_SINGLE } } };
+	_transparent_steps = { { { .label = "Clip",
+							   .meshlet_pipeline = meshlet_alpha_clip_pipeline,
+							   .mesh_pipeline = mesh_alpha_clip_pipeline,
+							   .first_bucket = material_type::ALPHA_SINGLE },
+							 { .label = "Blend",
+							   .meshlet_pipeline = meshlet_alpha_blend_pipeline,
+							   .mesh_pipeline = mesh_alpha_blend_pipeline,
+							   .first_bucket = material_type::ALPHA_SINGLE,
+							   .depth_write = false } } };
 
 	std::vector<renderer::ShaderSource::Define> compute_shader_defines;
 	compute_shader_defines.emplace_back( "LATE", "false" );
@@ -963,24 +983,14 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		const auto label = cmd.debug_label( "Transparents" );
 		const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::DRAW_TRANSPARENTS );
 		cmd.begin_rendering( { .color_target = { .target = color_target_view }, .depth_target = { .target = depth_target_view } } );
-		if ( !index_buffer )
-		{
-			draw_transparent_meshlets( bindless_manager,
-									   pipelines,
-									   cmd,
-									   frame_constants_address,
-									   pass_constants_address,
-									   draw_buffer_address );
-		}
-		else
-		{
-			draw_transparent_meshes( bindless_manager,
-									 pipelines,
-									 cmd,
-									 frame_constants_address,
-									 pass_constants_address,
-									 draw_buffer_address );
-		}
+		PROFILER_GPU_EVENT( "Draw Transparents" );
+		draw_buckets(
+			bindless_manager,
+			pipelines,
+			cmd,
+			{ .draw_commands = _draw_commands_buffer, .viewport = _extent, .use_mesh_shader = use_mesh_shader },
+			_transparent_steps,
+			{ .frame_constants = frame_constants_address, .pass_constants = pass_constants_address, .draws_buffer = draw_buffer_address } );
 		cmd.end_rendering();
 	}
 
@@ -1160,145 +1170,82 @@ void SceneRenderer::draw_opaques( const BindlessManager& bindless_manager,
 								  bool use_mesh_shader,
 								  MeshletPass meshlet_pass ) const
 {
+	PROFILER_GPU_EVENT( "Draw Opaques" );
 	const auto label = cmd.debug_label( "Draw" );
-
-	if ( use_mesh_shader )
-	{
-		draw_opaque_meshlets( bindless_manager,
-							  pipelines,
-							  cmd,
-							  frame_constants_address,
-							  pass_constants_address,
-							  draw_buffer_address,
-							  meshlet_pass );
-	}
-	else
-	{
-		draw_opaque_meshes( bindless_manager, pipelines, cmd, frame_constants_address, pass_constants_address, draw_buffer_address );
-	}
+	draw_buckets( bindless_manager,
+				  pipelines,
+				  cmd,
+				  { .draw_commands = _draw_commands_buffer, .viewport = _extent, .use_mesh_shader = use_mesh_shader, .lod_labels = true },
+				  _opaque_steps,
+				  { .frame_constants = frame_constants_address,
+					.pass_constants = pass_constants_address,
+					.draws_buffer = draw_buffer_address,
+					.meshlet_visibility = _meshlet_visibility_buffer.get_device_address(),
+					.depth_pyramid = _depth_pyramid.handles.sampled_texture,
+					.meshlet_pass = std::to_underlying( meshlet_pass ) } );
 }
 
-void SceneRenderer::draw_opaque_meshlets( const BindlessManager& bindless_manager,
-										  const renderer::PipelineManager& pipelines,
-										  renderer::CommandBuffer& cmd,
-										  renderer::BufferHandle frame_constants_address,
-										  renderer::BufferHandle pass_constants_address,
-										  renderer::BufferHandle draw_buffer_address,
-										  MeshletPass meshlet_pass ) const
+void SceneRenderer::draw_buckets( const BindlessManager& bindless_manager,
+								  const renderer::PipelineManager& pipelines,
+								  renderer::CommandBuffer& cmd,
+								  const BucketDrawPass& pass,
+								  const BucketDrawSteps& steps,
+								  draw_meshes_constants constants ) const
 {
-	PROFILER_GPU_EVENT( "Draw Meshlets" );
-	draw_meshes_constants constants { .frame_constants = frame_constants_address,
-									  .pass_constants = pass_constants_address,
-									  .draws_buffer = draw_buffer_address,
-									  .commands_buffer = _draw_commands_buffer.get_device_address(),
-									  .meshlet_visibility = _meshlet_visibility_buffer.get_device_address(),
-									  .depth_pyramid = _depth_pyramid.handles.sampled_texture,
-									  .meshlet_pass = std::to_underlying( meshlet_pass ) };
-	// Bins in order: the nearest draws fill depth before the ones they hide. A label per bin to measure their cost, the
-	// sort key is the LOD
 	static constexpr std::array<const char*, DRAW_BINS_PER_BUCKET> bin_labels { "LOD 0", "LOD 1", "LOD 2", "LOD 3",
 																				"LOD 4", "LOD 5", "LOD 6", "LOD 7" };
-	// Alpha tested last, so that more of their fragments fail the depth test before running the discarding shader
-	for ( const auto& [ pass_name, pipeline_handle, first_bucket ] : get_opaque_passes( _meshlet_pipeline, _meshlet_alpha_clip_pipeline ) )
+	for ( const auto& step : steps )
 	{
-		const auto pass_label = cmd.debug_label( pass_name );
-		const auto pipeline = pipelines.get( pipeline_handle );
+		const auto step_label = cmd.debug_label( step.label );
+		const auto& pipeline = pipelines.get( pass.use_mesh_shader ? step.meshlet_pipeline : step.mesh_pipeline );
 		cmd.bind_pipeline( pipeline, bindless_manager );
-		for ( size_t bin_in_bucket = 0; bin_in_bucket < DRAW_BINS_PER_BUCKET; ++bin_in_bucket )
+		const auto set_dynamic_state = [ & ]( int index_in_pair )
 		{
-			const auto bin_label = cmd.debug_label( bin_labels[ bin_in_bucket ] );
-			for ( int i = 0; i < 2; ++i )
+			cmd.set_dynamic_state( { .viewport = pass.viewport,
+									 .cull_mode = bucket_cull_mode( index_in_pair ),
+									 .depth_write = step.depth_write,
+									 .depth_bias_constant = pass.depth_bias_constant,
+									 .depth_bias_slope = pass.depth_bias_slope } );
+		};
+
+		if ( pass.use_mesh_shader )
+		{
+			constants.commands_buffer = pass.draw_commands.get_device_address();
+			const auto draw_lod = [ & ]( size_t bin_in_bucket )
 			{
-				const auto bin = calc_draw_bin( std::to_underlying( first_bucket ) + i, bin_in_bucket );
-				cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ) } );
-				constants.draw_bin = static_cast<uint32_t>( bin );
-				cmd.push_constants( pipeline, constants );
-				draw_bin( cmd, _draw_commands_buffer, bin );
+				for ( int i = 0; i < 2; ++i )
+				{
+					const auto bin = calc_draw_bin( std::to_underlying( step.first_bucket ) + i, bin_in_bucket );
+					set_dynamic_state( i );
+					constants.draw_bin = static_cast<uint32_t>( bin );
+					cmd.push_constants( pipeline, constants );
+					draw_bin( cmd, pass.draw_commands, bin );
+				}
+			};
+			// Bins in order: the nearest draws fill depth before the ones they hide, the sort key is the LOD
+			for ( size_t bin_in_bucket = 0; bin_in_bucket < DRAW_BINS_PER_BUCKET; ++bin_in_bucket )
+			{
+				if ( pass.lod_labels )
+				{
+					const auto bin_label = cmd.debug_label( bin_labels[ bin_in_bucket ] );
+					draw_lod( bin_in_bucket );
+				}
+				else
+				{
+					draw_lod( bin_in_bucket );
+				}
 			}
 		}
-	}
-}
-
-void SceneRenderer::draw_opaque_meshes( const BindlessManager& bindless_manager,
-										const renderer::PipelineManager& pipelines,
-										renderer::CommandBuffer& cmd,
-										renderer::BufferHandle frame_constants_address,
-										renderer::BufferHandle pass_constants_address,
-										renderer::BufferHandle draw_buffer_address ) const
-{
-	PROFILER_GPU_EVENT( "Draw Meshes" );
-	draw_meshes_constants constants { .frame_constants = frame_constants_address,
-									  .pass_constants = pass_constants_address,
-									  .draws_buffer = draw_buffer_address };
-	for ( const auto& [ pass_name, pipeline_handle, first_bucket ] : get_opaque_passes( _mesh_pipeline, _mesh_alpha_clip_pipeline ) )
-	{
-		const auto pass_label = cmd.debug_label( pass_name );
-		const auto pipeline = pipelines.get( pipeline_handle );
-		cmd.bind_pipeline( pipeline, bindless_manager );
-		for ( int i = 0; i < 2; ++i )
-		{
-			const auto bucket = std::to_underlying( first_bucket ) + i;
-			cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ) } );
-			constants.commands_buffer = _draw_commands_buffer.get_device_address() + _draw_mesh_segments[ bucket ].commands_offset;
-			cmd.push_constants( pipeline, constants );
-			draw_bucket( cmd, _draw_commands_buffer, bucket );
-		}
-	}
-}
-
-void SceneRenderer::draw_transparent_meshlets( const BindlessManager& bindless_manager,
-											   const renderer::PipelineManager& pipelines,
-											   renderer::CommandBuffer& cmd,
-											   renderer::BufferHandle frame_constants_address,
-											   renderer::BufferHandle pass_constants_address,
-											   renderer::BufferHandle draw_buffer_address ) const
-{
-	PROFILER_GPU_EVENT( "Draw Transparent Meshlets" );
-	draw_meshes_constants constants { .frame_constants = frame_constants_address,
-									  .pass_constants = pass_constants_address,
-									  .draws_buffer = draw_buffer_address,
-									  .commands_buffer = _draw_commands_buffer.get_device_address() };
-	for ( int pass = 0; pass < 2; ++pass )
-	{
-		const auto pipeline = pipelines.get( pass == 0 ? _meshlet_alpha_clip_pipeline : _meshlet_alpha_blend_pipeline );
-		cmd.bind_pipeline( pipeline, bindless_manager );
-		for ( size_t bin_in_bucket = 0; bin_in_bucket < DRAW_BINS_PER_BUCKET; ++bin_in_bucket )
+		else
 		{
 			for ( int i = 0; i < 2; ++i )
 			{
-				const auto bin = calc_draw_bin( std::to_underlying( material_type::ALPHA_SINGLE ) + i, bin_in_bucket );
-				cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ), .depth_write = pass == 0 } );
-				constants.draw_bin = static_cast<uint32_t>( bin );
+				const auto bucket = std::to_underlying( step.first_bucket ) + i;
+				set_dynamic_state( i );
+				constants.commands_buffer = pass.draw_commands.get_device_address() + _draw_mesh_segments[ bucket ].commands_offset;
 				cmd.push_constants( pipeline, constants );
-				draw_bin( cmd, _draw_commands_buffer, bin );
+				draw_bucket( cmd, pass.draw_commands, bucket );
 			}
-		}
-	}
-}
-
-void SceneRenderer::draw_transparent_meshes( const BindlessManager& bindless_manager,
-											 const renderer::PipelineManager& pipelines,
-											 renderer::CommandBuffer& cmd,
-											 renderer::BufferHandle frame_constants_address,
-											 renderer::BufferHandle pass_constants_address,
-											 renderer::BufferHandle draw_buffer_address ) const
-{
-	PROFILER_GPU_EVENT( "Draw Transparent Meshes" );
-	draw_meshes_constants constants { .frame_constants = frame_constants_address,
-									  .pass_constants = pass_constants_address,
-									  .draws_buffer = draw_buffer_address };
-	for ( int pass = 0; pass < 2; ++pass )
-	{
-		const auto pipeline = pipelines.get( pass == 0 ? _mesh_alpha_clip_pipeline : _mesh_alpha_blend_pipeline );
-		cmd.bind_pipeline( pipeline, bindless_manager );
-
-		for ( int i = 0; i < 2; ++i )
-		{
-			const auto bucket = std::to_underlying( material_type::ALPHA_SINGLE ) + i;
-			cmd.set_dynamic_state( { .viewport = _extent, .cull_mode = bucket_cull_mode( i ), .depth_write = pass == 0 } );
-			constants.commands_buffer = _draw_commands_buffer.get_device_address() + _draw_mesh_segments[ bucket ].commands_offset;
-			cmd.push_constants( pipeline, constants );
-			draw_bucket( cmd, _draw_commands_buffer, bucket );
 		}
 	}
 }
@@ -1424,57 +1371,24 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 	const auto label = cmd.debug_label( "Draw" );
 	const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::DRAW_SHADOWS );
 	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
-	const auto passes = use_mesh_shader ? get_opaque_passes( _shadowmap_meshlet_pipeline, _shadowmap_meshlet_alpha_clip_pipeline )
-										: get_opaque_passes( _shadowmap_mesh_pipeline, _shadowmap_mesh_alpha_clip_pipeline );
-
 	static constexpr std::array<const char*, SHADOW_CASCADE_MAX> cascade_labels { "Cascade 0", "Cascade 1", "Cascade 2", "Cascade 3" };
 	for ( size_t cascade = 0; cascade < cascades.count; ++cascade )
 	{
 		const auto cascade_label = cmd.debug_label( cascade_labels[ cascade ] );
 		const auto& draw_commands = cascades_draw_commands[ cascade ];
 		cmd.begin_rendering( { .depth_target = { .target = _shadowmap_layer_views[ cascade ], .clear_value = { { 1.f } } } } );
-		draw_meshes_constants draw_constants { .frame_constants = frame_constants_address,
-											   .pass_constants = calc_pass_constants_address( cascade ),
-											   .draws_buffer = draw_buffer_address,
-											   .commands_buffer = draw_commands.get_device_address() };
-		const auto set_dynamic_state = [ & ]( int index_in_pair )
-		{
-			cmd.set_dynamic_state( { .viewport = _shadowmap.texture.get_extent(),
-									 .cull_mode = bucket_cull_mode( index_in_pair ),
-									 .depth_bias_constant = SHADOW_DEPTH_BIAS_CONSTANT,
-									 .depth_bias_slope = SHADOW_DEPTH_BIAS_SLOPE } );
-		};
-		for ( const auto& [ pass_name, pipeline_handle, first_bucket ] : passes )
-		{
-			const auto pass_label = cmd.debug_label( pass_name );
-			const auto& pipeline = pipelines.get( pipeline_handle );
-			cmd.bind_pipeline( pipeline, bindless_manager );
-			if ( use_mesh_shader )
-			{
-				for ( size_t bin_in_bucket = 0; bin_in_bucket < DRAW_BINS_PER_BUCKET; ++bin_in_bucket )
-				{
-					for ( int i = 0; i < 2; ++i )
-					{
-						const auto bin = calc_draw_bin( std::to_underlying( first_bucket ) + i, bin_in_bucket );
-						set_dynamic_state( i );
-						draw_constants.draw_bin = static_cast<uint32_t>( bin );
-						cmd.push_constants( pipeline, draw_constants );
-						draw_bin( cmd, draw_commands, bin );
-					}
-				}
-			}
-			else
-			{
-				for ( int i = 0; i < 2; ++i )
-				{
-					const auto bucket = std::to_underlying( first_bucket ) + i;
-					set_dynamic_state( i );
-					draw_constants.commands_buffer = draw_commands.get_device_address() + _draw_mesh_segments[ bucket ].commands_offset;
-					cmd.push_constants( pipeline, draw_constants );
-					draw_bucket( cmd, draw_commands, bucket );
-				}
-			}
-		}
+		draw_buckets( bindless_manager,
+					  pipelines,
+					  cmd,
+					  { .draw_commands = draw_commands,
+						.viewport = _shadowmap.texture.get_extent(),
+						.depth_bias_constant = SHADOW_DEPTH_BIAS_CONSTANT,
+						.depth_bias_slope = SHADOW_DEPTH_BIAS_SLOPE,
+						.use_mesh_shader = use_mesh_shader },
+					  _shadow_steps,
+					  { .frame_constants = frame_constants_address,
+						.pass_constants = calc_pass_constants_address( cascade ),
+						.draws_buffer = draw_buffer_address } );
 		cmd.end_rendering();
 	}
 	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::DEPTH_ATTACHMENT, renderer::ResourceState::FRAGMENT_SHADER_READ );

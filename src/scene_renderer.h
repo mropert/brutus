@@ -146,32 +146,35 @@ private:
 					   renderer::BufferHandle draw_buffer_address,
 					   bool use_mesh_shader,
 					   MeshletPass meshlet_pass ) const;
-	void draw_opaque_meshlets( const BindlessManager& bindless_manager,
-							   const renderer::PipelineManager& pipelines,
-							   renderer::CommandBuffer& cmd,
-							   renderer::BufferHandle frame_constants_address,
-							   renderer::BufferHandle pass_constants_address,
-							   renderer::BufferHandle draw_buffer_address,
-							   MeshletPass meshlet_pass ) const;
-	void draw_opaque_meshes( const BindlessManager& bindless_manager,
-							 const renderer::PipelineManager& pipelines,
-							 renderer::CommandBuffer& cmd,
-							 renderer::BufferHandle frame_constants_address,
-							 renderer::BufferHandle pass_constants_address,
-							 renderer::BufferHandle draw_buffer_address ) const;
+	struct draw_meshes_constants; // Push constants of the mesh pipelines, defined in scene_renderer.cpp
 
-	void draw_transparent_meshlets( const BindlessManager& bindless_manager,
-									const renderer::PipelineManager& pipelines,
-									renderer::CommandBuffer& cmd,
-									renderer::BufferHandle frame_constants_address,
-									renderer::BufferHandle pass_constants_address,
-									renderer::BufferHandle draw_buffer_address ) const;
-	void draw_transparent_meshes( const BindlessManager& bindless_manager,
-								  const renderer::PipelineManager& pipelines,
-								  renderer::CommandBuffer& cmd,
-								  renderer::BufferHandle frame_constants_address,
-								  renderer::BufferHandle pass_constants_address,
-								  renderer::BufferHandle draw_buffer_address ) const;
+	// A pipeline bind, then the draws of a bucket pair (single sided, then double sided)
+	struct BucketDrawStep
+	{
+		const char* label;
+		renderer::PipelineHandle meshlet_pipeline;
+		renderer::PipelineHandle mesh_pipeline;
+		material_type first_bucket;
+		bool depth_write = true;
+	};
+	using BucketDrawSteps = std::array<BucketDrawStep, 2>;
+	// State shared by the steps of a pass
+	struct BucketDrawPass
+	{
+		const renderer::Buffer& draw_commands;
+		renderer::Extent2D viewport;
+		float depth_bias_constant = 0.f;
+		float depth_bias_slope = 0.f;
+		bool use_mesh_shader = true;
+		bool lod_labels = false; // A debug label per LOD bin, mesh shader path only
+	};
+	// Fills in the commands buffer and the bin of the constants
+	void draw_buckets( const BindlessManager& bindless_manager,
+					   const renderer::PipelineManager& pipelines,
+					   renderer::CommandBuffer& cmd,
+					   const BucketDrawPass& pass,
+					   const BucketDrawSteps& steps,
+					   draw_meshes_constants constants ) const;
 
 	struct ShadowCascades
 	{
@@ -235,16 +238,11 @@ private:
 	std::array<renderer::raii::Buffer, SHADOW_CASCADE_MAX> _shadowmap_draw_commands_buffers; // One per cascade
 	renderer::raii::Buffer _draw_statistics_buffer; // GPU only, accumulated by culling
 	std::array<renderer::raii::Buffer, renderer::MAX_FRAMES_IN_FLIGHT> _draw_statistics_readback_buffers;
-	renderer::PipelineHandle _mesh_pipeline;
-	renderer::PipelineHandle _mesh_alpha_clip_pipeline;
-	renderer::PipelineHandle _mesh_alpha_blend_pipeline;
-	renderer::PipelineHandle _shadowmap_mesh_pipeline;
-	renderer::PipelineHandle _shadowmap_mesh_alpha_clip_pipeline;
-	renderer::PipelineHandle _meshlet_pipeline;
-	renderer::PipelineHandle _meshlet_alpha_clip_pipeline;
-	renderer::PipelineHandle _meshlet_alpha_blend_pipeline;
-	renderer::PipelineHandle _shadowmap_meshlet_pipeline;
-	renderer::PipelineHandle _shadowmap_meshlet_alpha_clip_pipeline;
+	// Opaque before alpha tested, so that more of their fragments fail the depth test before running the discarding shader
+	BucketDrawSteps _opaque_steps;
+	BucketDrawSteps _shadow_steps;
+	// Alpha clipped with depth writes, then blended over it
+	BucketDrawSteps _transparent_steps;
 	renderer::PipelineHandle _compute_draws_early_pipeline;
 	renderer::PipelineHandle _compute_draws_late_pipeline;
 	renderer::PipelineHandle _compute_tasks_early_pipeline;
