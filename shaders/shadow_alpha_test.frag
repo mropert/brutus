@@ -19,12 +19,12 @@ layout( std430, set = 1, binding = 1 ) readonly buffer ssbo2
 
 void main()
 {
-	const uint albedo_index = materials[ inMaterial ].albedo_index;
-	if ( albedo_index == -1 )
+	float alpha = materials[ inMaterial ].baseColor.a;
+	if ( materials[ inMaterial ].albedo_index != -1 )
 	{
-		return;
+		alpha *= texture( sampler2D( textures[ materials[ inMaterial ].albedo_index ], samplers[ 0 ] ), inUV ).a;
 	}
-	const float alpha = texture( sampler2D( textures[ albedo_index ], samplers[ 0 ] ), inUV ).a * materials[ inMaterial ].baseColor.a;
+
 	if ( alpha < materials[ inMaterial ].alpha_cutoff )
 	{
 		discard;
