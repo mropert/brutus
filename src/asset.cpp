@@ -741,7 +741,7 @@ private:
 			auto res = fastgltf::GltfDataBuffer::FromPath( _path );
 			if ( res.error() != fastgltf::Error::None )
 			{
-				return;
+				throw renderer::Error( std::format( "GLTF parser error: {}", fastgltf::getErrorMessage( res.error() ) ) );
 			}
 			data = std::move( res.get() );
 		}
@@ -751,7 +751,7 @@ private:
 			auto res = parser.loadGltf( data, _path.parent_path(), fastgltf::Options::None );
 			if ( auto error = res.error(); error != fastgltf::Error::None )
 			{
-				return;
+				throw renderer::Error( std::format( "GLTF parser error: {}", fastgltf::getErrorMessage( res.error() ) ) );
 			}
 			_asset = std::move( res.get() );
 		}
