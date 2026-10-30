@@ -220,6 +220,10 @@ void main()
 			roughness = 1 - specular_glossiness.a;
 		}
 
+		// Even a perfect mirror doesn't have 0 roughness
+		// This ensures GGX doesn't degenerate to infinity at some angles
+		roughness = max( roughness, 0.045 );
+
 		const vec3 F = fresnelSchlick( HdotV, F0 );
 		const float G = GeometrySmith( N, V, L, roughness );
 		const float NDF = DistributionGGX( N, H, roughness );
