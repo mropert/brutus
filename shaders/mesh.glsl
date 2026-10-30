@@ -20,7 +20,14 @@ struct Material
 	uint workflow;
 	vec4 specular_glossiness;
 	uint specular_glossiness_index;
+	float alpha_cutoff;
 };
+
+// material_type in asset.h: pairs of single then double sided
+bool is_single_sided( uint material_type )
+{
+	return ( material_type & 1 ) == 0;
+}
 
 const uint MATERIAL_WORKFLOW_METALLIC_ROUGHNESS = 0;
 const uint MATERIAL_WORKFLOW_SPECULAR_GLOSSINESS = 1;

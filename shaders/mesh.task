@@ -90,8 +90,7 @@ bool should_draw_meshlet( uint draw_id, uint mesh_id, uint meshlet_id, bool draw
 	const vec3 cone_axis = rotate_by_quaternion( meshlet.cone.xyz, draws_buffer.mesh_draws[ draw_id ].rotation );
 
 	bool visible = true;
-	const uint type = materials[ draws_buffer.mesh_draws[ draw_id ].material ].type;
-	if ( type == 0 || type == 2 )
+	if ( is_single_sided( materials[ draws_buffer.mesh_draws[ draw_id ].material ].type ) )
 	{
 		// Uniform across the whole draw, so the branch doesn't diverge
 		const bool orthographic = pass_constants.projection_matrix[ 3 ][ 3 ] != 0.0;

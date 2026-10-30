@@ -14,6 +14,9 @@
 // MeshDrawCommand per draw for the vertex path
 
 layout( local_size_x = 32, local_size_y = 1, local_size_z = 1 ) in;
+#if DRAW_BUCKETS_COUNT > 32
+#error "DRAW_BUCKETS_COUNT must be <= local_size_x (32): one invocation per bucket computes the bins' first commands"
+#endif
 
 layout( std430, set = 1, binding = 0 ) readonly buffer ssbo1
 {

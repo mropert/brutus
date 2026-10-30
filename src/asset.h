@@ -19,10 +19,13 @@ static constexpr uint32_t TASK_GROUP_SIZE = 32; // Meshlets per task shader work
 
 int calc_mip_levels( renderer::Extent2D extent );
 
+// Also the draw buckets, in pairs: single sided first, then double sided. Matches is_single_sided() in mesh.glsl
 enum class material_type : uint32_t
 {
 	OPAQUE_SINGLE = 0,
 	OPAQUE_DOUBLE,
+	MASK_SINGLE, // Alpha tested
+	MASK_DOUBLE,
 	ALPHA_SINGLE,
 	ALPHA_DOUBLE,
 	COUNT
@@ -48,6 +51,7 @@ struct gpu_material
 	material_workflow workflow = material_workflow::METALLIC_ROUGHNESS;
 	glm::aligned_vec4 specular_glossiness; // Specular-glossiness only: xyz is the specular color, w the glossiness
 	renderer::BindlessSampledTexture specular_glossiness_texture; // Same layout, multiplies specular_glossiness
+	float alpha_cutoff; // Alpha tested and blended materials discard below it
 };
 static_assert( sizeof( gpu_material ) == 80 );
 

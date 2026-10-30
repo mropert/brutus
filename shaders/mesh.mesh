@@ -81,8 +81,7 @@ void main()
 	// - Zero area triangles
 	// - Small triangles whose bounding box doesn't contain any sample position on one axis. Standard sample locations for
 	//   1, 2, 4 and 8 samples project to (k + 0.5) / sample_count on each axis
-	const uint material_type = materials[ draws_buffer.mesh_draws[ draw_id ].material ].type;
-	const bool single_sided = material_type == 0 || material_type == 2;
+	const bool single_sided = is_single_sided( materials[ draws_buffer.mesh_draws[ draw_id ].material ].type );
 	const float sample_grid = float( pass_constants.sample_count );
 
 	for ( uint i = gl_LocalInvocationIndex; i < meshlet.triangle_count; i += gl_WorkGroupSize.x )

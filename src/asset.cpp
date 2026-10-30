@@ -1388,13 +1388,19 @@ private:
 				{
 
 					case fastgltf::AlphaMode::Opaque:
-					case fastgltf::AlphaMode::Mask: // TODO: proper Mask support
 						material.gpu_data.type = _asset.materials[ i ].doubleSided ? material_type::OPAQUE_DOUBLE
 																				   : material_type::OPAQUE_SINGLE;
+						break;
+					case fastgltf::AlphaMode::Mask:
+						material.gpu_data.type = _asset.materials[ i ].doubleSided ? material_type::MASK_DOUBLE
+																				   : material_type::MASK_SINGLE;
+						material.gpu_data.alpha_cutoff = _asset.materials[ i ].alphaCutoff;
 						break;
 					case fastgltf::AlphaMode::Blend:
 						material.gpu_data.type = _asset.materials[ i ].doubleSided ? material_type::ALPHA_DOUBLE
 																				   : material_type::ALPHA_SINGLE;
+						// glTF ignores alphaCutoff when blending, this is the depth writing pass's own threshold
+						material.gpu_data.alpha_cutoff = 0.5f;
 						break;
 					default:
 						throw renderer::Error( "Unsupported material alpha mode" );

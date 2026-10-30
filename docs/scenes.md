@@ -42,6 +42,10 @@ Bistro. Shared rules and measurement setup: [working_process.md](working_process
   also resolves MSAA, so it runs without the grid: its "Grid draw" timing is then the resolve alone.
 - **One primitive per mesh**: the loader throws otherwise, and a mesh carries its material. No file we load shares
   vertex data between meshes or primitives.
+- **Alpha modes**: one draw bucket pair (single, double sided) per glTF alpha mode. `MASK` draws after the opaque
+  buckets in the early and late passes and in the shadow cascades, with pipelines that discard below the material's
+  `alphaCutoff` (Bistro sets none, so glTF's default 0.5). Masked geometry thus feeds the depth
+  pyramid and is occlusion culled like opaque. `BLEND` stays in the transparent pass and casts no shadow.
 
 ## Bistro
 
@@ -112,3 +116,8 @@ Bistro. Shared rules and measurement setup: [working_process.md](working_process
   mip size is a multiple of 16.
 - **Zero-size blits are legal**: generating mips with `extent >> mip` gave 1×0 last mips on non-square textures,
   the blits wrote nothing and the validation layers stayed silent.
+- **Alpha test cost** (Release, Nsight, 5 frames, `scratch/mask/`): Bistro's 20 `MASK` materials (foliage, chains,
+  signs) were drawn as opaque quads. Testing them is flat at the startup camera (Opaque Early draw 1.41 → 1.29 ms,
+  shadows 0.31 → 0.32 ms) and costs ~0.15 ms of Opaque Early and 0.03 ms of shadows in a close-up of a planter
+  (`-12.28, 1.52, 18.41`, pitch -0.176, yaw 0.751). Both builds show a recurring ~0.3 ms spike on the last bin of the
+  early pass in some frames, not investigated.

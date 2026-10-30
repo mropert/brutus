@@ -22,7 +22,7 @@ STAGES = (".comp", ".vert", ".frag", ".mesh", ".task")
 DEFINES = {
     "MESH_LOD_COUNT": ["8"],
     "TASK_GROUP_SIZE": ["32"],
-    "DRAW_BUCKETS_COUNT": ["4"],
+    "DRAW_BUCKETS_COUNT": ["6"],
     "DRAW_BINS_PER_BUCKET": ["8"],
     "LATE": ["false", "true"],
     "TASK_COMMANDS": ["0", "1"],

@@ -144,7 +144,7 @@ void main()
 
 	const vec4 albedo = texture( sampler2D( textures[ materials[ inMaterial ].albedo_index ], samplers[ 0 ] ), inUV )
 		* materials[ inMaterial ].baseColor;
-	if ( USE_ALPHA && albedo.a < 0.5 )
+	if ( USE_ALPHA && albedo.a < materials[ inMaterial ].alpha_cutoff )
 	{
 		discard;
 	}

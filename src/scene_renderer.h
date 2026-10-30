@@ -239,10 +239,12 @@ private:
 	renderer::PipelineHandle _mesh_alpha_clip_pipeline;
 	renderer::PipelineHandle _mesh_alpha_blend_pipeline;
 	renderer::PipelineHandle _shadowmap_mesh_pipeline;
+	renderer::PipelineHandle _shadowmap_mesh_alpha_clip_pipeline;
 	renderer::PipelineHandle _meshlet_pipeline;
 	renderer::PipelineHandle _meshlet_alpha_clip_pipeline;
 	renderer::PipelineHandle _meshlet_alpha_blend_pipeline;
 	renderer::PipelineHandle _shadowmap_meshlet_pipeline;
+	renderer::PipelineHandle _shadowmap_meshlet_alpha_clip_pipeline;
 	renderer::PipelineHandle _compute_draws_early_pipeline;
 	renderer::PipelineHandle _compute_draws_late_pipeline;
 	renderer::PipelineHandle _compute_tasks_early_pipeline;
