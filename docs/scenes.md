@@ -19,6 +19,11 @@ Bistro. Shared rules and measurement setup: [working_process.md](working_process
 | `879e029`, `fa13bb6`, `f069349` | (user, then fixes) `DDSFile` parser: DX10 header, BC7 only, 2D without arrays or cubemaps, mip chain checked against the file size. vk-renderer `399ba27`, `1f26350`: `Desc::get_mip_size` / `get_size` for block formats (with `static_assert` tests), `get_extent( mip )` clamped to 1 (changed 14 crowd and 915 Bistro pixels: the last mips of non-square textures were never written) |
 | `644c36f` | Implicit switch fall-through is a warning (MSVC C5262 is off by default even at `/W4`) |
 | `820d852` | Textures with an `MSFT_texture_dds` image load the DDS: BC7 mip chain uploaded as is, no decoding or mip blits. The parser takes the glTF sRGB usage and throws on a contradicting format (`BC7_TYPELESS` takes it) |
+| `9fa554e` | `MASK` materials get their own bucket pair, alpha tested in the early and late opaque passes and in the shadow cascades (new `shadow_alpha_test.frag`), cutoff from the material's `alphaCutoff`. Bistro's foliage, chains and signs are cut out instead of opaque quads |
+| `f35abbb` | One `draw_buckets` for every mesh pass: per pass a table of steps (label, meshlet and vertex pipelines, first bucket of the pair, depth writes) and a pass state (commands buffer, viewport, depth bias, LOD labels). Images and GPU times unchanged |
+| `c06f907` | (user) Specular-glossiness shading: F0 is the specular color, diffuse scaled by `1 - max( specular )`, roughness `1 - glossiness`, factors times the optional texture. Crowd unchanged |
+| `125d1e1` | (user) Roughness floor of 0.045 for both workflows (0.03% of Bistro pixels changed, crowd identical) |
+| `6f6dad2` | (user) A missing albedo texture means the base color alone, in `mesh.frag` and `shadow_alpha_test.frag` (normals were shown before). Bistro's untextured glass turns from normal colors to opaque base color, crowd identical |
 
 ## Current state
 
@@ -46,6 +51,14 @@ Bistro. Shared rules and measurement setup: [working_process.md](working_process
   buckets in the early and late passes and in the shadow cascades, with pipelines that discard below the material's
   `alphaCutoff` (Bistro sets none, so glTF's default 0.5). Masked geometry thus feeds the depth
   pyramid and is occlusion culled like opaque. `BLEND` stays in the transparent pass and casts no shadow.
+- **Draw buckets**: `material_type` is also the bucket index, in pairs (single sided, then double sided: shaders test
+  `is_single_sided()`). Each pass draws a `BucketDrawSteps` table through `draw_buckets`: main pass opaque then alpha
+  tested, shadows the same with depth-only pipelines, transparents clip (depth writes) then blend. Constants are pushed
+  after every pipeline bind: vk-renderer's push constant ranges use each pipeline's own stages, so layouts with and
+  without a fragment shader aren't compatible for push constants.
+- **Shading workflows**: metallic-roughness (with `KHR_materials_specular`'s factor texture) and specular-glossiness
+  share the Cook-Torrance BRDF and the hemisphere ambient, the branch only picks diffuse, F0 and roughness.
+  Roughness is clamped to 0.045. The ambient is a sky/ground gradient: smooth surfaces reflect it as a flat sheet.
 
 ## Bistro
 
@@ -67,21 +80,30 @@ Bistro. Shared rules and measurement setup: [working_process.md](working_process
   | Opaque Early draw | 1.24 ms | 1.11 ms |
 
   The frame is ~1 level (/255) darker on average, up to 85 on single pixels. The largest changes are distant: darker
-  far foliage and ivy, more saturated string-light bulbs. Probably the offline mips versus our blit mips rather than
-  BC7, not verified (compare with mip 0 forced).
+  far foliage and ivy, more saturated string-light bulbs. With mip 0 forced, PNG and DDS frames match except 5,395
+  pixels: the foliage difference is the offline mips versus our blit mips, the bulbs are SDL_image's greyscale bug
+  (see Key findings).
 - **Camera**: pitch -1.83°, roll -2.05° (dropped), yfov 0.628 (36°). The roll looks accidental (hand placed in a DCC
   tool), game cameras stay level.
 - **Sun**: `KHR_lights_punctual` directional, 6830 lux, elevation 68.5°, azimuth ~130°.
-- **Materials** (next): 234 use `KHR_materials_pbrSpecularGlossiness` (`*_diff.png` diffuse, `*_spec.png`
-  specular-glossiness, factors), 18 `KHR_materials_transmission`, 2 none. fastgltf 0.9.0 compiled
+- **Materials**: 234 use `KHR_materials_pbrSpecularGlossiness` (`*_diff.png` diffuse, `*_spec.png`
+  specular-glossiness, factors), 18 `KHR_materials_transmission` (not shaded), 2 none. 125 of the specular-glossiness
+  materials have no texture, only factors (concrete, roofing, brick, painted wood, curtains, decals). 20 are `MASK`
+  (foliage, chains, signs, forge windows, manhole cover), 3 `BLEND` (decals), none sets `alphaCutoff`. fastgltf 0.9.0 compiled
   specular-glossiness out (`FASTGLTF_ENABLE_DEPRECATED_EXT`, off in vcpkg); 0.9.1 (2026-09-27) always has it, after
   the user's report. `vcpkg.json` pins fastgltf to 0.9.1 with an `overrides` entry, ahead of our baseline: drop it
   when the baseline moves past it.
 
 ## Plan
 
-- **Bistro materials**: a specular-glossiness shading path (parsing is done). Check what Lumberyard's `_spec` textures
-  hold first.
+- **Environment lighting**: a cubemap or prefiltered environment instead of the sky/ground gradient, so that glossy
+  materials (Miku, smooth Bistro surfaces) reflect something other than a flat sheet.
+- **Foliage at a distance**: alpha tested coverage shrinks with each mip (averaged alpha against a fixed cutoff).
+  Alpha-to-coverage (we have MSAA) or coverage-preserving mips.
+- **Shadow distance**: Bistro's views reach far past the fixed 25 m; SDSM is the chosen fix, see
+  [shadows.md](shadows.md).
+- **Transmission**: Bistro's 18 `KHR_materials_transmission` glass materials (windows, lamp glass, bottles) have no
+  albedo texture and render as opaque base color (mostly white).
 - **GPU BC7 encoder** for PNG-only assets, compared against Bistro's offline DDS files.
 - **Match a reference image** once materials work: ORCA's daytime
   [Bistro_Exterior_1](https://d29g4g2dyqv443.cloudfront.net/sites/default/files/akamai/Bistro_Exterior_1.png)
@@ -120,4 +142,20 @@ Bistro. Shared rules and measurement setup: [working_process.md](working_process
   signs) were drawn as opaque quads. Testing them is flat at the startup camera (Opaque Early draw 1.41 → 1.29 ms,
   shadows 0.31 → 0.32 ms) and costs ~0.15 ms of Opaque Early and 0.03 ms of shadows in a close-up of a planter
   (`-12.28, 1.52, 18.41`, pitch -0.176, yaw 0.751). Both builds show a recurring ~0.3 ms spike on the last bin of the
-  early pass in some frames, not investigated.
+  early pass in some frames, not investigated: in 10-frame traces the "Alpha tested" step takes 0.36 or 0.67 ms, about
+  half the frames each.
+- **Specular-glossiness was rendered as mirrors** before `c06f907`: the parser left `metalness` and `roughness` at the
+  zero of a value-initialized `gpu_material`, so every specular-glossiness material reflected the sky at roughness 0
+  (blue-grey sheen on foliage, ivy and plaster). Shading it costs ~0.03 ms of Bistro's opaque step (0.918 → 0.945 ms
+  median) with unchanged pixel shader warp occupancy, so no sign of register pressure. Check a hedge at
+  `-25.70, 1.70, 4.69`, pitch -0.134, yaw 1.295.
+- **Roughness floor**: GGX's peak is `1 / ( π r⁴ )` (the `- 1` and `+ 1` cancel at `NdotH = 1`), a delta as
+  roughness goes to 0; at exactly 0 our `DistributionGGX` gives 0 or NaN. glTF sets no minimum, 0.045 is a renderer
+  convention (Filament's value). It barely changes our images: the ambient term, not the direct highlight, makes
+  glossy surfaces look wrong. Miku has no roughness texture and constant roughness 0.23 to 0.4: her shine is the
+  asset's.
+- **SDL_image 3.4.x loads greyscale PNGs too dark**: its libpng loader builds the grey palette as
+  `i * 255 / ncolors` instead of `ncolors - 1` (1-bit white becomes 127, 8-bit 255 becomes 254), a regression from
+  SDL_image PR #578. Six Bistro PNGs are 1-bit greyscale (`textures/shared/colors/white.png` lights the bulbs); the DDS
+  path avoids it, the crowd has none (Sabrina's greyscale images have alpha, decoded correctly). The user sent the fix
+  upstream as a merge request.

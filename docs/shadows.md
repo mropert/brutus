@@ -4,8 +4,9 @@ Notes for the shadow work (cascaded shadow maps, caster culling, filtering): wha
 and the findings. Shared rules and measurement setup: [working_process.md](working_process.md). Draw commands,
 culling and LOD machinery shared with the main pass: [draw_performance.md](draw_performance.md).
 
-Status (2026-10-29): shadows are fast (~0.64 ms) and visually acceptable; SDSM and contact shadows are tabled while the
-early opaque pass is the focus.
+Status (2026-10-30): shadows are fast (~0.64 ms) and visually acceptable on the crowd, but Bistro's views reach far
+past the fixed 25 m shadow distance. SDSM (shadow range from the visible depth) is the next step; contact shadows stay
+tabled.
 
 ## Done so far
 
@@ -31,6 +32,7 @@ early opaque pass is the focus.
 | `a1cfe26` | `SceneRenderer::FOV` in radians (0.884962, 50.70°, the angle 70 "radians" gave), image unchanged (0.03% of pixels within 2/255) |
 | `a1875b4` | Shadow caster culling against each cascade's receivers (`shadow_caster_visible` in `constants.glsl`), per draw and per meshlet: shadow map 1.71 -> 0.67 ms, pixel identical |
 | `7592996` | Shadow culling batched: one commands buffer per cascade, all culling dispatches then all draws (shadow map 0.67 -> 0.62 ms) |
+| `9fa554e` | Alpha tested (`MASK`) materials cast shadows through their own bucket pair and `shadow_alpha_test.frag` (depth only, discards below the material's cutoff) |
 
 ## Current state
 
@@ -89,12 +91,17 @@ early opaque pass is the focus.
 2. **Screen-space contact shadows** for strand-scale features (bangs, collar) that no reasonable shadow map catches.
 3. Optional: per-character shadow maps for close-ups, 4096² as an "ultra" setting.
 
-SDSM plan (agreed 2026-10-27, tabled): first `--shadow-near` / `--shadow-split-lambda` options to measure quality and
-cost, then a min/max reduction of the previous frame's depth (the depth pyramid holds only early pass characters, and a
-single reduction) read back with 1-2 frames of latency. Splits from the measured range, but cascade 0 keeps starting at
-the camera so nothing new is unshadowed. In this scene only the near bound helps (the ground fills the view up to the
-shadow distance). Tighter (non sphere) fits are the bigger resolution lever, at the cost of rotation stability.
-Receiver planes could also use the measured range (fewer casters).
+SDSM plan (agreed 2026-10-27, chosen 2026-10-30 as the shadow distance fix for Bistro): first `--shadow-near` /
+`--shadow-split-lambda` options to measure quality and cost, then a min/max reduction of the previous frame's depth (the
+depth pyramid holds only early pass characters, and a single reduction) read back with 1-2 frames of latency. Splits
+from the measured range, but cascade 0 keeps starting at the camera so nothing new is unshadowed.
+- **Far bound** replaces the fixed shadow distance (capped, e.g. 150-200 m, the slider becoming the cap). The reduction
+  must skip sky pixels (infinite far depth would always win). Bistro's startup view needs well over 25 m; the crowd's
+  ground fills the view up to whatever distance is set, so there the cap decides.
+- **Near bound** moves the splits forward: at Bistro's startup camera nothing visible is closer than ~5 m, so cascades 0
+  and 1 are wasted today; the crowd's close-ups keep a small cascade 0.
+- Tighter (non sphere) fits are the bigger resolution lever, at the cost of rotation stability. Receiver planes could
+  also use the measured range (fewer casters).
 
 ### Cost
 
@@ -107,8 +114,7 @@ Receiver planes could also use the measured range (fewer casters).
 
 ### Backlog
 
-- Alpha-tested materials don't cast shadows (needs a shadow pipeline with a discarding fragment shader, matters for
-  Bistro). The second model's hair textures have 0 alpha (export bug): ~2000 invisible alpha draws are expected.
+- The second model's hair textures have 0 alpha (export bug): ~2000 invisible alpha draws are expected.
 - Fixed near cascade sizes independent of shadow distance (if wanted).
 - Possible ray traced shadows later as an optional path (no acceleration structure support in vk-renderer yet).
 
@@ -134,3 +140,16 @@ Measured against the Unity 6.3 URP reproduction at `47c6203` (setup in [benchmar
 - Most test assets are double sided: the shadow pass culls nothing by facing.
 - Normal mapped lighting needs a geometric term: a surface whose geometry faces away from the light is in its own
   shadow whatever the normal map says (the leak existed before shadow maps, they made it visible).
+- **A fixed shadow distance can't serve both scenes** (Bistro startup camera, Release, Nsight, 5 frames,
+  `scratch/shadowdist/`): at 25 m the arch interior is lit and facade ivy casts nothing, nearly everything visible is in
+  cascade 3. Raising the distance shadows them but stretches every cascade (practical split, lambda 0.75):
+
+  | Distance | Splits (m) | Shadow map | Opaque Early (low mode) |
+  | --- | --- | --- | --- |
+  | 25 | 1.9 / 4.3 / 9.4 / 25 | 0.37 ms | ~1.32-1.39 ms |
+  | 50 | 3.5 / 7.9 / 17 / 50 | 0.41 ms | ~1.50 ms |
+  | 100 | 6.7 / 15 / 32 / 100 | 0.49 ms | ~1.60 ms |
+  | 150 | 9.9 / 22 / 46 / 150 | 0.42 ms | ~1.54 ms |
+
+  Opaque Early grows because more pixels run the PCF lookup. Cascade 0 at 100 m is 3.5x wider than at 25 m, too blurry
+  for the crowd's dialogue shots. A higher lambda only shifts the guess (0.9 at 100 m: 3.0 / 7.9 / 23.5 / 100).
