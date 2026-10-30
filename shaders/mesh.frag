@@ -181,47 +181,64 @@ void main()
 		const float attenuation = frame_constants.main_light.w;
 		const vec3 radiance = vec3( 1.0, 1.0, 1.0 ) * attenuation;
 
-		// cook-torrance brdf
-		float roughness = materials[ inMaterial ].roughness;
-		float metalness = materials[ inMaterial ].metalness;
-		if ( materials[ inMaterial ].metallic_roughness_index != -1 )
+		vec3 diffuse = albedo.rgb;
+		vec3 F0;
+		float roughness;
+		if ( materials[ inMaterial ].workflow == MATERIAL_WORKFLOW_METALLIC_ROUGHNESS )
 		{
-			const vec3 metallic_roughness = texture(
-												sampler2D( textures[ materials[ inMaterial ].metallic_roughness_index ], samplers[ 0 ] ),
-												inUV )
-												.rgb;
-			metalness *= metallic_roughness.b;
-			roughness *= metallic_roughness.g;
+			// cook-torrance brdf
+			roughness = materials[ inMaterial ].roughness;
+			float metalness = materials[ inMaterial ].metalness;
+			if ( materials[ inMaterial ].metallic_roughness_index != -1 )
+			{
+				const vec3 metallic_roughness = texture( sampler2D( textures[ materials[ inMaterial ].metallic_roughness_index ],
+																	samplers[ 0 ] ),
+														 inUV )
+													.rgb;
+				metalness *= metallic_roughness.b;
+				roughness *= metallic_roughness.g;
+			}
+			float specular_factor = 1.0;
+			if ( materials[ inMaterial ].specular_index != -1 )
+			{
+				specular_factor = texture( sampler2D( textures[ materials[ inMaterial ].specular_index ], samplers[ 0 ] ), inUV ).a;
+			}
+
+			diffuse *= ( 1 - metalness );
+			F0 = mix( vec3( 0.04 ), albedo.rgb, metalness ) * specular_factor;
 		}
-		float specular_factor = 1.0;
-		if ( materials[ inMaterial ].specular_index != -1 )
+		else // MATERIAL_WORKFLOW_SPECULAR_GLOSSINESS
 		{
-			specular_factor = texture( sampler2D( textures[ materials[ inMaterial ].specular_index ], samplers[ 0 ] ), inUV ).a;
+			vec4 specular_glossiness = materials[ inMaterial ].specular_glossiness;
+			if ( materials[ inMaterial ].specular_glossiness_index != -1 )
+			{
+				specular_glossiness *= texture( sampler2D( textures[ materials[ inMaterial ].specular_glossiness_index ], samplers[ 0 ] ),
+												inUV );
+			}
+			diffuse *= ( 1 - max( max( specular_glossiness.r, specular_glossiness.g ), specular_glossiness.b ) );
+			F0 = specular_glossiness.rgb;
+			roughness = 1 - specular_glossiness.a;
 		}
 
-		const float NDF = DistributionGGX( N, H, roughness );
-		const float G = GeometrySmith( N, V, L, roughness );
-		const vec3 F0 = mix( vec3( 0.04 ), albedo.rgb, metalness ) * specular_factor;
 		const vec3 F = fresnelSchlick( HdotV, F0 );
-
+		const float G = GeometrySmith( N, V, L, roughness );
+		const float NDF = DistributionGGX( N, H, roughness );
 		const vec3 numerator = NDF * G * F;
 		const float denominator = max( 4.0 * NdotV * NdotL + 1e-4, 1e-4 );
 		const vec3 specular = numerator / denominator;
 
 		// add to outgoing radiance Lo
-		const vec3 kD = ( 1 - F ) * ( 1 - metalness );
-		const vec3 Lo = ( kD * albedo.rgb / PI + specular ) * radiance * NdotL * direct_light;
+		const vec3 Lo = ( ( 1 - F ) * diffuse / PI + specular ) * radiance * NdotL * direct_light;
 
 		const vec3 R = reflect( -V, N );
 		const vec3 irradiance = hemisphere_environment( N ); // diffuse env
 		const vec3 prefiltered = hemisphere_environment( R ); // specular env
 
 		const vec3 F_amb = fresnelSchlickRoughness( NdotV, F0, roughness );
-		const vec3 kD_amb = ( 1.0 - F_amb ) * ( 1.0 - metalness );
 		const vec2 envBRDF = EnvBRDFApprox( NdotV, roughness );
-		const vec3 diffuse_ambient = irradiance * albedo.rgb;
+		const vec3 diffuse_ambient = irradiance * diffuse;
 		const vec3 specular_ambient = prefiltered * ( F0 * envBRDF.x + envBRDF.y );
-		const vec3 ambient = kD_amb * diffuse_ambient + specular_ambient; // * ao;
+		const vec3 ambient = ( 1.0 - F_amb ) * diffuse_ambient + specular_ambient; // * ao;
 
 		color = ambient + Lo;
 	}
