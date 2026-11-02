@@ -40,20 +40,24 @@ enum class material_workflow : uint32_t
 
 struct gpu_material
 {
-	glm::aligned_vec4 base_color; // Diffuse color for specular-glossiness
-	float metalness;
-	float roughness;
-	renderer::BindlessSampledTexture albedo_texture; // Diffuse texture for specular-glossiness
+	glm::aligned_vec4 base_color; // Albedo or diffuse color for specular-glossiness
+	glm::aligned_vec3 emissive;
+	glm::aligned_vec4 specular_glossiness;
+	renderer::BindlessSampledTexture albedo_texture; // Or diffuse texture for specular-glossiness
 	renderer::BindlessSampledTexture normal_texture;
 	renderer::BindlessSampledTexture metallic_roughness_texture;
+	renderer::BindlessSampledTexture occlusion_texture;
+	renderer::BindlessSampledTexture emissive_texture;
 	renderer::BindlessSampledTexture specular_texture;
+	renderer::BindlessSampledTexture specular_glossiness_texture;
+	float metallic;
+	float roughness;
+	float alpha_cutoff;
+	float occlusion_strength = 0.f;
 	material_type type;
 	material_workflow workflow = material_workflow::METALLIC_ROUGHNESS;
-	glm::aligned_vec4 specular_glossiness; // Specular-glossiness only: xyz is the specular color, w the glossiness
-	renderer::BindlessSampledTexture specular_glossiness_texture; // Same layout, multiplies specular_glossiness
-	float alpha_cutoff; // Alpha tested and blended materials discard below it
 };
-static_assert( sizeof( gpu_material ) == 80 );
+static_assert( sizeof( gpu_material ) == 112 );
 
 struct gpu_mesh_lod
 {

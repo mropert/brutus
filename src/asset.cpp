@@ -33,6 +33,21 @@ int calc_mip_levels( renderer::Extent2D extent )
 	return mips;
 }
 
+constexpr glm::vec3 make_vec3( const fastgltf::math::nvec3& vec )
+{
+	return { vec.x(), vec.y(), vec.z() };
+}
+
+constexpr glm::vec4 make_vec4( const fastgltf::math::nvec4& vec )
+{
+	return { vec.x(), vec.y(), vec.z(), vec.w() };
+}
+
+constexpr glm::vec4 make_vec4( const fastgltf::math::nvec3& vec, float w )
+{
+	return { vec.x(), vec.y(), vec.z(), w };
+}
+
 SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
 {
 	switch ( format )
@@ -733,8 +748,9 @@ private:
 	{
 		PROFILER_SCOPE();
 
-		fastgltf::Parser parser( fastgltf::Extensions::KHR_materials_specular | fastgltf::Extensions::KHR_lights_punctual
-								 | fastgltf::Extensions::KHR_materials_pbrSpecularGlossiness | fastgltf::Extensions::MSFT_texture_dds );
+		fastgltf::Parser parser( fastgltf::Extensions::KHR_lights_punctual | fastgltf::Extensions::KHR_materials_emissive_strength
+								 | fastgltf::Extensions::KHR_materials_pbrSpecularGlossiness | fastgltf::Extensions::KHR_materials_specular
+								 | fastgltf::Extensions::MSFT_texture_dds );
 		fastgltf::GltfDataBuffer data;
 		{
 			PROFILER_SCOPE_N( "gltf_read_io" );
@@ -873,7 +889,14 @@ private:
 				{
 					add_texture_usage( material.normalTexture->textureIndex, false );
 				}
-				// We ignore emissive for now
+				if ( material.occlusionTexture )
+				{
+					add_texture_usage( material.occlusionTexture->textureIndex, false );
+				}
+				if ( material.emissiveTexture )
+				{
+					add_texture_usage( material.emissiveTexture->textureIndex, true );
+				}
 			}
 		}
 
@@ -1347,13 +1370,8 @@ private:
 							.specular_glossiness_texture = _textures[ specular_glossiness->specularGlossinessTexture->textureIndex ]
 															   .handles.sampled_texture;
 					}
-					material.gpu_data.base_color = glm::vec4( specular_glossiness->diffuseFactor.x(),
-															  specular_glossiness->diffuseFactor.y(),
-															  specular_glossiness->diffuseFactor.z(),
-															  specular_glossiness->diffuseFactor.w() );
-					material.gpu_data.specular_glossiness = glm::vec4( specular_glossiness->specularFactor.x(),
-																	   specular_glossiness->specularFactor.y(),
-																	   specular_glossiness->specularFactor.z(),
+					material.gpu_data.base_color = make_vec4( specular_glossiness->diffuseFactor );
+					material.gpu_data.specular_glossiness = make_vec4( specular_glossiness->specularFactor,
 																	   specular_glossiness->glossinessFactor );
 				}
 				else
@@ -1377,13 +1395,25 @@ private:
 																	 .handles.sampled_texture;
 						}
 					}
-					material.gpu_data.base_color.x = _asset.materials[ i ].pbrData.baseColorFactor.x();
-					material.gpu_data.base_color.y = _asset.materials[ i ].pbrData.baseColorFactor.y();
-					material.gpu_data.base_color.z = _asset.materials[ i ].pbrData.baseColorFactor.z();
-					material.gpu_data.base_color.w = _asset.materials[ i ].pbrData.baseColorFactor.w();
-					material.gpu_data.metalness = _asset.materials[ i ].pbrData.metallicFactor;
+					material.gpu_data.base_color = make_vec4( _asset.materials[ i ].pbrData.baseColorFactor );
+					material.gpu_data.metallic = _asset.materials[ i ].pbrData.metallicFactor;
 					material.gpu_data.roughness = _asset.materials[ i ].pbrData.roughnessFactor;
 				}
+
+				if ( _asset.materials[ i ].occlusionTexture )
+				{
+					material.gpu_data.occlusion_strength = _asset.materials[ i ].occlusionTexture->strength;
+					material.gpu_data.occlusion_texture = _textures[ _asset.materials[ i ].occlusionTexture->textureIndex ]
+															  .handles.sampled_texture;
+				}
+
+				material.gpu_data.emissive = make_vec3( _asset.materials[ i ].emissiveFactor ) * _asset.materials[ i ].emissiveStrength;
+				if ( _asset.materials[ i ].emissiveTexture )
+				{
+					material.gpu_data.emissive_texture = _textures[ _asset.materials[ i ].emissiveTexture->textureIndex ]
+															 .handles.sampled_texture;
+				}
+
 				switch ( _asset.materials[ i ].alphaMode )
 				{
 

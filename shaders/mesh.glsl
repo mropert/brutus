@@ -9,18 +9,22 @@ struct Vertex
 
 struct Material
 {
-	vec4 baseColor;
-	float metalness;
-	float roughness;
+	vec4 base_color;
+	vec3 emissive;
+	vec4 specular_glossiness;
 	uint albedo_index;
 	uint normal_index;
 	uint metallic_roughness_index;
+	uint occlusion_index;
+	uint emissive_index;
 	uint specular_index;
+	uint specular_glossiness_index;
+	float metallic;
+	float roughness;
+	float alpha_cutoff;
+	float occlusion_strength;
 	uint type;
 	uint workflow;
-	vec4 specular_glossiness;
-	uint specular_glossiness_index;
-	float alpha_cutoff;
 };
 
 // material_type in asset.h: pairs of single then double sided

@@ -116,14 +116,14 @@ vec3 hemisphere_environment( vec3 direction )
 void main_flat()
 {
 	const vec3 albedo = texture( sampler2D( textures[ materials[ inMaterial ].albedo_index ], samplers[ 0 ] ), inUV ).xyz
-		* materials[ inMaterial ].baseColor.xyz;
+		* materials[ inMaterial ].base_color.xyz;
 	outFragColor = vec4( albedo, 1.0 );
 }
 
 void main_basic_diffuse()
 {
 	vec3 albedo = texture( sampler2D( textures[ materials[ inMaterial ].albedo_index ], samplers[ 0 ] ), inUV ).xyz
-		* materials[ inMaterial ].baseColor.xyz;
+		* materials[ inMaterial ].base_color.xyz;
 	const vec3 N = normalize( inNormal );
 	const vec3 L = normalize( frame_constants.main_light.xyz );
 	const float NdotL = max( dot( N, -L ), 0.0 );
@@ -134,7 +134,7 @@ void main_basic_diffuse()
 
 void main()
 {
-	vec4 albedo = materials[ inMaterial ].baseColor;
+	vec4 albedo = materials[ inMaterial ].base_color;
 	if ( materials[ inMaterial ].albedo_index != -1 )
 	{
 		albedo *= texture( sampler2D( textures[ materials[ inMaterial ].albedo_index ], samplers[ 0 ] ), inUV );
@@ -179,20 +179,18 @@ void main()
 
 		vec3 diffuse = albedo.rgb;
 		vec3 F0;
-		float roughness;
+		float ao, roughness;
 		if ( materials[ inMaterial ].workflow == MATERIAL_WORKFLOW_METALLIC_ROUGHNESS )
 		{
 			// cook-torrance brdf
 			roughness = materials[ inMaterial ].roughness;
-			float metalness = materials[ inMaterial ].metalness;
+			float metallic = materials[ inMaterial ].metallic;
 			if ( materials[ inMaterial ].metallic_roughness_index != -1 )
 			{
-				const vec3 metallic_roughness = texture( sampler2D( textures[ materials[ inMaterial ].metallic_roughness_index ],
-																	samplers[ 0 ] ),
-														 inUV )
-													.rgb;
-				metalness *= metallic_roughness.b;
-				roughness *= metallic_roughness.g;
+				const vec4 mra = texture( sampler2D( textures[ materials[ inMaterial ].metallic_roughness_index ], samplers[ 0 ] ), inUV );
+				ao = mra.r;
+				roughness *= mra.g;
+				metallic *= mra.b;
 			}
 			float specular_factor = 1.0;
 			if ( materials[ inMaterial ].specular_index != -1 )
@@ -200,8 +198,8 @@ void main()
 				specular_factor = texture( sampler2D( textures[ materials[ inMaterial ].specular_index ], samplers[ 0 ] ), inUV ).a;
 			}
 
-			diffuse *= ( 1 - metalness );
-			F0 = mix( vec3( 0.04 ), albedo.rgb, metalness ) * specular_factor;
+			diffuse *= ( 1 - metallic );
+			F0 = mix( vec3( 0.04 ), albedo.rgb, metallic ) * specular_factor;
 		}
 		else // MATERIAL_WORKFLOW_SPECULAR_GLOSSINESS
 		{
@@ -211,9 +209,24 @@ void main()
 				specular_glossiness *= texture( sampler2D( textures[ materials[ inMaterial ].specular_glossiness_index ], samplers[ 0 ] ),
 												inUV );
 			}
+
 			diffuse *= ( 1 - max( max( specular_glossiness.r, specular_glossiness.g ), specular_glossiness.b ) );
 			F0 = specular_glossiness.rgb;
 			roughness = 1 - specular_glossiness.a;
+		}
+
+		if ( materials[ inMaterial ].occlusion_index != -1 )
+		{
+			// Only sample texture if we haven't already in the metallic-roughness branch
+			if ( materials[ inMaterial ].occlusion_index != materials[ inMaterial ].metallic_roughness_index )
+			{
+				ao = texture( sampler2D( textures[ materials[ inMaterial ].occlusion_index ], samplers[ 0 ] ), inUV ).r;
+			}
+			ao = mix( 1.0, ao, materials[ inMaterial ].occlusion_strength );
+		}
+		else
+		{
+			ao = 1.0;
 		}
 
 		// Even a perfect mirror doesn't have 0 roughness
@@ -238,9 +251,15 @@ void main()
 		const vec2 envBRDF = EnvBRDFApprox( NdotV, roughness );
 		const vec3 diffuse_ambient = irradiance * diffuse;
 		const vec3 specular_ambient = prefiltered * ( F0 * envBRDF.x + envBRDF.y );
-		const vec3 ambient = ( 1.0 - F_amb ) * diffuse_ambient + specular_ambient; // * ao;
+		const vec3 ambient = ( ( 1.0 - F_amb ) * diffuse_ambient + specular_ambient ) * ao;
 
-		color = ambient + Lo;
+		vec3 emissive = materials[ inMaterial ].emissive;
+		if ( materials[ inMaterial ].emissive_index != -1 )
+		{
+			emissive *= texture( sampler2D( textures[ materials[ inMaterial ].emissive_index ], samplers[ 0 ] ), inUV ).rgb;
+		}
+
+		color = ambient + Lo + emissive;
 	}
 	else
 	{
