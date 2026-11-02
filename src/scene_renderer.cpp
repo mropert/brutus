@@ -872,6 +872,8 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 									 renderer::ResourceState::UNDEFINED,
 									 renderer::ResourceState::DEPTH_ATTACHMENT );
 				render_info.depth_target.resolve_target = _resolved_depth_texture.handles.view;
+				// The depth pyramid keeps the farthest depth, which is the minimum with reverse-Z
+				render_info.depth_target.resolve_mode = renderer::RenderAttachment::ResolveMode::MIN;
 			}
 
 			compute_draws( bindless_manager,
