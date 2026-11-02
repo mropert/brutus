@@ -866,7 +866,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 			const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::CULLING_EARLY );
 			cmd.texture_barrier( color_target, renderer::ResourceState::UNDEFINED, renderer::ResourceState::COLOR_ATTACHMENT );
 			cmd.texture_barrier( depth_target, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
-			if ( msaa )
+			if ( msaa && use_occlusion_culling )
 			{
 				cmd.texture_barrier( _resolved_depth_texture.texture,
 									 renderer::ResourceState::UNDEFINED,
@@ -874,6 +874,14 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 				render_info.depth_target.resolve_target = _resolved_depth_texture.handles.view;
 				// The depth pyramid keeps the farthest depth, which is the minimum with reverse-Z
 				render_info.depth_target.resolve_mode = renderer::RenderAttachment::ResolveMode::MIN;
+			}
+			if ( msaa && !use_occlusion_culling )
+			{
+				// Without occlusion culling we draw all in one pass so it needs to resolve at the end
+				cmd.texture_barrier( _resolved_color_texture.texture,
+									 renderer::ResourceState::UNDEFINED,
+									 renderer::ResourceState::COLOR_ATTACHMENT );
+				render_info.color_target.resolve_target = _resolved_color_texture.handles.view;
 			}
 
 			compute_draws( bindless_manager,
@@ -900,12 +908,13 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 					  draw_buffer_address,
 					  use_mesh_shader,
 					  meshlet_occlusion ? MeshletPass::EARLY : MeshletPass::NONE );
-		cmd.end_rendering();
+		// Do not end rendering, the later work decides if we continue on this one or not
 	}
 
 
 	if ( use_occlusion_culling )
 	{
+		cmd.end_rendering();
 		cmd.texture_barrier( _resolved_depth_texture.texture,
 							 renderer::ResourceState::DEPTH_ATTACHMENT,
 							 renderer::ResourceState::COMPUTE_SHADER_READ );
@@ -964,48 +973,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 								renderer::ResourceState::SHADER_STORAGE_READ_WRITE,
 								renderer::ResourceState::SHADER_STORAGE_READ_WRITE );
 		}
-		if ( !msaa )
-		{
-			// The depth pyramid read the depth target itself, nothing was resolved
-			cmd.texture_barrier( depth_target, renderer::ResourceState::COMPUTE_SHADER_READ, renderer::ResourceState::DEPTH_ATTACHMENT );
-		}
-		cmd.begin_rendering( { .color_target = { .target = color_target_view }, .depth_target = { .target = depth_target_view } } );
-		draw_opaques( bindless_manager,
-					  pipelines,
-					  cmd,
-					  frame_constants_address,
-					  pass_constants_address,
-					  draw_buffer_address,
-					  use_mesh_shader,
-					  meshlet_occlusion ? MeshletPass::LATE : MeshletPass::NONE );
-		cmd.end_rendering();
-	}
 
-	{
-		const auto label = cmd.debug_label( "Transparents" );
-		const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::DRAW_TRANSPARENTS );
-		cmd.begin_rendering( { .color_target = { .target = color_target_view }, .depth_target = { .target = depth_target_view } } );
-		PROFILER_GPU_EVENT( "Draw Transparents" );
-		draw_buckets(
-			bindless_manager,
-			pipelines,
-			cmd,
-			{ .draw_commands = _draw_commands_buffer, .viewport = _extent, .use_mesh_shader = use_mesh_shader },
-			_transparent_steps,
-			{ .frame_constants = frame_constants_address, .pass_constants = pass_constants_address, .draws_buffer = draw_buffer_address } );
-		cmd.end_rendering();
-	}
-
-	cmd.buffer_barrier( _draw_statistics_buffer, renderer::ResourceState::STORAGE_READ_WRITE, renderer::ResourceState::TRANSFER_SRC );
-	cmd.copy_buffer( _draw_statistics_buffer, 0, sizeof( DrawStatistics ), _draw_statistics_readback_buffers[ frame_index ] );
-	cmd.buffer_barrier( _draw_statistics_readback_buffers[ frame_index ],
-						renderer::ResourceState::TRANSFER_DST,
-						renderer::ResourceState::HOST_READ );
-
-	{
-		PROFILER_GPU_EVENT( "Draw Grid" );
-		const auto label = cmd.debug_label( "Grid" );
-		const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::DRAW_GRID );
 		renderer::RenderInfo render_info { .color_target = { .target = color_target_view },
 										   .depth_target = { .target = depth_target_view } };
 		if ( msaa )
@@ -1015,8 +983,41 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 								 renderer::ResourceState::COLOR_ATTACHMENT );
 			render_info.color_target.resolve_target = _resolved_color_texture.handles.view;
 		}
-		// The pass also resolves MSAA: it runs without the grid too
+		else
+		{
+			// The depth pyramid read the depth target itself, nothing was resolved
+			cmd.texture_barrier( depth_target, renderer::ResourceState::COMPUTE_SHADER_READ, renderer::ResourceState::DEPTH_ATTACHMENT );
+		}
 		cmd.begin_rendering( render_info );
+
+		draw_opaques( bindless_manager,
+					  pipelines,
+					  cmd,
+					  frame_constants_address,
+					  pass_constants_address,
+					  draw_buffer_address,
+					  use_mesh_shader,
+					  meshlet_occlusion ? MeshletPass::LATE : MeshletPass::NONE );
+	}
+
+	{
+		const auto label = cmd.debug_label( "Transparents" );
+		const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::DRAW_TRANSPARENTS );
+		PROFILER_GPU_EVENT( "Draw Transparents" );
+		draw_buckets(
+			bindless_manager,
+			pipelines,
+			cmd,
+			{ .draw_commands = _draw_commands_buffer, .viewport = _extent, .use_mesh_shader = use_mesh_shader },
+			_transparent_steps,
+			{ .frame_constants = frame_constants_address, .pass_constants = pass_constants_address, .draws_buffer = draw_buffer_address } );
+	}
+
+	{
+		PROFILER_GPU_EVENT( "Draw Grid" );
+		const auto label = cmd.debug_label( "Grid" );
+		const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::DRAW_GRID );
+
 		if ( show_grid )
 		{
 			cmd.set_dynamic_state( { .viewport = _extent } );
@@ -1025,8 +1026,15 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 								grid_constants { .frame_constants = frame_constants_address, .pass_constants = pass_constants_address } );
 			cmd.draw( 4 );
 		}
-		cmd.end_rendering();
 	}
+
+	cmd.end_rendering();
+
+	cmd.buffer_barrier( _draw_statistics_buffer, renderer::ResourceState::STORAGE_READ_WRITE, renderer::ResourceState::TRANSFER_SRC );
+	cmd.copy_buffer( _draw_statistics_buffer, 0, sizeof( DrawStatistics ), _draw_statistics_readback_buffers[ frame_index ] );
+	cmd.buffer_barrier( _draw_statistics_readback_buffers[ frame_index ],
+						renderer::ResourceState::TRANSFER_DST,
+						renderer::ResourceState::HOST_READ );
 
 	{
 		PROFILER_GPU_EVENT( "Tonemap" );
