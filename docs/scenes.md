@@ -24,6 +24,7 @@ Bistro. Shared rules and measurement setup: [working_process.md](working_process
 | `c06f907` | (user) Specular-glossiness shading: F0 is the specular color, diffuse scaled by `1 - max( specular )`, roughness `1 - glossiness`, factors times the optional texture. Crowd unchanged |
 | `125d1e1` | (user) Roughness floor of 0.045 for both workflows (0.03% of Bistro pixels changed, crowd identical) |
 | `6f6dad2` | (user) A missing albedo texture means the base color alone, in `mesh.frag` and `shadow_alpha_test.frag` (normals were shown before). Bistro's untextured glass turns from normal colors to opaque base color, crowd identical |
+| `20bde49` | (user) Occlusion (`mix( 1, ao, strength )` on the ambient, reusing the metallic-roughness sample when both share a texture) and emissive (`emissiveFactor * emissiveStrength * texture`, unlit, `KHR_materials_emissive_strength` enabled). Bistro's string lights and lanterns glow (0.46% of pixels), crowd identical; no asset has an occlusion texture |
 
 ## Current state
 
@@ -59,6 +60,10 @@ Bistro. Shared rules and measurement setup: [working_process.md](working_process
 - **Shading workflows**: metallic-roughness (with `KHR_materials_specular`'s factor texture) and specular-glossiness
   share the Cook-Torrance BRDF and the hemisphere ambient, the branch only picks diffuse, F0 and roughness.
   Roughness is clamped to 0.045. The ambient is a sky/ground gradient: smooth surfaces reflect it as a flat sheet.
+  Occlusion scales the ambient only, emissive is added unlit after lighting. Not applied: `normalTexture.scale`
+  (every asset leaves it at 1), `KHR_texture_transform` (unused, a file requiring it fails to load).
+- **`gpu_material` layout**: std430 on the GPU, 16-byte aligned with a 112-byte stride. `emissive` is a `vec3`: std430
+  packs a following scalar into its last 4 bytes, C++'s `aligned_vec3` doesn't, so the next member must stay a `vec4`.
 
 ## Bistro
 
@@ -118,7 +123,11 @@ Bistro. Shared rules and measurement setup: [working_process.md](working_process
   vertex buffer with their own meshlets.
 - **Day arc**: rotating about a tilted axis would make the sun rise and set, but needs below-horizon handling and a
   matching ambient.
-- **Physical sun intensity**: map lux with an exposure model.
+- **Physical sun intensity**: map lux with an exposure model. Also gives emissive values a meaning relative to the
+  sun (Bistro writes 8 to 100 straight into `emissiveFactor`, out of the core spec's [0, 1]).
+- **Bloom**: HDR emissives (string lights, lanterns) only read as glowing with it, they're flat discs without.
+- **Point lights from emissive meshes**: Bistro has no punctual lights besides the sun, its bulbs are emissive only.
+  Lighting from them only matters for a night version (clustered lights or many-light sampling).
 
 ## Key findings
 
