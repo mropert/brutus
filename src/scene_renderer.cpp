@@ -667,9 +667,7 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 	cmd->fill_buffer( _shadowmap_visibility_buffer, 0, _shadowmap_visibility_buffer.get_size(), 0x01010101 );
 	cmd->barrier( renderer::Stage::TRANSFER, renderer::Stage::ALL );
 	cmd->end();
-	const auto fence = device.create_fence();
-	device.submit( *cmd, fence );
-	device.wait_for_fences( { fence }, UINT64_MAX );
+	device.submit_and_wait( *cmd );
 }
 
 void SceneRenderer::add_mesh( const mesh& mesh, glm::vec3 translation, glm::quat rotation, glm::vec3 scale, const material& material )
