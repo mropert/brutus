@@ -1,0 +1,215 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "constants.glsl"
+#include "depth_range.glsl"
+
+// Fits the cascades to the view depth range the previous frame measured (SDSM). One thread per cascade
+layout( local_size_x = SHADOW_CASCADE_MAX, local_size_y = 1, local_size_z = 1 ) in;
+
+// The writers' side of ShadowCascades and the shadow passes' PassConstants
+layout( buffer_reference, std430 ) writeonly buffer ShadowCascadesWriter
+{
+	ShadowCascadesData data;
+};
+layout( buffer_reference, std430 ) writeonly buffer CascadesPassConstantsWriter
+{
+	PassConstantsData cascades[ SHADOW_CASCADE_MAX ];
+};
+
+layout( push_constant, std430 ) uniform block
+{
+	FrameConstants frame_constants;
+	PassConstants camera; // The main pass
+	DepthRange depth_range;
+	ShadowCascadesWriter shadow_cascades;
+	CascadesPassConstantsWriter cascades_pass_constants;
+	uint shadowmap_resolution;
+};
+
+// Cascade 0 always starts here rather than at the nearest visible depth, so that what comes closer than the previous
+// frame's range stays shadowed
+const float SHADOW_NEAR_DEPTH = 0.1;
+// Practical split scheme: blends uniform and logarithmic splits, 1 is fully logarithmic
+const float SHADOW_SPLIT_LAMBDA = 0.75;
+// How far from a receiver's position, in texels of its cascade, a shadow lookup reads: 1.5 texels of normal offset
+// and the 5x5 tent read with bilinear taps (3.5 texels), plus one of slack. See shadow.glsl
+const float SHADOW_CASTER_MARGIN_TEXELS = 6.0;
+
+vec4 normalize_plane( vec4 plane )
+{
+	return plane / length( plane.xyz );
+}
+
+// glm::lookAtRH
+mat4 look_at( vec3 eye, vec3 center, vec3 up )
+{
+	const vec3 f = normalize( center - eye );
+	const vec3 s = normalize( cross( f, up ) );
+	const vec3 u = cross( s, f );
+	return mat4( s.x, u.x, -f.x, 0.0, s.y, u.y, -f.y, 0.0, s.z, u.z, -f.z, 0.0, -dot( s, eye ), -dot( u, eye ), dot( f, eye ), 1.0 );
+}
+
+// glm::orthoRH_ZO
+mat4 ortho( float left, float right, float bottom, float top, float near, float far )
+{
+	return mat4( 2.0 / ( right - left ),
+				 0.0,
+				 0.0,
+				 0.0,
+				 0.0,
+				 2.0 / ( top - bottom ),
+				 0.0,
+				 0.0,
+				 0.0,
+				 0.0,
+				 -1.0 / ( far - near ),
+				 0.0,
+				 -( right + left ) / ( right - left ),
+				 -( top + bottom ) / ( top - bottom ),
+				 -near / ( far - near ),
+				 1.0 );
+}
+
+// World space corners of the [near_depth, far_depth] view depth slice of the camera frustum
+void calc_view_slice_corners( float near_depth, float far_depth, out vec3 corners[ 8 ] )
+{
+	const float tan_x = 1.0 / camera.data.projection_matrix[ 0 ][ 0 ];
+	const float tan_y = 1.0 / camera.data.projection_matrix[ 1 ][ 1 ];
+	int i = 0;
+	for ( int z = 0; z < 2; ++z )
+	{
+		const float d = z == 0 ? near_depth : far_depth;
+		for ( int y = -1; y <= 1; y += 2 )
+		{
+			for ( int x = -1; x <= 1; x += 2 )
+			{
+				// The camera looks down -Z
+				corners[ i++ ] = ( camera.data.inverse_view_matrix * vec4( x * tan_x * d, y * tan_y * d, -d, 1.0 ) ).xyz;
+			}
+		}
+	}
+}
+
+void main()
+{
+	const uint cascade = gl_LocalInvocationIndex;
+	const uint cascade_count = frame_constants.shadow_cascade_count;
+	if ( cascade >= cascade_count )
+	{
+		return;
+	}
+
+	// The shadow distance caps the measured range, which is all of it when the previous frame rendered nothing
+	float near_depth = SHADOW_NEAR_DEPTH;
+	float far_depth = frame_constants.shadow_distance;
+	if ( depth_range.nearest != 0 )
+	{
+		// Infinite reverse-Z projection: depth = near plane / view depth
+		const float near_plane = camera.data.projection_matrix[ 3 ][ 2 ];
+		near_depth = clamp( near_plane / uintBitsToFloat( depth_range.nearest ), SHADOW_NEAR_DEPTH, far_depth );
+		far_depth = min( near_plane / uintBitsToFloat( depth_range.farthest ), far_depth );
+	}
+	far_depth = max( far_depth, near_depth + 0.01 );
+
+	// Unused splits are far_depth
+	vec4 splits = vec4( far_depth );
+	for ( uint i = 1; i < cascade_count; ++i )
+	{
+		const float t = float( i ) / float( cascade_count );
+		const float uniform_split = near_depth + ( far_depth - near_depth ) * t;
+		const float log_split = near_depth * pow( far_depth / near_depth, t );
+		splits[ i - 1 ] = mix( uniform_split, log_split, SHADOW_SPLIT_LAMBDA );
+	}
+
+	// Bounding sphere of the cascade's view depth slice
+	const float slice_near = cascade == 0 ? SHADOW_NEAR_DEPTH : splits[ cascade - 1 ];
+	const float slice_far = splits[ cascade ];
+	vec3 corners[ 8 ];
+	calc_view_slice_corners( slice_near, slice_far, corners );
+	vec3 center = vec3( 0.0 );
+	for ( int i = 0; i < 8; ++i )
+	{
+		center += corners[ i ];
+	}
+	center /= 8.0;
+	float radius = 0.0;
+	for ( int i = 0; i < 8; ++i )
+	{
+		radius = max( radius, length( corners[ i ] - center ) );
+	}
+	radius = ceil( radius * 16.0 ) / 16.0; // Quantized so that it doesn't jitter
+
+	// Snapped to the texel grid in light space, so that the shadow doesn't swim when the camera moves
+	const vec3 light_direction = frame_constants.main_light.xyz;
+	const vec3 up = abs( light_direction.y ) > 0.99 ? vec3( 1.0, 0.0, 0.0 ) : vec3( 0.0, 1.0, 0.0 );
+	const mat4 light_rotation = look_at( vec3( 0.0 ), light_direction, up );
+	const float texel = 2.0 * radius / float( shadowmap_resolution );
+	vec3 light_space_center = ( light_rotation * vec4( center, 1.0 ) ).xyz;
+	light_space_center.xy = floor( light_space_center.xy / texel ) * texel;
+	center = ( inverse( light_rotation ) * vec4( light_space_center, 1.0 ) ).xyz;
+
+	const float back_off = radius + 10.0;
+	const vec3 eye = center - light_direction * back_off;
+	const mat4 view = look_at( eye, center, up );
+	const mat4 projection = ortho( -radius, radius, -radius, radius, 0.0, back_off + radius );
+	const mat4 view_projection = projection * view;
+	const float texel_world_size = 2.0 / ( projection[ 0 ][ 0 ] * float( shadowmap_resolution ) );
+
+	PassConstantsData constants;
+	constants.view_projection_matrix = view_projection;
+	constants.projection_matrix = projection;
+	constants.view_matrix = view;
+	constants.inverse_view_matrix = inverse( view );
+	constants.view_position = eye;
+	const mat4 transposed_view_projection = transpose( view_projection );
+	constants.frustum[ 0 ] = normalize_plane( transposed_view_projection[ 3 ] + transposed_view_projection[ 0 ] ); // x + w < 0
+	constants.frustum[ 1 ] = normalize_plane( transposed_view_projection[ 3 ] - transposed_view_projection[ 0 ] ); // x - w > 0
+	constants.frustum[ 2 ] = normalize_plane( transposed_view_projection[ 3 ] + transposed_view_projection[ 1 ] ); // y + w < 0
+	constants.frustum[ 3 ] = normalize_plane( transposed_view_projection[ 3 ] - transposed_view_projection[ 1 ] ); // y - w > 0
+	constants.frustum[ 4 ] = normalize_plane( transposed_view_projection[ 3 ]
+											  - transposed_view_projection[ 2 ] ); // far (w - z >= 0, depth <= 1)
+	constants.frustum[ 5 ] = vec4( 0.0, 0.0, 0.0, 1.0 ); // Always passes, near plane intentionally skipped
+	constants.viewport_size = vec2( shadowmap_resolution );
+	constants.sample_count = 1;
+	constants.lod_target = 2.0 * texel_world_size;
+	constants.shadow_pass = 1;
+
+	// The receivers that sample this cascade are the visible points from the start of the previous cascade's blend
+	// band (matching the cascade selection in shadow.glsl, cascade 0 also covers view depths under SHADOW_NEAR_DEPTH)
+	// to the end of its slice. Planes are pushed out by the margin, so that testing a caster's sphere also covers
+	// lookups up to the margin away from the receiver
+	float receivers_near_depth = 0.0;
+	if ( cascade > 0 )
+	{
+		const float previous_near_depth = cascade == 1 ? 0.0 : splits[ cascade - 2 ];
+		receivers_near_depth = slice_near - SHADOW_CASCADE_BLEND_RANGE * ( slice_near - previous_near_depth );
+	}
+	const float margin = texel_world_size * SHADOW_CASTER_MARGIN_TEXELS;
+	const vec3 forward = -camera.data.inverse_view_matrix[ 2 ].xyz;
+	const float camera_depth = dot( forward, camera.data.view_position );
+	for ( int i = 0; i < 4; ++i )
+	{
+		constants.shadow_receiver_planes[ i ] = camera.data.frustum[ i ] + vec4( 0.0, 0.0, 0.0, margin );
+	}
+	constants.shadow_receiver_planes[ 4 ] = vec4( forward, -( camera_depth + receivers_near_depth ) + margin );
+	constants.shadow_receiver_planes[ 5 ] = vec4( -forward, camera_depth + slice_far + margin );
+
+	const vec3 receivers_light_direction = normalize( light_direction );
+	calc_view_slice_corners( receivers_near_depth, slice_far, corners );
+	float max_light_depth = dot( corners[ 0 ], receivers_light_direction );
+	for ( int i = 1; i < 8; ++i )
+	{
+		max_light_depth = max( max_light_depth, dot( corners[ i ], receivers_light_direction ) );
+	}
+	constants.shadow_caster_sweep = vec4( receivers_light_direction, max_light_depth + margin );
+	cascades_pass_constants.cascades[ cascade ] = constants;
+
+	shadow_cascades.data.view_projection_matrices[ cascade ] = view_projection;
+	shadow_cascades.data.texel_sizes[ cascade ] = texel_world_size;
+	if ( cascade == 0 )
+	{
+		shadow_cascades.data.splits = splits;
+	}
+}

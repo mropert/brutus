@@ -49,7 +49,7 @@ layout( push_constant, std430 ) uniform block
 // Shadow passes use their own (depth-only) LOD chain, uniform for the whole draw
 MeshLOD get_mesh_lod( uint mesh_id, uint lod )
 {
-	return pass_constants.shadow_pass != 0 ? meshes[ mesh_id ].shadow_lods[ lod ] : meshes[ mesh_id ].lods[ lod ];
+	return pass_constants.data.shadow_pass != 0 ? meshes[ mesh_id ].shadow_lods[ lod ] : meshes[ mesh_id ].lods[ lod ];
 }
 
 // Each invocation's sort key, view depth or +infinity when it draws nothing
@@ -82,7 +82,7 @@ bool should_draw_meshlet( uint draw_id, uint mesh_id, uint meshlet_id, bool draw
 			* draws_buffer.mesh_draws[ draw_id ].scale
 		+ draws_buffer.mesh_draws[ draw_id ].translation;
 	// View space looks down -Z, for the orthographic shadow views too
-	view_depth = -( pass_constants.view_matrix * vec4( meshlet_center, 1 ) ).z;
+	view_depth = -( pass_constants.data.view_matrix * vec4( meshlet_center, 1 ) ).z;
 
 	const float meshlet_radius = meshlet.bounding_sphere.w
 		* max( draws_buffer.mesh_draws[ draw_id ].scale.x,
@@ -93,23 +93,23 @@ bool should_draw_meshlet( uint draw_id, uint mesh_id, uint meshlet_id, bool draw
 	if ( is_single_sided( materials[ draws_buffer.mesh_draws[ draw_id ].material ].type ) )
 	{
 		// Uniform across the whole draw, so the branch doesn't diverge
-		const bool orthographic = pass_constants.projection_matrix[ 3 ][ 3 ] != 0.0;
+		const bool orthographic = pass_constants.data.projection_matrix[ 3 ][ 3 ] != 0.0;
 		if ( orthographic )
 		{
 			// View space looks down -Z
-			const vec3 view_direction = -pass_constants.inverse_view_matrix[ 2 ].xyz;
+			const vec3 view_direction = -pass_constants.data.inverse_view_matrix[ 2 ].xyz;
 			visible = visible && !coneCullOrthographic( cone_axis, meshlet.cone.w, view_direction );
 		}
 		else
 		{
-			visible = visible && !coneCull( meshlet_center, meshlet_radius, cone_axis, meshlet.cone.w, pass_constants.view_position );
+			visible = visible && !coneCull( meshlet_center, meshlet_radius, cone_axis, meshlet.cone.w, pass_constants.data.view_position );
 		}
 	}
 	for ( int i = 0; i < 6; ++i )
 	{
-		visible = visible && dot( pass_constants.frustum[ i ], vec4( meshlet_center, 1 ) ) > -meshlet_radius;
+		visible = visible && dot( pass_constants.data.frustum[ i ], vec4( meshlet_center, 1 ) ) > -meshlet_radius;
 	}
-	if ( pass_constants.shadow_pass != 0 )
+	if ( pass_constants.data.shadow_pass != 0 )
 	{
 		visible = visible && shadow_caster_visible( pass_constants, meshlet_center, meshlet_radius );
 	}
@@ -131,15 +131,15 @@ bool should_draw_meshlet( uint draw_id, uint mesh_id, uint meshlet_id, bool draw
 			if ( visible )
 			{
 				vec4 aabb;
-				const vec3 center = ( pass_constants.view_matrix * vec4( meshlet_center, 1 ) ).xyz * vec3( 1, 1, -1 );
-				const float znear = pass_constants.projection_matrix[ 3 ][ 2 ];
+				const vec3 center = ( pass_constants.data.view_matrix * vec4( meshlet_center, 1 ) ).xyz * vec3( 1, 1, -1 );
+				const float znear = pass_constants.data.projection_matrix[ 3 ][ 2 ];
 				const uint pyramidWidth = 1024;
 				const uint pyramidHeight = 1024;
 				if ( projectSphere( center,
 									meshlet_radius,
 									znear,
-									pass_constants.projection_matrix[ 0 ][ 0 ],
-									pass_constants.projection_matrix[ 1 ][ 1 ],
+									pass_constants.data.projection_matrix[ 0 ][ 0 ],
+									pass_constants.data.projection_matrix[ 1 ][ 1 ],
 									aabb ) )
 				{
 					const float width = ( aabb.z - aabb.x ) * pyramidWidth;

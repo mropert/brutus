@@ -10,8 +10,6 @@ const float SHADOW_FADE_RANGE = 0.1;
 const float SHADOW_NORMAL_OFFSET_TEXELS = 1.5;
 // Half width of the PCF tent filter, in texels (5x5 tent)
 const float SHADOW_PCF_TENT_RADIUS = 2.5;
-// Fraction of each cascade's depth slice over which it blends into the next one
-const float SHADOW_CASCADE_BLEND_RANGE = 0.25;
 
 // Shadow maps are fitted to the view frustum, so they are selected and faded based on view depth
 float shadow_view_depth( FrameConstants constants, vec3 world_pos )
@@ -23,7 +21,7 @@ float shadow_view_depth( FrameConstants constants, vec3 world_pos )
 uint select_shadow_cascade( FrameConstants constants, float view_depth )
 {
 	uint cascade = 0;
-	while ( cascade + 1 < constants.shadow_cascade_count && view_depth > constants.shadow_cascade_splits[ cascade ] )
+	while ( cascade + 1 < constants.shadow_cascade_count && view_depth > constants.shadow_cascades.data.splits[ cascade ] )
 	{
 		++cascade;
 	}
@@ -58,8 +56,8 @@ float sample_shadow_cascade( FrameConstants constants, vec3 world_pos, vec3 norm
 	// Normal offset: move the lookup off the surface by a few texels, more at grazing angles where a texel covers
 	// a larger depth range of the receiver
 	const vec3 offset_pos = world_pos
-		+ normal * ( constants.shadow_cascade_texel_sizes[ cascade ] * SHADOW_NORMAL_OFFSET_TEXELS * sin_angle );
-	const vec4 shadow_pos = constants.shadow_view_projection_matrices[ cascade ] * vec4( offset_pos, 1.0 );
+		+ normal * ( constants.shadow_cascades.data.texel_sizes[ cascade ] * SHADOW_NORMAL_OFFSET_TEXELS * sin_angle );
+	const vec4 shadow_pos = constants.shadow_cascades.data.view_projection_matrices[ cascade ] * vec4( offset_pos, 1.0 );
 	const vec3 shadow_ndc = shadow_pos.xyz / shadow_pos.w;
 	const vec2 shadow_uv = vec2( shadow_ndc.x * 0.5 + 0.5, 0.5 - shadow_ndc.y * 0.5 );
 	if ( any( lessThan( shadow_uv, vec2( 0.0 ) ) ) || any( greaterThan( shadow_uv, vec2( 1.0 ) ) ) || shadow_ndc.z < 0.0
@@ -140,8 +138,8 @@ float compute_shadow( FrameConstants constants, vec3 world_pos, vec3 normal, vec
 	// cascade is covered by the distance fade instead
 	if ( cascade + 1 < constants.shadow_cascade_count )
 	{
-		const float cascade_far = constants.shadow_cascade_splits[ cascade ];
-		const float cascade_near = cascade == 0 ? 0.0 : constants.shadow_cascade_splits[ cascade - 1 ];
+		const float cascade_far = constants.shadow_cascades.data.splits[ cascade ];
+		const float cascade_near = cascade == 0 ? 0.0 : constants.shadow_cascades.data.splits[ cascade - 1 ];
 		const float blend_start = cascade_far - SHADOW_CASCADE_BLEND_RANGE * ( cascade_far - cascade_near );
 		const float blend = smoothstep( blend_start, cascade_far, view_depth );
 		if ( blend > 0.0 )

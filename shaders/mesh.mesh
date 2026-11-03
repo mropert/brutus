@@ -60,10 +60,10 @@ void main()
 		const vec3 pos = rotate_by_quaternion( v.position, draws_buffer.mesh_draws[ draw_id ].rotation )
 				* draws_buffer.mesh_draws[ draw_id ].scale
 			+ draws_buffer.mesh_draws[ draw_id ].translation;
-		const vec4 clip_pos = pass_constants.view_projection_matrix * vec4( pos, 1 );
+		const vec4 clip_pos = pass_constants.data.view_projection_matrix * vec4( pos, 1 );
 		gl_MeshVerticesEXT[ i ].gl_Position = clip_pos;
 		// Only meaningful for w > 0, triangles with vertices behind the camera are never culled
-		vertex_pixels[ i ] = vec3( ( clip_pos.xy / clip_pos.w * 0.5 + 0.5 ) * pass_constants.viewport_size, clip_pos.w );
+		vertex_pixels[ i ] = vec3( ( clip_pos.xy / clip_pos.w * 0.5 + 0.5 ) * pass_constants.data.viewport_size, clip_pos.w );
 		outUV[ i ].x = v.uv_x;
 		outUV[ i ].y = v.uv_y;
 		const vec3 normal = rotate_by_quaternion( v.normal, draws_buffer.mesh_draws[ draw_id ].rotation );
@@ -82,7 +82,7 @@ void main()
 	// - Small triangles whose bounding box doesn't contain any sample position on one axis. Standard sample locations for
 	//   1, 2, 4 and 8 samples project to (k + 0.5) / sample_count on each axis
 	const bool single_sided = is_single_sided( materials[ draws_buffer.mesh_draws[ draw_id ].material ].type );
-	const float sample_grid = float( pass_constants.sample_count );
+	const float sample_grid = float( pass_constants.data.sample_count );
 
 	for ( uint i = gl_LocalInvocationIndex; i < meshlet.triangle_count; i += gl_WorkGroupSize.x )
 	{

@@ -43,7 +43,7 @@ shared uint bin_first_commands[ DRAW_BINS_COUNT ];
 
 MeshLOD get_mesh_lod( uint mesh_id, uint lod )
 {
-	return pass_constants.shadow_pass != 0 ? meshes[ mesh_id ].shadow_lods[ lod ] : meshes[ mesh_id ].lods[ lod ];
+	return pass_constants.data.shadow_pass != 0 ? meshes[ mesh_id ].shadow_lods[ lod ] : meshes[ mesh_id ].lods[ lod ];
 }
 
 uint get_bin_count( uint bin )

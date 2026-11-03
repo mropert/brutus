@@ -68,11 +68,6 @@ private:
 	// Rasterizer bias of shadow casters, in D16 units (1/65536 of the cascade depth range)
 	static constexpr float SHADOW_DEPTH_BIAS_CONSTANT = 1.f;
 	static constexpr float SHADOW_DEPTH_BIAS_SLOPE = 2.f;
-	// Must match SHADOW_CASCADE_BLEND_RANGE in shadow.glsl
-	static constexpr float SHADOW_CASCADE_BLEND_RANGE = 0.25f;
-	// How far from a receiver's position, in texels of its cascade, a shadow lookup reads: 1.5 texels of normal offset
-	// and the 5x5 tent read with bilinear taps (3.5 texels), plus one of slack
-	static constexpr float SHADOW_CASTER_MARGIN_TEXELS = 6.f;
 
 	// A bucket's part of a draw commands buffer, laid out for one render path. Its bins are packed inside
 	struct DrawCommandsSegment
@@ -106,7 +101,6 @@ private:
 						const renderer::Buffer& visibility_buffer,
 						renderer::BufferHandle stats_buffer_address,
 						const renderer::Buffer& draw_commands,
-						float lod_target,
 						bool early,
 						bool meshlet_occlusion,
 						bool task_commands ) const;
@@ -120,7 +114,6 @@ private:
 						   const renderer::Buffer& visibility_buffer,
 						   renderer::BufferHandle stats_buffer_address,
 						   const renderer::Buffer& draw_commands,
-						   float lod_target,
 						   bool early,
 						   bool meshlet_occlusion,
 						   bool task_commands ) const;
@@ -176,16 +169,12 @@ private:
 					   const BucketDrawSteps& steps,
 					   draw_meshes_constants constants ) const;
 
-	struct ShadowCascades
-	{
-		std::array<glm::mat4, SHADOW_CASCADE_MAX> view_projections;
-		glm::vec4 splits; // Far view depth of each cascade
-		glm::vec4 texel_sizes; // World size of a shadow map texel in each cascade
-		uint32_t count = 0;
-	};
-
-	// Fits the cascades to the camera and writes their pass constants for this frame
-	ShadowCascades setup_shadow_cascades( const Camera& camera, glm::vec3 main_light, float shadow_distance, uint32_t cascade_count );
+	// Fits the cascades to the depth range the previous frame measured, and writes their pass constants (on the GPU)
+	void setup_shadow_cascades( const BindlessManager& bindless_manager,
+								const renderer::PipelineManager& pipelines,
+								renderer::CommandBuffer& cmd,
+								renderer::BufferHandle frame_constants_address,
+								renderer::BufferHandle pass_constants_address ) const;
 	void draw_shadowmap( const BindlessManager& bindless_manager,
 						 const renderer::PipelineManager& pipelines,
 						 renderer::CommandBuffer& cmd,
@@ -193,7 +182,7 @@ private:
 						 renderer::BufferHandle frame_constants_address,
 						 renderer::BufferHandle draw_buffer_address,
 						 renderer::BufferHandle stats_buffer_address,
-						 const ShadowCascades& cascades,
+						 uint32_t cascade_count,
 						 bool use_mesh_shader );
 
 	struct MeshDraw
@@ -223,7 +212,11 @@ private:
 	std::array<renderer::raii::TextureView, SHADOW_CASCADE_MAX> _shadowmap_layer_views;
 	renderer::raii::Buffer _frame_constant_buffers;
 	renderer::raii::Buffer _pass_constant_buffers;
+	// GPU only, written by shadow_cascades.comp
+	renderer::raii::Buffer _shadow_cascades_buffer;
 	renderer::raii::Buffer _shadowmap_pass_constant_buffers; // One per cascade
+	// GPU only, the visible depth range measured by depth_range.comp for the next frame's cascades
+	renderer::raii::Buffer _depth_range_buffer;
 	renderer::raii::Buffer _draw_buffers;
 	renderer::raii::Buffer _draw_visibility_buffer;
 	renderer::raii::Buffer _shadowmap_visibility_buffer;
@@ -250,6 +243,8 @@ private:
 	renderer::PipelineHandle _draw_commands_pipeline;
 	renderer::PipelineHandle _task_commands_pipeline;
 	renderer::PipelineHandle _depth_pyramid_pipeline;
+	renderer::PipelineHandle _depth_range_pipeline;
+	renderer::PipelineHandle _shadow_cascades_pipeline;
 	renderer::PipelineHandle _grid_pipeline;
 	renderer::PipelineHandle _tonemap_pipeline;
 	std::vector<MeshDraw> _scene;

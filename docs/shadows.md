@@ -4,9 +4,8 @@ Notes for the shadow work (cascaded shadow maps, caster culling, filtering): wha
 and the findings. Shared rules and measurement setup: [working_process.md](working_process.md). Draw commands,
 culling and LOD machinery shared with the main pass: [draw_performance.md](draw_performance.md).
 
-Status (2026-10-30): shadows are fast (~0.64 ms) and visually acceptable on the crowd, but Bistro's views reach far
-past the fixed 25 m shadow distance. SDSM (shadow range from the visible depth) is the next step; contact shadows stay
-tabled.
+Status (2026-11-03): cascades are fitted to the previous frame's visible depth range on the GPU (SDSM), capped by the
+shadow distance. Next: raise the cap for Bistro and check its views, then tighter fits. Contact shadows stay tabled.
 
 ## Done so far
 
@@ -36,17 +35,24 @@ tabled.
 
 ## Current state
 
-- **Cascades**: 4 x 2048² D16 array (`SHADOW_CASCADE_MAX`), practical split scheme (lambda 0.75) from 0.1 m to the
-  shadow distance: about 1.9 / 4.3 / 9.4 / 25 m at the default 25 m. Each cascade is a bounding sphere fit of its view
-  depth slice with texel snapping (`setup_shadow_cascades`). Splits depend on the shadow distance, so a larger distance
-  also enlarges the near cascades.
+- **Cascades**: 4 x 2048² D16 array (`SHADOW_CASCADE_MAX`), practical split scheme (lambda 0.75) over the visible view
+  depth range of the previous frame (SDSM), clamped to [0.1 m, shadow distance]; the whole range when nothing was
+  measured. Cascade 0's slice still starts at 0.1 m so that what comes closer than last frame's range stays shadowed.
+  Each cascade is a bounding sphere fit of its view depth slice with texel snapping, in `shadow_cascades.comp` (one
+  thread per cascade, ~0.013 ms). Only the far bound uses the shadow distance; the fade over its last 10% doesn't
+  move with the measured range.
+- **Depth range**: `depth_range.comp` reduces the final depth (after transparents' clip pass and the grid, which write
+  depth and receive shadows) to the nearest and farthest raw depths, skipping the sky (depth 0), ~0.06 ms at 1080p.
+  With MSAA the final pass resolves depth (MIN, the farthest sample) for it, ~0.06 ms. One frame of latency: a fast
+  turn can leave the far end uncovered for a frame (no padding yet).
 - **Selection** in `shadow.glsl`: by view depth against `shadow_cascade_splits`. Each cascade lerps into the next over
   the last `SHADOW_CASCADE_BLEND_RANGE` (25%) of its slice, keeping the current one where the next doesn't cover the
   point; the last cascade uses the distance fade.
-- **Constants**: `FrameConstants` (main camera, lighting, shadow sampling, debug; written once at the start of
-  `render`, after `setup_shadow_cascades`) and `PassConstants` (view, render target, shadow pass only fields; one per
-  pass: main view and each cascade), separate push constant pointers. Fragment shaders only read the frame constants,
-  culling/task/mesh/vertex shaders only the pass constants.
+- **Constants**: `FrameConstants` (main camera, lighting, shadow sampling, debug; written by the CPU at the start of
+  `render`) points to `ShadowCascades` (matrices, splits, texel sizes), and `PassConstants` (view, render target, LOD
+  target, shadow pass only fields; one per pass: main view and each cascade), separate push constant pointers. The
+  cascades and their pass constants are GPU only buffers written by `shadow_cascades.comp`. Fragment shaders only read
+  the frame constants, culling/task/mesh/vertex shaders only the pass constants.
 - **Bias**: no receiver depth bias. Normal offset of `SHADOW_NORMAL_OFFSET_TEXELS` (1.5) texels of the selected cascade,
   scaled by `sin(angle to light)`. Caster side: rasterizer bias `SHADOW_DEPTH_BIAS_CONSTANT` 1 /
   `SHADOW_DEPTH_BIAS_SLOPE` 2 (D16 units). No acne on the back view (`{ -4.7130, 1.6786, 3.6568 }`, pitch -0.0140, yaw
@@ -62,7 +68,7 @@ tabled.
   `SHADOW_CASTER_MARGIN_TEXELS` (6: 1.5 normal offset + 3.5 tent/bilinear reach + 1 slack) so the result is exact:
   pixel identical on both paths at the benchmark view, the back view, a view facing the light (`{ 0, 6, -60 }`, pitch
   -0.30, yaw 3.1416) and a high view (`{ 0, 15, 10 }`, pitch -0.9, yaw 0). Changing the cascade selection, blend
-  range, normal offset or filter in `shadow.glsl` must update `set_shadow_receivers` / the margin.
+  range, normal offset or filter in `shadow.glsl` must update the receivers / margin in `shadow_cascades.comp`.
 - **Cost** (Release, 2 x 10 traced frames, `64ca18b`): shadow map ~0.64 ms: culling 0.074 ms (all cascades, batched),
   cascades 0.075 / 0.090 / 0.143 / 0.25 ms. Draws bound by depth writes and raster (ZROP 49-60%, raster 33-42%, SM
   4-11%, SMs idle 8-40% in the near cascades): a depth-only shadow mesh shader wouldn't help, fewer depth samples and
@@ -91,15 +97,13 @@ tabled.
 2. **Screen-space contact shadows** for strand-scale features (bangs, collar) that no reasonable shadow map catches.
 3. Optional: per-character shadow maps for close-ups, 4096² as an "ultra" setting.
 
-SDSM plan (agreed 2026-10-27, chosen 2026-10-30 as the shadow distance fix for Bistro): first `--shadow-near` /
-`--shadow-split-lambda` options to measure quality and cost, then a min/max reduction of the previous frame's depth (the
-depth pyramid holds only early pass characters, and a single reduction) read back with 1-2 frames of latency. Splits
-from the measured range, but cascade 0 keeps starting at the camera so nothing new is unshadowed.
-- **Far bound** replaces the fixed shadow distance (capped, e.g. 150-200 m, the slider becoming the cap). The reduction
-  must skip sky pixels (infinite far depth would always win). Bistro's startup view needs well over 25 m; the crowd's
-  ground fills the view up to whatever distance is set, so there the cap decides.
-- **Near bound** moves the splits forward: at Bistro's startup camera nothing visible is closer than ~5 m, so cascades 0
-  and 1 are wasted today; the crowd's close-ups keep a small cascade 0.
+SDSM plan (agreed 2026-10-27, chosen 2026-10-30 as the shadow distance fix for Bistro). Done 2026-11-03 on the GPU
+instead of a readback: min/max reduction of the previous frame's depth, splits from the measured range, cascade 0 still
+starting at the camera. On the crowd benchmark the near bound puts the main character in cascade 0 (cascades 0-2 cost
++0.08 ms: their slices are deeper). Left:
+- **Far bound cap**: the shadow distance slider is now the cap, still 25 m by default. Bistro's startup view needs
+  well over that (e.g. 150-200 m); the crowd's ground fills the view up to whatever distance is set, so there the cap
+  decides. Check Bistro's views with a higher cap (at its startup camera nothing visible is closer than ~5 m).
 - Tighter (non sphere) fits are the bigger resolution lever, at the cost of rotation stability. Receiver planes could
   also use the measured range (fewer casters).
 
@@ -117,6 +121,11 @@ from the measured range, but cascade 0 keeps starting at the camera so nothing n
 - The second model's hair textures have 0 alpha (export bug): ~2000 invisible alpha draws are expected.
 - Fixed near cascade sizes independent of shadow distance (if wanted).
 - Possible ray traced shadows later as an optional path (no acceleration structure support in vk-renderer yet).
+- **Likely broken on Mac (untested, no Mac at hand)**: with MSAA, SDSM resolves depth with `ResolveMode::MIN`
+  unconditionally, but Vulkan only guarantees `SAMPLE_ZERO` (`supportedDepthResolveModes`). MoltenVK reports `MIN` only
+  when Metal supports depth resolve filters. Occlusion culling also uses `MIN` but is gated on `samplerFilterMinmax`,
+  the wrong property. Fix: expose MIN depth resolve support in `Device::Properties`, fall back to `SAMPLE_ZERO` for
+  SDSM, and require `MIN` for occlusion culling with MSAA.
 
 ## Leads from the Unity comparison
 

@@ -1,0 +1,62 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "depth_range.glsl"
+
+// Each thread reduces a 4x4 block of pixels, a workgroup 64x64. The buffer must be reset beforehand
+const int BLOCK_SIZE = 4;
+layout( local_size_x = 16, local_size_y = 16, local_size_z = 1 ) in;
+
+layout( set = 0, binding = 0 ) uniform texture2D textures[ 1024 ];
+layout( set = 0, binding = 2 ) uniform sampler samplers[ 8 ];
+
+layout( push_constant, std430 ) uniform block
+{
+	DepthRange depth_range;
+	uint depth;
+};
+
+// Depth bits like DepthRange, see depth_range.glsl
+shared uint group_nearest;
+shared uint group_farthest;
+
+void main()
+{
+	if ( gl_LocalInvocationIndex == 0 )
+	{
+		group_nearest = 0;
+		group_farthest = 0xffffffff;
+	}
+	barrier();
+
+	const ivec2 size = textureSize( sampler2D( textures[ depth ], samplers[ 0 ] ), 0 );
+	const ivec2 origin = ivec2( gl_GlobalInvocationID.xy ) * BLOCK_SIZE;
+	uint nearest = 0;
+	uint farthest = 0xffffffff;
+	for ( int y = 0; y < BLOCK_SIZE; ++y )
+	{
+		for ( int x = 0; x < BLOCK_SIZE; ++x )
+		{
+			const ivec2 pos = origin + ivec2( x, y );
+			if ( all( lessThan( pos, size ) ) )
+			{
+				const float pixel_depth = texelFetch( sampler2D( textures[ depth ], samplers[ 0 ] ), pos, 0 ).x;
+				if ( pixel_depth > 0.0 )
+				{
+					nearest = max( nearest, floatBitsToUint( pixel_depth ) );
+					farthest = min( farthest, floatBitsToUint( pixel_depth ) );
+				}
+			}
+		}
+	}
+	atomicMax( group_nearest, nearest );
+	atomicMin( group_farthest, farthest );
+	barrier();
+
+	if ( gl_LocalInvocationIndex == 0 && group_nearest != 0 )
+	{
+		atomicMax( depth_range.nearest, group_nearest );
+		atomicMin( depth_range.farthest, group_farthest );
+	}
+}
