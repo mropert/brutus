@@ -6,6 +6,8 @@ Usage (from the repository root):
 
 Timings and metrics are per debug label range (CommandBuffer::debug_label), exported by Nsight's --auto-export.
 GPU clocks are locked to base during traces, so absolute times are higher than in normal runs.
+Ranges that spike are listed with the draws and dispatches they got on top of our own work, which point at another
+process' GPU work. Those frames are left out of the "clean med" column.
 """
 import argparse
 import csv
@@ -31,6 +33,10 @@ METRICS = [
     ("warps_inactive_sm_idle_realtime.avg.pct_of_peak_sustained_elapsed", "SM idle"),
 ]
 
+# A range spikes when it takes this much longer than its median over the traced frames
+SPIKE_RATIO = 1.5
+SPIKE_MIN_MS = 0.05
+
 
 def run_trace(args):
     os.makedirs(args.out, exist_ok=True)
@@ -54,15 +60,98 @@ def read_tsv(path):
         return list(csv.reader(f, delimiter="\t"))
 
 
+def median(values):
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2]
+
+
+def label_paths(rows):
+    # The events export indents nested labels by 8 spaces per level, the regimes export names them by full path
+    paths = []
+    stack = []
+    for row in rows[1:]:
+        name = row[0].lstrip(" ")
+        stack = stack[: (len(row[0]) - len(name)) // 8] + [name]
+        paths.append("/".join(stack))
+    return paths
+
+
+def read_work_counts(export_dir, frames):
+    """Returns {label path: [(draws, dispatches) per frame]}, empty when the export doesn't have them."""
+    path = os.path.join(export_dir, "GPUTRACE_REGIMES.xls")
+    if not os.path.exists(path):
+        return {}
+    rows = read_tsv(path)
+    header = rows[0]
+    draws = next((i for i, name in enumerate(header) if name.endswith("fe__draw_count.sum")), None)
+    dispatches = next((i for i, name in enumerate(header) if name.endswith("gr__dispatch_count.sum")), None)
+    if draws is None or dispatches is None:
+        return {}
+    counts = {}
+    for row in rows[1:]:
+        counts.setdefault(row[0], []).append((int(float(row[draws] or 0)), int(float(row[dispatches] or 0))))
+    return {name: values for name, values in counts.items() if len(values) == frames}
+
+
+def find_spikes(paths, durations, counts):
+    """Returns {frame: [(path, median, duration, extra draws, extra dispatches)]} for the innermost spiking ranges.
+
+    Other processes' GPU work (e.g. desktop composition at each vblank) gets time sliced into our frame and adds a
+    context switch, the range it lands in then shows draws or dispatches we didn't record. Our own work is the
+    minimum count of a range over the frames, foreign work only adds to it.
+    """
+    spiking = {}
+    for path, values in zip(paths, durations):
+        range_median = median(values)
+        for frame, value in enumerate(values):
+            if value > range_median * SPIKE_RATIO and value - range_median > SPIKE_MIN_MS:
+                spiking.setdefault(frame, {})[path] = (range_median, value)
+    spikes = {}
+    for frame, ranges in sorted(spiking.items()):
+        for path, (range_median, value) in ranges.items():
+            if any(other.startswith(path + "/") for other in ranges):
+                continue
+            extra_draws = extra_dispatches = None
+            if path in counts:
+                draws, dispatches = zip(*counts[path])
+                extra_draws = draws[frame] - min(draws)
+                extra_dispatches = dispatches[frame] - min(dispatches)
+            spikes.setdefault(frame, []).append((path, range_median, value, extra_draws, extra_dispatches))
+    return spikes
+
+
 def print_events(export_dir):
     rows = read_tsv(os.path.join(export_dir, "D3DPERF_EVENTS.xls"))
-    frames = len(rows[0]) - 1
-    print(f"{'label':40}" + "".join(f"{'frame ' + str(i):>12}" for i in range(frames)))
-    for row in rows[1:]:
-        print(f"{row[0].replace(chr(9), '  '):40}" + "".join(f"{float(v):12.3f}" for v in row[1:]))
     frame_rows = read_tsv(os.path.join(export_dir, "FRAME.xls"))
+    frames = len(rows[0]) - 1
+    paths = label_paths(rows)
+    durations = [[float(v) for v in row[1:]] for row in rows[1:]]
+    spikes = find_spikes(paths, durations, read_work_counts(export_dir, frames))
+    clean = [i for i in range(frames) if i not in spikes]
+
+    def clean_median(values):
+        return f"{median([values[i] for i in clean]):12.3f}" if spikes and clean else ""
+
+    print(f"{'label':40}"
+          + "".join(f"{'frame ' + str(i) + ('!' if i in spikes else ''):>12}" for i in range(frames))
+          + (f"{'clean med':>12}" if spikes and clean else ""))
+    for row, values in zip(rows[1:], durations):
+        print(f"{row[0].replace(chr(9), '  '):40}" + "".join(f"{v:12.3f}" for v in values) + clean_median(values))
     for row in frame_rows:
-        print(f"{row[0]:40}" + "".join(f"{float(v):12.3f}" for v in row[1:]))
+        values = [float(v) for v in row[1:]]
+        print(f"{row[0]:40}" + "".join(f"{v:12.3f}" for v in values) + clean_median(values))
+
+    if spikes:
+        print("\nSpikes (frames marked ! are left out of the clean median):")
+        for frame, ranges in spikes.items():
+            for path, range_median, value, extra_draws, extra_dispatches in ranges:
+                if extra_draws is None:
+                    cause = "no draw counts in the export"
+                elif extra_draws or extra_dispatches:
+                    cause = f"+{extra_draws} draws +{extra_dispatches} dispatches: GPU work from another process"
+                else:
+                    cause = "no extra draws or dispatches"
+                print(f"  frame {frame:2} {path:50} {range_median:7.3f} -> {value:7.3f} ms, {cause}")
 
 
 def print_metrics(export_dir):

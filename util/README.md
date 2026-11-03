@@ -37,7 +37,10 @@ python util/gputrace.py --parse <dir> --metrics
 `--metrics` adds unit throughputs per label (SM, primitive engine, raster, ZROP, L2, DRAM, warp occupancy), which
 helps tell what limits a pass. Keep in mind:
 - GPU clocks are locked to base during traces: compare traces with each other, not with in-app timings.
-- Trace a few frames and look at the spread, single frames sometimes spike.
+- Trace a few frames and look at the spread. Other processes' GPU work (e.g. desktop composition at each vblank)
+  gets time sliced into some frames and costs 0.3-0.5 ms in whichever range it lands, often the end of a long render
+  pass. The script lists those spikes with the draws and dispatches they added, marks their frames with `!` and
+  leaves them out of the `clean med` column: compare that column rather than single frames.
 - Nsight prints `[ERROR: Validation]` lines about `vkCmdPipelineBarrier` with `HOST_WRITE`: these come from its own
   instrumentation, not from the app.
 

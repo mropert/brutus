@@ -53,7 +53,8 @@ From the repository root, for every change:
 5. Cost: `python util/gputrace.py --exe <exe> --out <dir> --metrics`, compare against a previous trace dir. The script
    traces `build/Debug` unless `--exe` is given: pass the build under test. Use 10 frames (two runs) when a
    difference is small: the main pass varies +-0.3-0.5 ms frame to frame. Compare per-range timings (per pass, per
-   bin) rather than whole passes.
+   bin) rather than whole passes, using the `clean med` column that leaves out frames hit by other processes' GPU
+   work.
 6. Prefer command line options to source edits for comparisons (`brutus-vulkan.exe --help` lists them, e.g.
    `--msaa`): they need no rebuild and can't be left behind. When a test or benchmark keeps needing the same edit,
    suggest an option for it. Temporary experiments are marked `// TEMP EXPERIMENT, revert`, checked with
