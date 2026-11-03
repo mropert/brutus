@@ -256,5 +256,6 @@ private:
 	DrawStatistics _statistics;
 	int _frames = 0;
 	bool _needs_rebuild = false;
+	bool _all_visible = false;
 	bool _draw_indirect_count;
 };

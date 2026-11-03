@@ -312,19 +312,13 @@ public:
 		{
 			throw renderer::Error( SDL_GetError() );
 		}
-		_cmd_buffer->texture_barrier( texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::TRANSFER_DST, 0 );
+		_cmd_buffer->transition_texture( texture, renderer::Texture::Layout::UNDEFINED, renderer::Texture::Layout::GENERAL );
 		_cmd_buffer->copy_buffer_to_texture( _upload_buffer, _offset, texture );
 		for ( int mip = 1; mip < texture.get_mips(); ++mip )
 		{
-			_cmd_buffer->texture_barrier( texture, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::TRANSFER_SRC, mip - 1 );
-			_cmd_buffer->texture_barrier( texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::TRANSFER_DST, mip );
+			_cmd_buffer->barrier( renderer::Stage::TRANSFER, renderer::Stage::TRANSFER );
 			_cmd_buffer->blit_texture( texture, texture, mip - 1, mip, true );
-			_cmd_buffer->texture_barrier( texture, renderer::ResourceState::TRANSFER_SRC, renderer::ResourceState::SHADER_READ, mip - 1 );
 		}
-		_cmd_buffer->texture_barrier( texture,
-									  renderer::ResourceState::TRANSFER_DST,
-									  renderer::ResourceState::SHADER_READ,
-									  texture.get_mips() - 1 );
 		_offset += size;
 	}
 
@@ -343,19 +337,18 @@ public:
 		}
 		const auto ptr = static_cast<std::byte*>( _upload_buffer.get_mapped_address() );
 		memcpy( ptr + _offset, dds.get_data().data(), size );
-		_cmd_buffer->texture_barrier( texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::TRANSFER_DST );
+		_cmd_buffer->transition_texture( texture, renderer::Texture::Layout::UNDEFINED, renderer::Texture::Layout::GENERAL );
 		for ( int mip = 0; mip < texture.get_mips(); ++mip )
 		{
 			_cmd_buffer->copy_buffer_to_texture( _upload_buffer, _offset, texture, mip );
 			_offset += desc.get_mip_size( mip );
 		}
-		_cmd_buffer->texture_barrier( texture, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::SHADER_READ );
 	}
 
 	void submit()
 	{
 		assert( _state == state::UPLOADING );
-		_cmd_buffer->memory_barrier( renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::ANY_BUFFER_READ );
+		_cmd_buffer->barrier( renderer::Stage::TRANSFER, renderer::Stage::INDIRECT | renderer::Stage::INDEX | renderer::Stage::ANY_SHADER );
 		_cmd_buffer->end();
 		_device.submit( *_cmd_buffer, _upload_fence );
 		_state = state::SUBMITTED;

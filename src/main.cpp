@@ -654,7 +654,7 @@ int main( int argc, char** argv )
 			command_buffer->end_rendering();
 		}
 
-		command_buffer->texture_barrier( swapchain_image, renderer::ResourceState::COLOR_ATTACHMENT, renderer::ResourceState::PRESENT );
+		command_buffer->transition_texture( swapchain_image, renderer::Texture::Layout::GENERAL, renderer::Texture::Layout::PRESENT_SRC );
 		frame_scope.end();
 		command_buffer->end_query( statistics_queries[ image_index ] );
 

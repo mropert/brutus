@@ -649,23 +649,23 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 		_depth_texture_view = device.create_texture_view( _depth_texture, renderer::TextureView::Aspect::DEPTH );
 	}
 
-	// Put the frame resources in the state a frame leaves them in, so every frame can transition from a known state
 	auto cmd = device.grab_command_buffer();
 	cmd->reset();
 	cmd->begin();
-	cmd->texture_barrier( _resolved_color_texture.texture,
-						  renderer::ResourceState::UNDEFINED,
-						  renderer::ResourceState::FRAGMENT_SHADER_READ );
-	cmd->texture_barrier( _resolved_depth_texture.texture,
-						  renderer::ResourceState::UNDEFINED,
-						  _sample_count > 1 ? renderer::ResourceState::COMPUTE_SHADER_READ : renderer::ResourceState::DEPTH_ATTACHMENT );
-	cmd->texture_barrier( _depth_pyramid.texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::COMPUTE_SHADER_READ );
-	cmd->texture_barrier( _shadowmap.texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::FRAGMENT_SHADER_READ );
+	const auto init_texture = [ & ]( const renderer::Texture& texture )
+	{ cmd->transition_texture( texture, renderer::Texture::Layout::UNDEFINED, renderer::Texture::Layout::GENERAL ); };
+	init_texture( _resolved_color_texture.texture );
+	init_texture( _resolved_depth_texture.texture );
+	init_texture( _depth_pyramid.texture );
+	init_texture( _shadowmap.texture );
 	if ( _sample_count > 1 )
 	{
-		cmd->texture_barrier( _color_texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::COLOR_ATTACHMENT );
-		cmd->texture_barrier( _depth_texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
+		init_texture( _color_texture );
+		init_texture( _depth_texture );
 	}
+	// Shadow passes don't do occlusion culling, they draw everything
+	cmd->fill_buffer( _shadowmap_visibility_buffer, 0, _shadowmap_visibility_buffer.get_size(), 0x01010101 );
+	cmd->barrier( renderer::Stage::TRANSFER, renderer::Stage::ALL );
 	cmd->end();
 	const auto fence = device.create_fence();
 	device.submit( *cmd, fence );
@@ -780,28 +780,18 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		cmd.bind_index_buffer( *index_buffer );
 	}
 
-	if ( use_occlusion_culling )
+	// Previous frame's culling read the visibility, and it copied the statistics to its readback buffer
+	cmd.barrier( renderer::Stage::COMPUTE | renderer::Stage::TRANSFER, renderer::Stage::TRANSFER );
+	// Can't reuse the visibility buffer if the scene has changed. Without occlusion culling it forces everything to be
+	// drawn in the early pass, which only needs to be filled once
+	if ( use_occlusion_culling ? _needs_rebuild : !_all_visible )
 	{
-		if ( _needs_rebuild )
-		{
-			// Can't reuse visibility buffer if the scene has changed
-			cmd.fill_buffer( _draw_visibility_buffer, 0, _draw_visibility_buffer.get_size(), 0 );
-			cmd.buffer_barrier( _draw_visibility_buffer, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ );
-			_needs_rebuild = false;
-		}
+		cmd.fill_buffer( _draw_visibility_buffer, 0, _draw_visibility_buffer.get_size(), use_occlusion_culling ? 0 : 0x01010101 );
 	}
-	else
-	{
-		// Force everything to be drawn in the early pass
-		cmd.fill_buffer( _draw_visibility_buffer, 0, _draw_visibility_buffer.get_size(), 0x01010101 );
-		cmd.buffer_barrier( _draw_visibility_buffer, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ );
-		_needs_rebuild = true;
-	}
-
-	// Previous frame copied it to its readback buffer
-	cmd.buffer_barrier( _draw_statistics_buffer, renderer::ResourceState::TRANSFER_SRC, renderer::ResourceState::TRANSFER_DST );
+	_needs_rebuild = !use_occlusion_culling;
+	_all_visible = !use_occlusion_culling;
 	cmd.fill_buffer( _draw_statistics_buffer, 0, sizeof( DrawStatistics ), 0 );
-	cmd.buffer_barrier( _draw_statistics_buffer, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ_WRITE );
+	cmd.barrier( renderer::Stage::TRANSFER, renderer::Stage::COMPUTE );
 
 	using Draws = std::array<MeshDraw, MAX_DRAWS>;
 	memcpy( static_cast<Draws*>( _draw_buffers.get_mapped_address() ) + frame_index, _scene.data(), sizeof( MeshDraw ) * _scene.size() );
@@ -867,17 +857,13 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 	if ( meshlet_occlusion )
 	{
 		// Previous frame's late pass wrote the bits the early pass reads
-		cmd.buffer_barrier( _meshlet_visibility_buffer,
-							renderer::ResourceState::SHADER_STORAGE_READ_WRITE,
-							renderer::ResourceState::SHADER_STORAGE_READ_WRITE );
+		cmd.barrier( renderer::Stage::VERTEX, renderer::Stage::VERTEX );
 	}
 
 	// The main passes render into the MSAA targets, then resolve. With a single sample they render straight into the
 	// resolved textures
 	const bool msaa = _sample_count > 1;
-	const renderer::Texture color_target = msaa ? _color_texture : _resolved_color_texture.texture;
 	const renderer::TextureView color_target_view = msaa ? _color_texture_view : _resolved_color_texture.handles.view;
-	const renderer::Texture depth_target = msaa ? _depth_texture : _resolved_depth_texture.texture;
 	const renderer::TextureView depth_target_view = msaa ? _depth_texture_view : _resolved_depth_texture.handles.view;
 
 	{
@@ -886,16 +872,11 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 										   .depth_target = { .target = depth_target_view, .clear_value = { { 0.f } } } };
 		{
 			const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::CULLING_EARLY );
-			// Single sample renders straight into the resolved color texture, which tonemapping read last frame
-			cmd.texture_barrier( color_target,
-								 msaa ? renderer::ResourceState::COLOR_ATTACHMENT : renderer::ResourceState::FRAGMENT_SHADER_READ,
-								 renderer::ResourceState::COLOR_ATTACHMENT );
-			cmd.texture_barrier( depth_target, renderer::ResourceState::DEPTH_ATTACHMENT, renderer::ResourceState::DEPTH_ATTACHMENT );
+			// Last frame's targets, the resolved color tonemapping read and the resolved depth the depth pyramid read
+			cmd.barrier( renderer::Stage::COLOR | renderer::Stage::DEPTH | renderer::Stage::FRAGMENT | renderer::Stage::COMPUTE,
+						 renderer::Stage::COLOR | renderer::Stage::DEPTH );
 			if ( msaa && use_occlusion_culling )
 			{
-				cmd.texture_barrier( _resolved_depth_texture.texture,
-									 renderer::ResourceState::COMPUTE_SHADER_READ,
-									 renderer::ResourceState::DEPTH_RESOLVE_ATTACHMENT );
 				render_info.depth_target.resolve_target = _resolved_depth_texture.handles.view;
 				// The depth pyramid keeps the farthest depth, which is the minimum with reverse-Z
 				render_info.depth_target.resolve_mode = renderer::RenderAttachment::ResolveMode::MIN;
@@ -903,9 +884,6 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 			if ( msaa && !use_occlusion_culling )
 			{
 				// Without occlusion culling we draw all in one pass so it needs to resolve at the end
-				cmd.texture_barrier( _resolved_color_texture.texture,
-									 renderer::ResourceState::FRAGMENT_SHADER_READ,
-									 renderer::ResourceState::COLOR_ATTACHMENT );
 				render_info.color_target.resolve_target = _resolved_color_texture.handles.view;
 			}
 
@@ -940,9 +918,8 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 	if ( use_occlusion_culling )
 	{
 		cmd.end_rendering();
-		cmd.texture_barrier( _resolved_depth_texture.texture,
-							 msaa ? renderer::ResourceState::DEPTH_RESOLVE_ATTACHMENT : renderer::ResourceState::DEPTH_ATTACHMENT,
-							 renderer::ResourceState::COMPUTE_SHADER_READ );
+		// The depth pyramid reads the resolved depth, and overwrites what last frame's culling and task shaders read
+		cmd.barrier( renderer::Stage::COLOR | renderer::Stage::DEPTH | renderer::Stage::VERTEX, renderer::Stage::COMPUTE );
 
 		{
 			PROFILER_GPU_EVENT( "Depth Pyramid" );
@@ -952,11 +929,6 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 			auto extent = _depth_pyramid_extent;
 			for ( size_t mip = 0; mip < _depth_pyramid.mips.size(); ++mip )
 			{
-				cmd.texture_barrier( _depth_pyramid.texture,
-									 renderer::ResourceState::COMPUTE_SHADER_READ,
-									 renderer::ResourceState::STORAGE_WRITE,
-									 static_cast<int>( mip ) );
-
 				const depth_pyramid_constants constants { .depth_in = mip == 0 ? _resolved_depth_texture.handles.sampled_texture
 																			   : _depth_pyramid.mips[ mip - 1 ].sampled_texture,
 														  .depth_out = _depth_pyramid.mips[ mip ].storage_texture,
@@ -964,10 +936,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 				cmd.push_constants( pipelines.get( _depth_pyramid_pipeline ), constants );
 				cmd.dispatch( calc_group_count( extent.width ), calc_group_count( extent.height ), 1 );
 
-				cmd.texture_barrier( _depth_pyramid.texture,
-									 renderer::ResourceState::STORAGE_WRITE,
-									 renderer::ResourceState::COMPUTE_SHADER_READ,
-									 static_cast<int>( mip ) );
+				cmd.barrier( renderer::Stage::COMPUTE, renderer::Stage::COMPUTE );
 
 				extent.width = std::max( extent.width / 2, 1u );
 				extent.height = std::max( extent.height / 2, 1u );
@@ -994,24 +963,19 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::DRAW_OPAQUES_LATE );
 		if ( meshlet_occlusion )
 		{
-			cmd.buffer_barrier( _meshlet_visibility_buffer,
-								renderer::ResourceState::SHADER_STORAGE_READ_WRITE,
-								renderer::ResourceState::SHADER_STORAGE_READ_WRITE );
+			cmd.barrier( renderer::Stage::VERTEX, renderer::Stage::VERTEX );
 		}
 
 		renderer::RenderInfo render_info { .color_target = { .target = color_target_view },
 										   .depth_target = { .target = depth_target_view } };
 		if ( msaa )
 		{
-			cmd.texture_barrier( _resolved_color_texture.texture,
-								 renderer::ResourceState::FRAGMENT_SHADER_READ,
-								 renderer::ResourceState::COLOR_ATTACHMENT );
 			render_info.color_target.resolve_target = _resolved_color_texture.handles.view;
 		}
 		else
 		{
 			// The depth pyramid read the depth target itself, nothing was resolved
-			cmd.texture_barrier( depth_target, renderer::ResourceState::COMPUTE_SHADER_READ, renderer::ResourceState::DEPTH_ATTACHMENT );
+			cmd.barrier( renderer::Stage::COMPUTE, renderer::Stage::DEPTH );
 		}
 		cmd.begin_rendering( render_info );
 
@@ -1055,20 +1019,16 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 
 	cmd.end_rendering();
 
-	cmd.buffer_barrier( _draw_statistics_buffer, renderer::ResourceState::STORAGE_READ_WRITE, renderer::ResourceState::TRANSFER_SRC );
+	cmd.barrier( renderer::Stage::COMPUTE, renderer::Stage::TRANSFER );
 	cmd.copy_buffer( _draw_statistics_buffer, 0, sizeof( DrawStatistics ), _draw_statistics_readback_buffers[ frame_index ] );
-	cmd.buffer_barrier( _draw_statistics_readback_buffers[ frame_index ],
-						renderer::ResourceState::TRANSFER_DST,
-						renderer::ResourceState::HOST_READ );
+	cmd.barrier( renderer::Stage::TRANSFER, renderer::Stage::HOST );
 
 	{
 		PROFILER_GPU_EVENT( "Tonemap" );
 		const auto label = cmd.debug_label( "Tonemap" );
 		const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::TONEMAP );
-		cmd.texture_barrier( _resolved_color_texture.texture,
-							 renderer::ResourceState::COLOR_ATTACHMENT,
-							 renderer::ResourceState::FRAGMENT_SHADER_READ );
-		cmd.texture_barrier( output_texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::COLOR_ATTACHMENT );
+		cmd.barrier( renderer::Stage::COLOR, renderer::Stage::FRAGMENT );
+		cmd.transition_texture( output_texture, renderer::Texture::Layout::PRESENT_SRC, renderer::Texture::Layout::GENERAL );
 		cmd.begin_rendering( { .color_target = { .target = output_texture_view } } );
 		cmd.set_dynamic_state( { .viewport = output_texture.get_extent(), .depth_test = false, .depth_write = false } );
 		cmd.bind_pipeline( pipelines.get( _tonemap_pipeline ), bindless_manager );
@@ -1096,9 +1056,9 @@ void SceneRenderer::compute_draws( const BindlessManager& bindless_manager,
 	PROFILER_GPU_EVENT( "Compute Draws" );
 	const auto label = cmd.debug_label( "Culling" );
 	// Previous draws read commands both as indirect arguments and from shaders
-	cmd.buffer_barrier( draw_commands, renderer::ResourceState::ANY_BUFFER_READ, renderer::ResourceState::TRANSFER_DST );
+	cmd.barrier( renderer::Stage::INDIRECT | renderer::Stage::VERTEX, renderer::Stage::TRANSFER );
 	clear_draw_commands( cmd, draw_commands, task_commands );
-	cmd.buffer_barrier( draw_commands, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ_WRITE );
+	cmd.barrier( renderer::Stage::TRANSFER, renderer::Stage::COMPUTE );
 	dispatch_culling( bindless_manager,
 					  pipelines,
 					  cmd,
@@ -1111,11 +1071,10 @@ void SceneRenderer::compute_draws( const BindlessManager& bindless_manager,
 					  early,
 					  meshlet_occlusion,
 					  task_commands );
-	cmd.buffer_barrier( draw_commands, renderer::ResourceState::STORAGE_WRITE, renderer::ResourceState::STORAGE_READ_WRITE );
+	cmd.barrier( renderer::Stage::COMPUTE, renderer::Stage::COMPUTE );
 	dispatch_draw_commands( bindless_manager, pipelines, cmd, pass_constants_address, draw_buffer_address, draw_commands, task_commands );
-	// Task and vertex shaders also read the commands
-	cmd.buffer_barrier( draw_commands, renderer::ResourceState::STORAGE_WRITE, renderer::ResourceState::ANY_BUFFER_READ );
-	cmd.buffer_barrier( visibility_buffer, renderer::ResourceState::STORAGE_READ_WRITE, renderer::ResourceState::STORAGE_READ_WRITE );
+	// Task and vertex shaders also read the commands, the next culling reads the visibility
+	cmd.barrier( renderer::Stage::COMPUTE, renderer::Stage::INDIRECT | renderer::Stage::VERTEX | renderer::Stage::COMPUTE );
 }
 
 void SceneRenderer::clear_draw_commands( renderer::CommandBuffer& cmd, const renderer::Buffer& draw_commands, bool task_commands ) const
@@ -1342,12 +1301,6 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 {
 	const auto frame_index = _frames % renderer::MAX_FRAMES_IN_FLIGHT;
 
-	if ( _frames == 0 )
-	{
-		cmd.fill_buffer( _shadowmap_visibility_buffer, 0, _shadowmap_visibility_buffer.get_size(), 0x01010101 );
-		cmd.buffer_barrier( _shadowmap_visibility_buffer, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ );
-	}
-
 	const auto calc_pass_constants_address = [ & ]( size_t cascade )
 	{
 		return _shadowmap_pass_constant_buffers.get_device_address()
@@ -1360,13 +1313,13 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 		PROFILER_GPU_EVENT( "Shadows Culling" );
 		const auto label = cmd.debug_label( "Culling" );
 		const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::CULLING_SHADOWS );
+		// Previous frame's draws read commands both as indirect arguments and from shaders
+		cmd.barrier( renderer::Stage::INDIRECT | renderer::Stage::VERTEX, renderer::Stage::TRANSFER );
 		for ( const auto& draw_commands : cascades_draw_commands )
 		{
-			// Previous frame's draws read commands both as indirect arguments and from shaders
-			cmd.buffer_barrier( draw_commands, renderer::ResourceState::ANY_BUFFER_READ, renderer::ResourceState::TRANSFER_DST );
 			clear_draw_commands( cmd, draw_commands, use_mesh_shader );
-			cmd.buffer_barrier( draw_commands, renderer::ResourceState::TRANSFER_DST, renderer::ResourceState::STORAGE_READ_WRITE );
 		}
+		cmd.barrier( renderer::Stage::TRANSFER, renderer::Stage::COMPUTE );
 		// Shadow passes only read the visibility buffer, the dispatches don't depend on each other
 		for ( size_t cascade = 0; cascade < cascades.count; ++cascade )
 		{
@@ -1382,10 +1335,8 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 							  true,
 							  false,
 							  use_mesh_shader );
-			cmd.buffer_barrier( cascades_draw_commands[ cascade ],
-								renderer::ResourceState::STORAGE_WRITE,
-								renderer::ResourceState::STORAGE_READ_WRITE );
 		}
+		cmd.barrier( renderer::Stage::COMPUTE, renderer::Stage::COMPUTE );
 		for ( size_t cascade = 0; cascade < cascades.count; ++cascade )
 		{
 			dispatch_draw_commands( bindless_manager,
@@ -1395,17 +1346,16 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 									draw_buffer_address,
 									cascades_draw_commands[ cascade ],
 									use_mesh_shader );
-			// Task and vertex shaders also read the commands
-			cmd.buffer_barrier( cascades_draw_commands[ cascade ],
-								renderer::ResourceState::STORAGE_WRITE,
-								renderer::ResourceState::ANY_BUFFER_READ );
 		}
+		// Task and vertex shaders also read the commands
+		cmd.barrier( renderer::Stage::COMPUTE, renderer::Stage::INDIRECT | renderer::Stage::VERTEX );
 	}
 
 	PROFILER_GPU_EVENT( "Draw Shadows" );
 	const auto label = cmd.debug_label( "Draw" );
 	const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::DRAW_SHADOWS );
-	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::FRAGMENT_SHADER_READ, renderer::ResourceState::DEPTH_ATTACHMENT );
+	// Last frame's main pass sampled the shadow map
+	cmd.barrier( renderer::Stage::FRAGMENT, renderer::Stage::DEPTH );
 	static constexpr std::array<const char*, SHADOW_CASCADE_MAX> cascade_labels { "Cascade 0", "Cascade 1", "Cascade 2", "Cascade 3" };
 	for ( size_t cascade = 0; cascade < cascades.count; ++cascade )
 	{
@@ -1426,5 +1376,5 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 						.draws_buffer = draw_buffer_address } );
 		cmd.end_rendering();
 	}
-	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::DEPTH_ATTACHMENT, renderer::ResourceState::FRAGMENT_SHADER_READ );
+	cmd.barrier( renderer::Stage::DEPTH, renderer::Stage::FRAGMENT );
 }
