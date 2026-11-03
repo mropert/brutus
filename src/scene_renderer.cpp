@@ -648,6 +648,28 @@ SceneRenderer::SceneRenderer( renderer::Device& device,
 																		  .samples = _sample_count } );
 		_depth_texture_view = device.create_texture_view( _depth_texture, renderer::TextureView::Aspect::DEPTH );
 	}
+
+	// Put the frame resources in the state a frame leaves them in, so every frame can transition from a known state
+	auto cmd = device.grab_command_buffer();
+	cmd->reset();
+	cmd->begin();
+	cmd->texture_barrier( _resolved_color_texture.texture,
+						  renderer::ResourceState::UNDEFINED,
+						  renderer::ResourceState::FRAGMENT_SHADER_READ );
+	cmd->texture_barrier( _resolved_depth_texture.texture,
+						  renderer::ResourceState::UNDEFINED,
+						  _sample_count > 1 ? renderer::ResourceState::COMPUTE_SHADER_READ : renderer::ResourceState::DEPTH_ATTACHMENT );
+	cmd->texture_barrier( _depth_pyramid.texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::COMPUTE_SHADER_READ );
+	cmd->texture_barrier( _shadowmap.texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::FRAGMENT_SHADER_READ );
+	if ( _sample_count > 1 )
+	{
+		cmd->texture_barrier( _color_texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::COLOR_ATTACHMENT );
+		cmd->texture_barrier( _depth_texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
+	}
+	cmd->end();
+	const auto fence = device.create_fence();
+	device.submit( *cmd, fence );
+	device.wait_for_fences( { fence }, UINT64_MAX );
 }
 
 void SceneRenderer::add_mesh( const mesh& mesh, glm::vec3 translation, glm::quat rotation, glm::vec3 scale, const material& material )
@@ -864,12 +886,15 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 										   .depth_target = { .target = depth_target_view, .clear_value = { { 0.f } } } };
 		{
 			const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::CULLING_EARLY );
-			cmd.texture_barrier( color_target, renderer::ResourceState::UNDEFINED, renderer::ResourceState::COLOR_ATTACHMENT );
-			cmd.texture_barrier( depth_target, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
+			// Single sample renders straight into the resolved color texture, which tonemapping read last frame
+			cmd.texture_barrier( color_target,
+								 msaa ? renderer::ResourceState::COLOR_ATTACHMENT : renderer::ResourceState::FRAGMENT_SHADER_READ,
+								 renderer::ResourceState::COLOR_ATTACHMENT );
+			cmd.texture_barrier( depth_target, renderer::ResourceState::DEPTH_ATTACHMENT, renderer::ResourceState::DEPTH_ATTACHMENT );
 			if ( msaa && use_occlusion_culling )
 			{
 				cmd.texture_barrier( _resolved_depth_texture.texture,
-									 renderer::ResourceState::UNDEFINED,
+									 renderer::ResourceState::COMPUTE_SHADER_READ,
 									 renderer::ResourceState::DEPTH_RESOLVE_ATTACHMENT );
 				render_info.depth_target.resolve_target = _resolved_depth_texture.handles.view;
 				// The depth pyramid keeps the farthest depth, which is the minimum with reverse-Z
@@ -879,7 +904,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 			{
 				// Without occlusion culling we draw all in one pass so it needs to resolve at the end
 				cmd.texture_barrier( _resolved_color_texture.texture,
-									 renderer::ResourceState::UNDEFINED,
+									 renderer::ResourceState::FRAGMENT_SHADER_READ,
 									 renderer::ResourceState::COLOR_ATTACHMENT );
 				render_info.color_target.resolve_target = _resolved_color_texture.handles.view;
 			}
@@ -928,7 +953,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 			for ( size_t mip = 0; mip < _depth_pyramid.mips.size(); ++mip )
 			{
 				cmd.texture_barrier( _depth_pyramid.texture,
-									 renderer::ResourceState::UNDEFINED,
+									 renderer::ResourceState::COMPUTE_SHADER_READ,
 									 renderer::ResourceState::STORAGE_WRITE,
 									 static_cast<int>( mip ) );
 
@@ -979,7 +1004,7 @@ void SceneRenderer::render( const BindlessManager& bindless_manager,
 		if ( msaa )
 		{
 			cmd.texture_barrier( _resolved_color_texture.texture,
-								 renderer::ResourceState::UNDEFINED,
+								 renderer::ResourceState::FRAGMENT_SHADER_READ,
 								 renderer::ResourceState::COLOR_ATTACHMENT );
 			render_info.color_target.resolve_target = _resolved_color_texture.handles.view;
 		}
@@ -1380,7 +1405,7 @@ void SceneRenderer::draw_shadowmap( const BindlessManager& bindless_manager,
 	PROFILER_GPU_EVENT( "Draw Shadows" );
 	const auto label = cmd.debug_label( "Draw" );
 	const GpuTimingScope timings_scope( cmd, timings_pool, GpuTiming::DRAW_SHADOWS );
-	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::UNDEFINED, renderer::ResourceState::DEPTH_ATTACHMENT );
+	cmd.texture_barrier( _shadowmap.texture, renderer::ResourceState::FRAGMENT_SHADER_READ, renderer::ResourceState::DEPTH_ATTACHMENT );
 	static constexpr std::array<const char*, SHADOW_CASCADE_MAX> cascade_labels { "Cascade 0", "Cascade 1", "Cascade 2", "Cascade 3" };
 	for ( size_t cascade = 0; cascade < cascades.count; ++cascade )
 	{
