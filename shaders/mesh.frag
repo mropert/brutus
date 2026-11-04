@@ -6,11 +6,13 @@
 #include "constants.glsl"
 #include "mesh.glsl"
 
-layout( location = 0 ) in vec2 inUV;
-layout( location = 1 ) in vec3 inFragPos;
-layout( location = 2 ) in vec3 inNormal;
-layout( location = 3 ) in vec4 inTangent;
-layout( location = 4 ) in flat uint inMaterial;
+// Packed interpolants, see mesh.mesh
+layout( location = 0 ) in vec3 inNormal;
+layout( location = 0, component = 3 ) in float inU;
+layout( location = 1 ) in vec3 inTangent;
+layout( location = 1, component = 3 ) in float inV;
+layout( location = 2 ) in vec3 inWorldPos;
+layout( location = 3 ) in flat uint inPackedMaterial;
 layout( location = 0 ) out vec4 outFragColor;
 
 layout( set = 0, binding = 0 ) uniform texture2D textures[ 1024 ];
@@ -115,15 +117,19 @@ vec3 hemisphere_environment( vec3 direction )
 
 void main_flat()
 {
-	const vec3 albedo = texture( sampler2D( textures[ materials[ inMaterial ].albedo_index ], samplers[ 0 ] ), inUV ).xyz
-		* materials[ inMaterial ].base_color.xyz;
+	const vec2 uv = vec2( inU, inV );
+	const uint material = unpack_material( inPackedMaterial );
+	const vec3 albedo = texture( sampler2D( textures[ materials[ material ].albedo_index ], samplers[ 0 ] ), uv ).xyz
+		* materials[ material ].base_color.xyz;
 	outFragColor = vec4( albedo, 1.0 );
 }
 
 void main_basic_diffuse()
 {
-	vec3 albedo = texture( sampler2D( textures[ materials[ inMaterial ].albedo_index ], samplers[ 0 ] ), inUV ).xyz
-		* materials[ inMaterial ].base_color.xyz;
+	const vec2 uv = vec2( inU, inV );
+	const uint material = unpack_material( inPackedMaterial );
+	vec3 albedo = texture( sampler2D( textures[ materials[ material ].albedo_index ], samplers[ 0 ] ), uv ).xyz
+		* materials[ material ].base_color.xyz;
 	const vec3 N = normalize( inNormal );
 	const vec3 L = normalize( frame_constants.main_light.xyz );
 	const float NdotL = max( dot( N, -L ), 0.0 );
@@ -134,13 +140,15 @@ void main_basic_diffuse()
 
 void main()
 {
-	vec4 albedo = materials[ inMaterial ].base_color;
-	if ( materials[ inMaterial ].albedo_index != -1 )
+	const vec2 uv = vec2( inU, inV );
+	const uint material = unpack_material( inPackedMaterial );
+	vec4 albedo = materials[ material ].base_color;
+	if ( materials[ material ].albedo_index != -1 )
 	{
-		albedo *= texture( sampler2D( textures[ materials[ inMaterial ].albedo_index ], samplers[ 0 ] ), inUV );
+		albedo *= texture( sampler2D( textures[ materials[ material ].albedo_index ], samplers[ 0 ] ), uv );
 	}
 
-	if ( USE_ALPHA && albedo.a < materials[ inMaterial ].alpha_cutoff )
+	if ( USE_ALPHA && albedo.a < materials[ material ].alpha_cutoff )
 	{
 		discard;
 	}
@@ -150,15 +158,15 @@ void main()
 	const float facing = gl_FrontFacing ? 1.0 : -1.0;
 	const vec3 geometric_normal = N * facing;
 
-	const float shadow = compute_shadow( frame_constants, inFragPos, geometric_normal, L );
+	const float shadow = compute_shadow( frame_constants, inWorldPos, geometric_normal, L );
 
-	if ( materials[ inMaterial ].normal_index != -1 )
+	if ( materials[ material ].normal_index != -1 )
 	{
-		const vec3 normalDisplacement = ( texture( sampler2D( textures[ materials[ inMaterial ].normal_index ], samplers[ 0 ] ), inUV ).xyz
+		const vec3 normalDisplacement = ( texture( sampler2D( textures[ materials[ material ].normal_index ], samplers[ 0 ] ), uv ).xyz
 										  * 2.0 )
 			- 1.0;
-		const vec3 tangent = normalize( inTangent.xyz );
-		const mat3 TBN = mat3( tangent, cross( N, tangent * inTangent.w ), normalize( inNormal ) );
+		const vec3 tangent = normalize( inTangent );
+		const mat3 TBN = mat3( tangent, cross( N, tangent * unpack_bitangent_sign( inPackedMaterial ) ), normalize( inNormal ) );
 		N = normalize( TBN * normalDisplacement );
 	}
 	N *= facing;
@@ -170,7 +178,7 @@ void main()
 
 	if ( frame_constants.pbr == 1 )
 	{
-		const vec3 V = normalize( frame_constants.camera_position - inFragPos );
+		const vec3 V = normalize( frame_constants.camera_position - inWorldPos );
 		const vec3 H = normalize( V + L );
 		const float NdotV = max( dot( N, V ), 1e-4 );
 		const float HdotV = max( dot( H, V ), 1e-4 );
@@ -180,22 +188,22 @@ void main()
 		vec3 diffuse = albedo.rgb;
 		vec3 F0;
 		float ao, roughness;
-		if ( materials[ inMaterial ].workflow == MATERIAL_WORKFLOW_METALLIC_ROUGHNESS )
+		if ( materials[ material ].workflow == MATERIAL_WORKFLOW_METALLIC_ROUGHNESS )
 		{
 			// cook-torrance brdf
-			roughness = materials[ inMaterial ].roughness;
-			float metallic = materials[ inMaterial ].metallic;
-			if ( materials[ inMaterial ].metallic_roughness_index != -1 )
+			roughness = materials[ material ].roughness;
+			float metallic = materials[ material ].metallic;
+			if ( materials[ material ].metallic_roughness_index != -1 )
 			{
-				const vec4 mra = texture( sampler2D( textures[ materials[ inMaterial ].metallic_roughness_index ], samplers[ 0 ] ), inUV );
+				const vec4 mra = texture( sampler2D( textures[ materials[ material ].metallic_roughness_index ], samplers[ 0 ] ), uv );
 				ao = mra.r;
 				roughness *= mra.g;
 				metallic *= mra.b;
 			}
 			float specular_factor = 1.0;
-			if ( materials[ inMaterial ].specular_index != -1 )
+			if ( materials[ material ].specular_index != -1 )
 			{
-				specular_factor = texture( sampler2D( textures[ materials[ inMaterial ].specular_index ], samplers[ 0 ] ), inUV ).a;
+				specular_factor = texture( sampler2D( textures[ materials[ material ].specular_index ], samplers[ 0 ] ), uv ).a;
 			}
 
 			diffuse *= ( 1 - metallic );
@@ -203,11 +211,11 @@ void main()
 		}
 		else // MATERIAL_WORKFLOW_SPECULAR_GLOSSINESS
 		{
-			vec4 specular_glossiness = materials[ inMaterial ].specular_glossiness;
-			if ( materials[ inMaterial ].specular_glossiness_index != -1 )
+			vec4 specular_glossiness = materials[ material ].specular_glossiness;
+			if ( materials[ material ].specular_glossiness_index != -1 )
 			{
-				specular_glossiness *= texture( sampler2D( textures[ materials[ inMaterial ].specular_glossiness_index ], samplers[ 0 ] ),
-												inUV );
+				specular_glossiness *= texture( sampler2D( textures[ materials[ material ].specular_glossiness_index ], samplers[ 0 ] ),
+												uv );
 			}
 
 			diffuse *= ( 1 - max( max( specular_glossiness.r, specular_glossiness.g ), specular_glossiness.b ) );
@@ -215,14 +223,14 @@ void main()
 			roughness = 1 - specular_glossiness.a;
 		}
 
-		if ( materials[ inMaterial ].occlusion_index != -1 )
+		if ( materials[ material ].occlusion_index != -1 )
 		{
 			// Only sample texture if we haven't already in the metallic-roughness branch
-			if ( materials[ inMaterial ].occlusion_index != materials[ inMaterial ].metallic_roughness_index )
+			if ( materials[ material ].occlusion_index != materials[ material ].metallic_roughness_index )
 			{
-				ao = texture( sampler2D( textures[ materials[ inMaterial ].occlusion_index ], samplers[ 0 ] ), inUV ).r;
+				ao = texture( sampler2D( textures[ materials[ material ].occlusion_index ], samplers[ 0 ] ), uv ).r;
 			}
-			ao = mix( 1.0, ao, materials[ inMaterial ].occlusion_strength );
+			ao = mix( 1.0, ao, materials[ material ].occlusion_strength );
 		}
 		else
 		{
@@ -253,10 +261,10 @@ void main()
 		const vec3 specular_ambient = prefiltered * ( F0 * envBRDF.x + envBRDF.y );
 		const vec3 ambient = ( ( 1.0 - F_amb ) * diffuse_ambient + specular_ambient ) * ao;
 
-		vec3 emissive = materials[ inMaterial ].emissive;
-		if ( materials[ inMaterial ].emissive_index != -1 )
+		vec3 emissive = materials[ material ].emissive;
+		if ( materials[ material ].emissive_index != -1 )
 		{
-			emissive *= texture( sampler2D( textures[ materials[ inMaterial ].emissive_index ], samplers[ 0 ] ), inUV ).rgb;
+			emissive *= texture( sampler2D( textures[ materials[ material ].emissive_index ], samplers[ 0 ] ), uv ).rgb;
 		}
 
 		color = ambient + Lo + emissive;
@@ -266,5 +274,5 @@ void main()
 		color = albedo.rgb * ( NdotL * direct_light * frame_constants.main_light.w * 0.5 + hemisphere_environment( N ) );
 	}
 
-	outFragColor = vec4( color * get_shadow_cascade_tint( frame_constants, inFragPos ), albedo.a );
+	outFragColor = vec4( color * get_shadow_cascade_tint( frame_constants, inWorldPos ), albedo.a );
 }

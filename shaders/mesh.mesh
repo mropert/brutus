@@ -20,11 +20,16 @@ layout( std430, set = 1, binding = 1 ) readonly buffer ssbo2
 	Material materials[];
 };
 
-layout( location = 0 ) out vec2 outUV[];
-layout( location = 1 ) out vec3 outWorldPos[];
-layout( location = 2 ) out vec3 outNormal[];
-layout( location = 3 ) out vec4 outTangent[];
-layout( location = 4 ) out flat uint outMaterial[];
+// Interpolants are packed into as few locations as possible: each one costs mesh shader output memory, and the far LOD
+// bins are bound by the primitive engine. The tangent's bitangent sign goes with the material. Rebuilding the world
+// position from the depth in the fragment shader saves another location, but costs more than it saves in the shading
+// bound near LOD bins
+layout( location = 0 ) out vec3 outNormal[];
+layout( location = 0, component = 3 ) out float outU[];
+layout( location = 1 ) out vec3 outTangent[];
+layout( location = 1, component = 3 ) out float outV[];
+layout( location = 2 ) out vec3 outWorldPos[];
+layout( location = 3 ) out flat uint outMaterial[];
 
 layout( buffer_reference, std430 ) readonly buffer DrawCommandsBuffer
 {
@@ -64,14 +69,12 @@ void main()
 		gl_MeshVerticesEXT[ i ].gl_Position = clip_pos;
 		// Only meaningful for w > 0, triangles with vertices behind the camera are never culled
 		vertex_pixels[ i ] = vec3( ( clip_pos.xy / clip_pos.w * 0.5 + 0.5 ) * pass_constants.data.viewport_size, clip_pos.w );
-		outUV[ i ].x = v.uv_x;
-		outUV[ i ].y = v.uv_y;
-		const vec3 normal = rotate_by_quaternion( v.normal, draws_buffer.mesh_draws[ draw_id ].rotation );
-		outNormal[ i ] = normal;
+		outNormal[ i ] = rotate_by_quaternion( v.normal, draws_buffer.mesh_draws[ draw_id ].rotation );
+		outU[ i ] = v.uv_x;
+		outTangent[ i ] = rotate_by_quaternion( v.tangent.xyz, draws_buffer.mesh_draws[ draw_id ].rotation );
+		outV[ i ] = v.uv_y;
 		outWorldPos[ i ] = pos;
-		const vec3 tangent = rotate_by_quaternion( v.tangent.xyz, draws_buffer.mesh_draws[ draw_id ].rotation );
-		outTangent[ i ] = vec4( tangent, v.tangent.w );
-		outMaterial[ i ] = draws_buffer.mesh_draws[ draw_id ].material;
+		outMaterial[ i ] = pack_material( draws_buffer.mesh_draws[ draw_id ].material, v.tangent.w );
 	}
 
 	barrier();

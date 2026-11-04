@@ -27,6 +27,23 @@ struct Material
 	uint workflow;
 };
 
+// The material index goes to the fragment shaders as a flat uint, with the bitangent sign of the tangent in the top bit.
+// It's flat (the provoking vertex's), which only differs from interpolating it on triangles mixing both signs
+uint pack_material( uint material, float bitangent_sign )
+{
+	return material | ( bitangent_sign < 0.0 ? 0x80000000u : 0u );
+}
+
+uint unpack_material( uint packed_material )
+{
+	return packed_material & 0x7fffffffu;
+}
+
+float unpack_bitangent_sign( uint packed_material )
+{
+	return ( packed_material & 0x80000000u ) != 0u ? -1.0 : 1.0;
+}
+
 // material_type in asset.h: pairs of single then double sided
 bool is_single_sided( uint material_type )
 {

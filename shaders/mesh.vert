@@ -8,11 +8,13 @@
 #include "math.glsl"
 #include "mesh.glsl"
 
-layout( location = 0 ) out vec2 outUV;
-layout( location = 1 ) out vec3 outWorldPos;
-layout( location = 2 ) out vec3 outNormal;
-layout( location = 3 ) out vec4 outTangent;
-layout( location = 4 ) out flat uint outMaterial;
+// Same interpolants as mesh.mesh
+layout( location = 0 ) out vec3 outNormal;
+layout( location = 0, component = 3 ) out float outU;
+layout( location = 1 ) out vec3 outTangent;
+layout( location = 1, component = 3 ) out float outV;
+layout( location = 2 ) out vec3 outWorldPos;
+layout( location = 3 ) out flat uint outMaterial;
 
 layout( std430, set = 1, binding = 0 ) readonly buffer ssbo1
 {
@@ -44,10 +46,10 @@ void main()
 			* draws_buffer.mesh_draws[ draw_id ].scale
 		+ draws_buffer.mesh_draws[ draw_id ].translation;
 	gl_Position = pass_constants.data.view_projection_matrix * vec4( pos, 1 );
-	outUV.x = v.uv_x;
-	outUV.y = v.uv_y;
 	outNormal = rotate_by_quaternion( v.normal, draws_buffer.mesh_draws[ draw_id ].rotation );
+	outU = v.uv_x;
+	outTangent = rotate_by_quaternion( v.tangent.xyz, draws_buffer.mesh_draws[ draw_id ].rotation );
+	outV = v.uv_y;
 	outWorldPos = pos;
-	outTangent = vec4( rotate_by_quaternion( v.tangent.xyz, draws_buffer.mesh_draws[ draw_id ].rotation ), v.tangent.w );
-	outMaterial = draws_buffer.mesh_draws[ draw_id ].material;
+	outMaterial = pack_material( draws_buffer.mesh_draws[ draw_id ].material, v.tangent.w );
 }

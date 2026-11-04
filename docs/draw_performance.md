@@ -77,8 +77,8 @@ The early opaque pass is the focus (shadows are fast and acceptable for now).
 
 1. **Far LODs (LOD 3-6 bins, primitive engine bound, ~1.7 ms)**: fewer triangles through LOD selection with a smaller
    normal weight in the selection error (0.1-0.25, computed at the same index count; position-only was too loose, see
-   Experiments), then smaller mesh shader outputs (material per primitive or from the draw, packed normal/tangent, half
-   UVs). Check current mesh/task/fragment register counts alongside.
+   Experiments). Smaller mesh shader outputs: done (4 locations instead of 5, see Experiments); no 16-bit
+   interpolants on this GPU. Check current mesh/task/fragment register counts alongside.
 2. **Near LODs (LOD 0-2 bins, shading bound, ~1.9 ms)**: order task workgroups within a draw. Needs spatially coherent
    groups of up to 32 meshlets per LOD (`meshopt_partitionClusters` if our meshoptimizer has it, or a spatial sort) with
    a bounding sphere each, then `mesh_commands.comp` writes a draw's task commands sorted by group depth (~10-20 per
@@ -151,6 +151,17 @@ Temporary experiments and measured changes, oldest first.
   exactly (mean 18.37, LOD 0 bin 14.77) while PS invocations dropped 14%; with a temporary full depth prepass the
   overlay drops to a mean of 1.72 (max 5). RenderDoc's source explains it, see the tools section of
   [working_process.md](working_process.md).
+- **Mesh shader outputs** (2026-11-04, Release, 10 traced frames per run, `scratch/packing/`): 13 interpolated scalars
+  in 5 locations (UV, world position, normal, tangent, flat material). Cost of 8 more scalars in 2 more locations
+  (temporary): early pass +0.24 ms on its fastest frame, LOD 2-6 bins +0.02-0.04 ms each. Two packings, early pass
+  mean / frame mean (base 3.84 / 5.18 ms):
+  - A, 3 locations (normal + U, tangent + V, flat material carrying the bitangent sign; world position rebuilt from
+    `gl_FragCoord` with an inverse view-projection): LOD 4-6 bins 1.06 -> 0.92 ms but LOD 0 0.77 -> 0.85 ms (16 FMAs
+    and a divide per fragment in the shading bound bin), 3.66-3.73 / 5.15 ms. Rejected.
+  - B, 4 locations (A with the world position interpolated): LOD 0 back to 0.78-0.80, LOD 2-3 slightly faster, LOD
+    4-6 0.96 ms, 3.63-3.67 / 5.01-5.04 ms (fastest frame 4.89 -> 4.68-4.72 ms). Kept: 84 pixels differ by at most
+    2/255 on both paths (the bitangent sign is now the provoking vertex's on triangles mixing signs).
+  The device has no 16-bit interpolants (`storageInputOutput16` false), so half precision UVs/normals aren't an option.
 
 ## Leads from the Unity comparison
 
