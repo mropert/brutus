@@ -43,7 +43,7 @@ From the repository root, for every change:
    nothing. Close the window instead so the app exits and flushes: `Start-Process` with `-RedirectStandardOutput`,
    wait, `CloseMainWindow()`, `WaitForExit()` (give Bistro in Debug ~150 s to load).
 3. Correctness: `util/screenshot_benchmark.ps1` + `util/image_diff.ps1` against the previous build; refactors must be
-   pixel identical (frames are deterministic). Check both paths: add `--use-vertex-shader` to the arguments for the
+   pixel identical (frames are deterministic). Check both paths: add `--mesh-shader off` to the arguments for the
    vertex path (every script takes extra arguments). If a diff shows only a strip at the bottom, the taskbar was
    captured: retake. When the desktop is in use, screenshots can capture other windows: compare RenderDoc color dumps
    instead (`renderdoc_capture.py` saves the resolved color target).
@@ -56,8 +56,8 @@ From the repository root, for every change:
    bin) rather than whole passes, using the `clean med` column that leaves out frames hit by other processes' GPU
    work.
 6. Prefer command line options to source edits for comparisons (`brutus-vulkan.exe --help` lists them, e.g.
-   `--msaa`): they need no rebuild and can't be left behind. When a test or benchmark keeps needing the same edit,
-   suggest an option for it. Temporary experiments are marked `// TEMP EXPERIMENT, revert`, checked with
+   `--msaa`, `--occlusion-culling off`, `--shadow-distance 100`, `--show-cascades on`): they need no rebuild and
+   can't be left behind. When a test or benchmark keeps needing the same edit, suggest an option for it. Temporary experiments are marked `// TEMP EXPERIMENT, revert`, checked with
    `grep -rn "TEMP EXPERIMENT" src shaders`. Back up the file first, restore from the backup and **touch it**
    (`(Get-Item f).LastWriteTime = Get-Date`): `Copy-Item` keeps the old timestamp and MSBuild then skips recompiling.
    Never `git checkout` a file with uncommitted work. Confirm runtime settings (mesh shading...) in the UI before

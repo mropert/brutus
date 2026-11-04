@@ -32,6 +32,7 @@ shadow distance. Next: raise the cap for Bistro and check its views, then tighte
 | `a1875b4` | Shadow caster culling against each cascade's receivers (`shadow_caster_visible` in `constants.glsl`), per draw and per meshlet: shadow map 1.71 -> 0.67 ms, pixel identical |
 | `7592996` | Shadow culling batched: one commands buffer per cascade, all culling dispatches then all draws (shadow map 0.67 -> 0.62 ms) |
 | `9fa554e` | Alpha tested (`MASK`) materials cast shadows through their own bucket pair and `shadow_alpha_test.frag` (depth only, discards below the material's cutoff) |
+| `8495f38` | SDSM: `depth_range.comp` measures the visible depth range, `shadow_cascades.comp` fits the next frame's cascades to it on the GPU (capped by the shadow distance). Crowd: main character moves to cascade 0, frame +0.22 ms (shadow draws +0.08, MSAA depth resolve +0.06, reduction +0.06, setup +0.01) |
 
 ## Current state
 
@@ -101,9 +102,13 @@ SDSM plan (agreed 2026-10-27, chosen 2026-10-30 as the shadow distance fix for B
 instead of a readback: min/max reduction of the previous frame's depth, splits from the measured range, cascade 0 still
 starting at the camera. On the crowd benchmark the near bound puts the main character in cascade 0 (cascades 0-2 cost
 +0.08 ms: their slices are deeper). Left:
-- **Far bound cap**: the shadow distance slider is now the cap, still 25 m by default. Bistro's startup view needs
-  well over that (e.g. 150-200 m); the crowd's ground fills the view up to whatever distance is set, so there the cap
-  decides. Check Bistro's views with a higher cap (at its startup camera nothing visible is closer than ~5 m).
+- **Far bound cap**: the shadow distance slider is now the cap, still 25 m by default (1-100 m, also
+  `--shadow-distance`; `--show-cascades on` for the tint). Bistro at 100 m (startup camera,
+  `scratch/bistro_sdsm/`): the arch interior is shadowed (cascade 3), and SDSM moves the near
+  ground to cascade 0 and the shopfronts to cascade 1 (1 and 2 with the fixed range), with visibly sharper near
+  shadows (scooter, bollards, lamp post). Shadow map 0.44 ms (Release trace). The crowd's ground fills the view up to
+  whatever distance is set, so there the cap decides: a per scene default (100 m for glTF scenes) keeps the crowd
+  benchmark unchanged.
 - Tighter (non sphere) fits are the bigger resolution lever, at the cost of rotation stability. Receiver planes could
   also use the measured range (fewer casters).
 

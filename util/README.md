@@ -5,9 +5,12 @@ working directory, and so do the scripts.
 
 The `--benchmark` startup argument freezes time and places the camera at a fixed spot, which makes frames
 reproducible: two runs of the same build render **bit-identical** frames, so any pixel difference between builds is a
-real change. Add `--use-vertex-shader` to render with the vertex path even when mesh shaders are available. The scripts
-take the app's arguments (`gputrace.py --args`, `BRUTUS_ARGS` for `renderdoc_capture.py`, `screenshot_benchmark.ps1
--Arguments`), e.g. `--args "--benchmark --use-vertex-shader"`.
+real change. Other startup arguments set the initial UI settings (`brutus-vulkan.exe --help` lists them):
+`--mesh-shader off` renders with the vertex path even when mesh shaders are available, `--occlusion-culling off`,
+`--msaa 1/2/4/8`, `--shadow-cascades 0-4`, `--shadow-distance <m>` (1-100, an integer) and
+`--show-cascades on` (cascade debug tint). Booleans take `on`/`off`, `true`/`false` or `1`/`0`. The scripts take the
+app's arguments (`gputrace.py --args`, `BRUTUS_ARGS` for `renderdoc_capture.py`, `screenshot_benchmark.ps1
+-Arguments`), e.g. `--args "--benchmark --mesh-shader off"`.
 
 ## Tools
 
