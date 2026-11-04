@@ -39,6 +39,8 @@
 
 static constexpr uint32_t MAX_MESHES = 4096;
 static constexpr uint32_t MAX_MATERIALS = 8192;
+static constexpr float MIN_SHADOW_DISTANCE = 1.f;
+static constexpr float MAX_SHADOW_DISTANCE = 100.f;
 
 void processSDLEvent( const SDL_Event& e, Camera& camera, glm::vec3& velocity )
 {
@@ -204,7 +206,12 @@ void draw_ui( ui_data& data,
 		ImGui::SeparatorText( "Settings" );
 		ImGui::SliderFloat( "Sun intensity", &data.sun_intensity, 1.f, 10.f );
 		ImGui::SliderFloat( "Sky intensity", &data.sky_to_sun, 0.01f, 0.3f );
-		ImGui::SliderFloat( "Shadow distance", &data.shadow_distance, 5.f, 100.f, "%.3f", ImGuiSliderFlags_AlwaysClamp );
+		ImGui::SliderFloat( "Shadow distance",
+							&data.shadow_distance,
+							MIN_SHADOW_DISTANCE,
+							MAX_SHADOW_DISTANCE,
+							"%.3f",
+							ImGuiSliderFlags_AlwaysClamp );
 		ImGui::SliderInt( "Shadow cascades", &data.shadow_cascades, 0, SceneRenderer::SHADOW_CASCADE_MAX );
 		ImGui::Checkbox( "Show shadow cascades", &data.show_shadow_cascades );
 		ImGui::Checkbox( "Ground grid", &data.grid );
@@ -331,21 +338,66 @@ void dump_crowd( std::span<const crowd_member> crowd, std::span<const char* cons
 static constexpr std::array CROWD_ASSETS { "assets/player.glb", "assets/sabrina.glb" };
 static constexpr int BENCHMARK_CROWD_SIZE = 100;
 
+auto store_bool( bool& value )
+{
+	using namespace std::literals;
+	return [ & ]( std::string_view v )
+	{
+		if ( v == "1"sv || v == "true"sv || v == "on"sv )
+		{
+			value = true;
+		}
+		else if ( v == "0"sv || v == "false"sv || v == "off"sv )
+		{
+			value = false;
+		}
+		else
+		{
+			throw std::runtime_error( "Invalid value for boolean argument, must be one of 1, 0, true, false, on or off" );
+		}
+	};
+}
+
 int main( int argc, char** argv )
 {
+	struct initial_settings
+	{
+		int msaa = 4;
+		int shadow_cascades = 4;
+		int shadow_distance = 25;
+		bool benchmark = false;
+		bool mesh_shading = true;
+		bool occlusion_culling = true;
+		bool show_cascades = false;
+	};
+
+	initial_settings settings;
+
 	argparse::ArgumentParser command_line( "brutus" );
-	command_line.add_argument( "--benchmark" ).flag().help( "Setup scene and camera for the reference benchmark" );
-	command_line.add_argument( "--use-vertex-shader" )
-		.default_value( false )
-		.implicit_value( true )
-		.help( "Default to vertex shader rendering even if mesh shaders are available" );
+	command_line.add_argument( "--benchmark" )
+		.store_into( settings.benchmark )
+		.help( "Setup scene and camera for the reference benchmark" );
+	command_line.add_argument( "--dump-scene" ).help( "Dump the crowd's meshes and transforms to the specified file" );
+	command_line.add_argument( "--mesh-shader" ).action( store_bool( settings.mesh_shading ) ).help( "Use mesh shaders if supported" );
 	command_line.add_argument( "--msaa" )
-		.default_value( 4 )
 		.scan<'i', int>()
 		.choices( 1, 2, 4, 8 )
+		.store_into( settings.msaa )
 		.help( "MSAA sample count of the main passes, 1 renders without resolves" );
+	command_line.add_argument( "--occlusion-culling" ).action( store_bool( settings.occlusion_culling ) ).help( "Use occlusion culling" );
 	command_line.add_argument( "--scene" ).help( "glTF scene to render instead of the crowd" );
-	command_line.add_argument( "--dump-scene" ).help( "Dump the crowd's meshes and transforms to the specified file" );
+	command_line.add_argument( "--shadow-cascades" )
+		.scan<'i', int>()
+		.choices( 0, 1, 2, 3, 4 )
+		.store_into( settings.shadow_cascades )
+		.help( "Shadow cascades count, or 0 for no shadows" );
+	command_line.add_argument( "--shadow-distance" )
+		.scan<'i', int>()
+		.store_into( settings.shadow_distance )
+		.help( "Maximum shadow distance" );
+	command_line.add_argument( "--show-cascades" )
+		.action( store_bool( settings.show_cascades ) )
+		.help( "Show shadow cascades as a tinted filter" );
 
 	try
 	{
@@ -353,12 +405,18 @@ int main( int argc, char** argv )
 	}
 	catch ( const std::exception& err )
 	{
-		std::cerr << err.what() << std::endl;
+		std::print( stderr, "{}\n", err.what() );
 		std::cerr << command_line;
 		return EINVAL;
 	}
 
-	const bool is_benchmark = command_line[ "--benchmark" ] == true;
+	// Extra validation that can't be done within the parser
+	if ( settings.shadow_distance < MIN_SHADOW_DISTANCE || settings.shadow_distance > MAX_SHADOW_DISTANCE )
+	{
+		std::print( stderr, "Shadow distance must be between {} and {}\n", MIN_SHADOW_DISTANCE, MAX_SHADOW_DISTANCE );
+		return EINVAL;
+	}
+
 	const auto scene_path = command_line.present( "--scene" );
 
 	if ( const auto scene_file = command_line.present( "--dump-scene" ) )
@@ -384,14 +442,14 @@ int main( int argc, char** argv )
 	tbb_observer observer { };
 	observer.observe();
 
-	gpu_stable_power::Context stable_power( is_benchmark );
+	gpu_stable_power::Context stable_power( settings.benchmark );
 
 	PROFILER_SCOPE_PUSH( create_device, "create_device" );
 	renderer::Device device( "Brutus-NG [Vulkan]" );
 	const auto props = device.get_properties();
 	PROFILER_SCOPE_POP( create_device );
 
-	bool vsync = !is_benchmark;
+	bool vsync = !settings.benchmark;
 #ifdef __APPLE__
 	constexpr auto swapchain_format = renderer::Texture::Format::B8G8R8A8_SRGB;
 #else
@@ -429,7 +487,7 @@ int main( int argc, char** argv )
 	BindlessManager bindless_manager( device, std::array { MAX_MESHES, MAX_MATERIALS } );
 	renderer::PipelineManager pipelines( device, "shaders", bindless_manager );
 
-	SceneRenderer scene_renderer( device, swapchain_format, command_line.get<int>( "--msaa" ), bindless_manager, pipelines );
+	SceneRenderer scene_renderer( device, swapchain_format, settings.msaa, bindless_manager, pipelines );
 
 	// Bistro needs ~27M
 	Assets assets( device, bindless_manager, 32 * 1024 * 1024 );
@@ -498,12 +556,15 @@ int main( int argc, char** argv )
 	bool relative_mouse = false;
 	// XXX: we disable occlusion culling support entirely if minmax sampler aren't supported
 	// TODO: emulate it in shaders with a gather4 instead
-	ui_data ui_state { .crowd = !scene_path,
+	ui_data ui_state { .shadow_distance = static_cast<float>( settings.shadow_distance ),
+					   .shadow_cascades = settings.shadow_cascades,
+					   .show_shadow_cascades = settings.show_cascades,
+					   .crowd = !scene_path,
 					   .grid = !scene_path,
 					   .vsync = vsync,
 					   .stable_power = stable_power.is_enabled(),
-					   .mesh_shading = props.mesh_shader_support && command_line[ "--use-vertex-shader" ] == false,
-					   .occlusion_culling = props.minmax_filter_support };
+					   .mesh_shading = props.mesh_shader_support && settings.mesh_shading,
+					   .occlusion_culling = props.minmax_filter_support && settings.occlusion_culling };
 
 	if ( !ui_state.crowd )
 	{
@@ -514,7 +575,7 @@ int main( int argc, char** argv )
 			camera = *gltf_scene.camera;
 		}
 	}
-	else if ( is_benchmark )
+	else if ( settings.benchmark )
 	{
 		time_of_day = 4.f;
 		ui_state.paused = true;
