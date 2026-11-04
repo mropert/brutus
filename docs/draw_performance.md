@@ -28,6 +28,7 @@ their own notes: [shadows.md](shadows.md).
 | `1808416` | Task shader emits from every invocation in uniform control flow (lane 0 only was undefined behavior), real barriers |
 | `64ca18b` | Task shader ranks its meshlets by view depth in the payload (front to back): LOD 0 bin 0.78 -> 0.70 ms, LOD 0 PS invocations -14%. `INFINITY` in `math.glsl` |
 | `ac6310d` | `--msaa 1/2/4/8` (default 4); one sample renders straight into the resolved textures |
+| `ba2ce05` | Mesh shader outputs packed into 4 locations (normal + U, tangent + V, world position, flat material with the bitangent sign): LOD 4-6 bins 1.06 -> 0.96 ms, frame mean 5.18 -> ~5.03 ms |
 
 ## Current state
 
@@ -96,8 +97,6 @@ Other candidates:
   protect faces by locking face vertices (meshopt vertex lock) or a much larger UV weight (50-100; weights 1-4 changed
   nothing because a face covers a small UV region). Rejected: UV weights 1-4 (no effect), raising the deep LODs' error
   caps (coarser LOD 5 but selected farther away, net +2% triangles), normal weight 0.1 for generation (breaks faces).
-- **Triangle compaction in the mesh shader**: emit only surviving triangles instead of flagging them
-  (`gl_CullPrimitiveEXT` recovers ~40% of a culled triangle's cost).
 - **Finer bins**: 64-256 depth bins per bucket instead of the LOD (one counting sort pass, needs a real workgroup scan
   in `mesh_commands.comp`), if the LOD order turns out too coarse.
 - **Vertex path with meshlet culling**: compute meshlet culling writing compacted indices for plain indexed draws (the
@@ -162,6 +161,14 @@ Temporary experiments and measured changes, oldest first.
     4-6 0.96 ms, 3.63-3.67 / 5.01-5.04 ms (fastest frame 4.89 -> 4.68-4.72 ms). Kept: 84 pixels differ by at most
     2/255 on both paths (the bitangent sign is now the provoking vertex's on triangles mixing signs).
   The device has no 16-bit interpolants (`storageInputOutput16` false), so half precision UVs/normals aren't an option.
+- **Mesh shader triangle culling off** (2026-11-04, Release, alternating 10 frame traces, `scratch/tri_cull/`): the
+  back face, zero area and small triangle tests culled 3.4% of the early pass triangles (0.3% in LOD 0, 3-9% in LOD
+  3-7) and 11.4% of the shadows' (cascade 3: 16%), RenderDoc rasterized primitives with and without. Without them
+  (`TRIANGLE_CULLING` 0: no shared positions, barrier or per triangle tests) the early pass drops 3.39-3.57 -> 3.02-3.16
+  ms at 4x MSAA (LOD 3-5 bins 1.54-1.59 -> 1.27-1.28 ms), 2.68 -> 2.32 ms at 1x, frame 4.73-4.91 -> 4.36-4.48 ms;
+  shadows unchanged; pixel identical at 1x and 4x. Only disabling the flag (keeping the shared writes and the barrier)
+  recovered 0.2 ms, so the workgroup sync costs as much as the tests. Compaction (only emitting survivors) would add a
+  prefix sum on top: dropped. Niagara also keeps its mesh shader culling behind a define (`MESH_CULL`).
 
 ## Leads from the Unity comparison
 
@@ -185,8 +192,10 @@ Measured against the Unity 6.3 URP reproduction (`../Renderer Compare`, results 
 
 - In this paused benchmark frame the late pass draws almost nothing: presumably meshlets at the HZB threshold, frame
   unchanged, not confirmed.
-- Small triangle culling assumes the standard sample locations; vk-renderer doesn't expose
-  `VkPhysicalDeviceLimits::standardSampleLocations` to check it.
+- Small triangle culling (`TRIANGLE_CULLING` in `mesh.mesh`, off) assumes the standard sample locations; vk-renderer
+  doesn't expose `VkPhysicalDeviceLimits::standardSampleLocations` to check it.
+- To compare traces with and without triangle culling again, pass `TRIANGLE_CULLING` as a pipeline define (shaders
+  recompile on the fly) instead of editing `mesh.mesh`.
 - Environment: `hemisphere_environment()` becomes an irradiance (diffuse, sampled with N) and prefiltered (specular,
   sampled with R) cubemap lookup once there is an environment map.
 - The early culling variant could declare `VisibilityBuffer` readonly if `LATE` became a 0/1 define (minor).

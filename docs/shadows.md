@@ -15,7 +15,7 @@ shadow distance. Next: raise the cap for Bistro and check its views, then tighte
 | `4ace47c` | Vertex shader path for the shadow pass |
 | `f2f1cd8` | LOD errors stored in absolute units (`meshopt_simplifyScale`) |
 | `b2c476f` | Separate position-only shadow LOD chain (`gpu_mesh::shadow_lods`, `SceneConstants::shadow_pass`), shadow tris 9.9M -> 6.3M |
-| `5f4fcc8` | Mesh shader triangle culling: back faces (single sided), zero area, small triangles (shadow pass only) |
+| `5f4fcc8` | Mesh shader triangle culling: back faces (single sided), zero area, small triangles (shadow pass only). Off since 2026-11-04 (`TRIANGLE_CULLING`): costs more than it saves, shadows unchanged without it |
 | `41ef760` | clang-format applied to shaders (byte-identical SPIR-V) |
 | `019ad2f` | `shadow.glsl` (`compute_shadow`), ground (grid) receives shadows, fade over last 10% of shadow distance |
 | vk-renderer `6ad6899`, `581e0be`, `5bd7c89` | Bindless cap 16 MiB; texture arrays + per-layer views, D16, dynamic depth bias, depth clamp; `Pipeline::DynamicState` + `set_dynamic_state` |

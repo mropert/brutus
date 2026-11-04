@@ -8,6 +8,12 @@
 #include "math.glsl"
 #include "mesh.glsl"
 
+// Triangle culling (back faces, zero area, triangles between samples) with gl_CullPrimitiveEXT. Off: it culled 3.4% of
+// the early pass triangles and 11% of the shadows' (2026-11-04), but the work it adds to every workgroup (shared
+// positions, barrier, per triangle tests) cost more than it saved: early pass 3.39-3.57 -> 3.02-3.16 ms at 4x MSAA,
+// 2.68 -> 2.32 ms at 1x, shadows unchanged. Compacting the surviving triangles would only add to that work
+#define TRIANGLE_CULLING 0
+
 layout( local_size_x = 32, local_size_y = 1, local_size_z = 1 ) in;
 layout( triangles, max_vertices = 64, max_primitives = 96 ) out;
 
@@ -46,8 +52,10 @@ layout( push_constant, std430 ) uniform block
 
 taskPayloadSharedEXT MeshletTaskPayload payload;
 
+#if TRIANGLE_CULLING
 // Vertex positions in pixels (y up, like NDC) and clip w, for triangle culling
 shared vec3 vertex_pixels[ 64 ];
+#endif
 
 void main()
 {
@@ -67,8 +75,10 @@ void main()
 			+ draws_buffer.mesh_draws[ draw_id ].translation;
 		const vec4 clip_pos = pass_constants.data.view_projection_matrix * vec4( pos, 1 );
 		gl_MeshVerticesEXT[ i ].gl_Position = clip_pos;
+#if TRIANGLE_CULLING
 		// Only meaningful for w > 0, triangles with vertices behind the camera are never culled
 		vertex_pixels[ i ] = vec3( ( clip_pos.xy / clip_pos.w * 0.5 + 0.5 ) * pass_constants.data.viewport_size, clip_pos.w );
+#endif
 		outNormal[ i ] = rotate_by_quaternion( v.normal, draws_buffer.mesh_draws[ draw_id ].rotation );
 		outU[ i ] = v.uv_x;
 		outTangent[ i ] = rotate_by_quaternion( v.tangent.xyz, draws_buffer.mesh_draws[ draw_id ].rotation );
@@ -77,6 +87,7 @@ void main()
 		outMaterial[ i ] = pack_material( draws_buffer.mesh_draws[ draw_id ].material, v.tangent.w );
 	}
 
+#if TRIANGLE_CULLING
 	barrier();
 
 	// Triangle culling, saves primitive setup/rasterization cost for triangles that wouldn't produce any sample:
@@ -86,6 +97,7 @@ void main()
 	//   1, 2, 4 and 8 samples project to (k + 0.5) / sample_count on each axis
 	const bool single_sided = is_single_sided( materials[ draws_buffer.mesh_draws[ draw_id ].material ].type );
 	const float sample_grid = float( pass_constants.data.sample_count );
+#endif
 
 	for ( uint i = gl_LocalInvocationIndex; i < meshlet.triangle_count; i += gl_WorkGroupSize.x )
 	{
@@ -95,6 +107,7 @@ void main()
 									  meshes[ mesh_id ].mtb.meshlet_triangles[ offset + 2 ] );
 		gl_PrimitiveTriangleIndicesEXT[ i ] = triangle;
 
+#if TRIANGLE_CULLING
 		const vec3 a = vertex_pixels[ triangle.x ];
 		const vec3 b = vertex_pixels[ triangle.y ];
 		const vec3 c = vertex_pixels[ triangle.z ];
@@ -114,5 +127,6 @@ void main()
 		// Pixel positions are meaningless if any vertex is behind the camera, don't cull these
 		culled = culled && a.z > 0.0 && b.z > 0.0 && c.z > 0.0;
 		gl_MeshPrimitivesEXT[ i ].gl_CullPrimitiveEXT = culled;
+#endif
 	}
 }
