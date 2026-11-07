@@ -162,9 +162,10 @@ void main()
 
 	if ( materials[ material ].normal_index != -1 )
 	{
-		const vec3 normalDisplacement = ( texture( sampler2D( textures[ materials[ material ].normal_index ], samplers[ 0 ] ), uv ).xyz
-										  * 2.0 )
-			- 1.0;
+		// Tangent space normals are unit length with z >= 0: z is rebuilt from xy, so 2 channel formats (BC5) work too
+		vec3 normalDisplacement;
+		normalDisplacement.xy = texture( sampler2D( textures[ materials[ material ].normal_index ], samplers[ 0 ] ), uv ).xy * 2.0 - 1.0;
+		normalDisplacement.z = sqrt( max( 1.0 - dot( normalDisplacement.xy, normalDisplacement.xy ), 0.0 ) );
 		const vec3 tangent = normalize( inTangent );
 		const mat3 TBN = mat3( tangent, cross( N, tangent * unpack_bitangent_sign( inPackedMaterial ) ), normalize( inNormal ) );
 		N = normalize( TBN * normalDisplacement );
