@@ -40,13 +40,16 @@ From the repository root, for every change:
    an `abort()` popup). Build Release too when tracing it.
 2. Smoke run for validation output (nothing printed is clean). The messages go to stdout (vk-bootstrap's default
    messenger uses `printf`), which is buffered when redirected: a killed process loses them, so `timeout` runs prove
-   nothing. Close the window instead so the app exits and flushes: `Start-Process` with `-RedirectStandardOutput`,
-   wait, `CloseMainWindow()`, `WaitForExit()` (give Bistro in Debug ~150 s to load).
-3. Correctness: `util/screenshot_benchmark.ps1` + `util/image_diff.ps1` against the previous build; refactors must be
-   pixel identical (frames are deterministic). Check both paths: add `--mesh-shader off` to the arguments for the
-   vertex path (every script takes extra arguments). If a diff shows only a strip at the bottom, the taskbar was
-   captured: retake. When the desktop is in use, screenshots can capture other windows: compare RenderDoc color dumps
-   instead (`renderdoc_capture.py` saves the resolved color target).
+   nothing. The app must exit on its own to flush: the `--capture` run of step 3 does (it quits after saving), so it
+   doubles as the smoke run. For the window path, `Start-Process` with `-RedirectStandardOutput`, wait,
+   `CloseMainWindow()`, `WaitForExit()` (give Bistro in Debug ~150 s to load).
+3. Correctness: `brutus-vulkan.exe --benchmark --capture scratch/<dir>/after.png` + `util/image_diff.ps1` against the
+   previous build; refactors must be pixel identical (frames are deterministic). `--capture <png>` renders in a hidden
+   window without UI, saves frame `--capture-frame` (16 by default, earlier frames warm up temporal state) and quits
+   as soon as it's done: no fixed wait for the load, no UI timings in the diff, no taskbar or other windows captured
+   (crowd in Debug: ~16 s). It writes PNG whatever the extension. Check both paths: add `--mesh-shader off` for the
+   vertex path. `util/screenshot_benchmark.ps1` remains for screenshots of the window with its UI. RenderDoc and
+   Nsight use the window path: they hook the swapchain's present to find frames, which the capture path never calls.
 4. Counters: `util/renderdoc_capture.py` (`passes.txt` has per-pass rasterized primitives, fragment/task/mesh
    invocations; `actions.txt` shows the indirect draws with their group counts). Reading buffers from a capture (e.g.
    indirect commands) works from a qrenderdoc Python script using `BufferDescription.gpuAddress` and push constants.
@@ -88,7 +91,7 @@ reproduce.
 - RenderDoc per-draw counter values shuffle between replays (culling atomics change draw order), only per-pass totals
   are stable. RenderDoc replays counters for a few minutes on large captures, it isn't stuck.
 - Bistro (`--scene ../niagara_bistro/bistro.gltf`) takes much longer to load (texture decompression): give
-  screenshots 45-60 s, and prefer Release.
+  screenshots 45-60 s, and prefer Release. `--capture` needs no wait: frames only start once the load is done.
 - `image_diff.ps1` rounds its percentages: a few hundred changed pixels print as 0.00%. Check the mean difference or
   count pixels exactly before calling a change pixel identical.
 - PowerShell variable names ignore case: a script with a `$A` parameter and an `$a` local silently breaks.

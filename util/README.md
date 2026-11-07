@@ -68,9 +68,16 @@ Primitive counts are exact and are the best way to check culling or LOD changes.
 util\screenshot_benchmark.ps1 -Out <file.png>
 ```
 
-Runs the benchmark, waits for it to settle and screenshots the primary display. Use this for before/after images of
-the final frame: RenderDoc saves swapchain images with its "undefined contents" pattern. To get a before image,
-stash the changes, build and screenshot, then restore and do the same.
+Runs the benchmark, waits for it to settle and screenshots the primary display, UI included. For before/after images
+of the final frame, prefer the app's own headless capture, which quits as soon as the frame is saved instead of
+waiting a fixed time, has no UI and can't catch other windows:
+
+```
+build\Debug\brutus-vulkan.exe --benchmark --capture scratch\<dir>\after.png [--capture-frame 16]
+```
+
+RenderDoc saves swapchain images with its "undefined contents" pattern, so neither tool uses it for final frames. To
+get a before image, stash the changes, build and capture, then restore and do the same.
 
 ### `image_diff.ps1`: exact image comparison
 
