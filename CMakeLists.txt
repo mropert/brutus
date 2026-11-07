@@ -48,6 +48,7 @@ target_sources(brutus-vulkan PRIVATE
 		src/asset.cpp
 		src/camera.cpp
 		src/dds_parser.cpp
+		src/frame_output.cpp
 		src/main.cpp
 		src/scene_renderer.cpp
 )

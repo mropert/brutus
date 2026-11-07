@@ -8,8 +8,6 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/type_aligned.hpp>
 #include <imgui.h>
-#include <imgui_impl_sdl3.h>
-#include <imgui_impl_vulkan.h>
 #include <memory>
 #include <numbers>
 #include <numeric>
@@ -27,13 +25,13 @@
 #include <renderer/device.h>
 #include <renderer/pipeline_manager.h>
 #include <renderer/shader.h>
-#include <renderer/swapchain.h>
 #include <renderer/texture.h>
 
 //
 
 #include "asset.h"
 #include "camera.h"
+#include "frame_output.h"
 #include "gpu_timing.h"
 #include "scene_renderer.h"
 
@@ -369,6 +367,7 @@ int main( int argc, char** argv )
 		bool mesh_shading = true;
 		bool occlusion_culling = true;
 		bool show_cascades = false;
+		int capture_frame = 16;
 	};
 
 	initial_settings settings;
@@ -377,6 +376,11 @@ int main( int argc, char** argv )
 	command_line.add_argument( "--benchmark" )
 		.store_into( settings.benchmark )
 		.help( "Setup scene and camera for the reference benchmark" );
+	command_line.add_argument( "--capture" ).help( "Render without window or UI, save the last frame to the specified PNG and quit" );
+	command_line.add_argument( "--capture-frame" )
+		.scan<'i', int>()
+		.store_into( settings.capture_frame )
+		.help( "Frame saved by --capture, counting from 1: earlier frames warm up temporal state" );
 	command_line.add_argument( "--dump-scene" ).help( "Dump the crowd's meshes and transforms to the specified file" );
 	command_line.add_argument( "--mesh-shader" ).action( store_bool( settings.mesh_shading ) ).help( "Use mesh shaders if supported" );
 	command_line.add_argument( "--msaa" )
@@ -417,7 +421,19 @@ int main( int argc, char** argv )
 		return EINVAL;
 	}
 
+	if ( settings.capture_frame < 1 )
+	{
+		std::print( stderr, "Capture frame must be at least 1\n" );
+		return EINVAL;
+	}
+
 	const auto scene_path = command_line.present( "--scene" );
+	const auto capture_path = command_line.present( "--capture" );
+	if ( command_line.is_used( "--capture-frame" ) && !capture_path )
+	{
+		std::print( stderr, "--capture-frame requires --capture\n" );
+		return EINVAL;
+	}
 
 	if ( const auto scene_file = command_line.present( "--dump-scene" ) )
 	{
@@ -445,7 +461,8 @@ int main( int argc, char** argv )
 	gpu_stable_power::Context stable_power( settings.benchmark );
 
 	PROFILER_SCOPE_PUSH( create_device, "create_device" );
-	renderer::Device device( "Brutus-NG [Vulkan]" );
+	renderer::Device device( "Brutus-NG [Vulkan]",
+							 capture_path ? renderer::Device::WindowMode::HIDDEN : renderer::Device::WindowMode::BORDERLESS );
 	const auto props = device.get_properties();
 	PROFILER_SCOPE_POP( create_device );
 
@@ -456,32 +473,19 @@ int main( int argc, char** argv )
 	constexpr auto swapchain_format = renderer::Texture::Format::R8G8B8A8_SRGB;
 #endif
 
-	PROFILER_SCOPE_PUSH( create_swapchain, "create_swapchain" );
-	renderer::Swapchain swapchain( device, swapchain_format, vsync );
-	PROFILER_SCOPE_POP( create_swapchain );
-
+	// Built on both outputs, only the window renders it
+	ImGui::CreateContext();
+	std::unique_ptr<FrameOutput> output;
+	CaptureOutput* capture_output = nullptr;
+	if ( capture_path )
 	{
-		PROFILER_SCOPE_N( "init_imgui" );
-		ImGui::CreateContext();
-		const auto internals = device.get_internals();
-		ImGui_ImplSDL3_InitForVulkan( internals.window );
-		const VkFormat color_format = static_cast<VkFormat>( swapchain_format );
-		ImGui_ImplVulkan_InitInfo info {
-			.ApiVersion = internals.api_version,
-			.Instance = internals.instance,
-			.PhysicalDevice = internals.physical_device,
-			.Device = internals.device,
-			.QueueFamily = internals.queue_family,
-			.Queue = internals.queue,
-			.DescriptorPoolSize = IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE,
-			.MinImageCount = swapchain.get_image_count(),
-			.ImageCount = swapchain.get_image_count(),
-			.PipelineInfoMain = { .PipelineRenderingCreateInfo = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
-																   .colorAttachmentCount = 1u,
-																   .pColorAttachmentFormats = &color_format } },
-			.UseDynamicRendering = true
-		};
-		ImGui_ImplVulkan_Init( &info );
+		auto capture = std::make_unique<CaptureOutput>( device, swapchain_format );
+		capture_output = capture.get();
+		output = std::move( capture );
+	}
+	else
+	{
+		output = std::make_unique<WindowOutput>( device, swapchain_format, vsync );
 	}
 
 	BindlessManager bindless_manager( device, std::array { MAX_MESHES, MAX_MATERIALS } );
@@ -610,7 +614,7 @@ int main( int argc, char** argv )
 				}
 				else
 				{
-					ImGui_ImplSDL3_ProcessEvent( &event );
+					output->process_event( event );
 				}
 			}
 		}
@@ -643,7 +647,7 @@ int main( int argc, char** argv )
 		const bool mesh_shading = ui_state.mesh_shading;
 		const bool occlusion_culling = ui_state.occlusion_culling;
 
-		auto [ image_index, swapchain_image, swapchain_image_view ] = swapchain.acquire();
+		const auto [ image_index, output_image, output_image_view ] = output->begin_frame();
 
 		renderer::Statistics stats;
 		if ( frame_count > renderer::MAX_FRAMES_IN_FLIGHT )
@@ -665,8 +669,6 @@ int main( int argc, char** argv )
 		}
 		pipelines.update();
 
-		ImGui_ImplVulkan_NewFrame();
-		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 
 		draw_ui( ui_state,
@@ -677,6 +679,8 @@ int main( int argc, char** argv )
 				 stats,
 				 scene_renderer.get_statistics(),
 				 camera );
+
+		ImGui::Render();
 
 		auto command_buffer = device.grab_command_buffer();
 		command_buffer->reset();
@@ -690,8 +694,8 @@ int main( int argc, char** argv )
 		scene_renderer.render( bindless_manager,
 							   pipelines,
 							   *command_buffer,
-							   swapchain_image,
-							   swapchain_image_view,
+							   output_image,
+							   output_image_view,
 							   mesh_shading ? nullptr : &assets.get_indices().buffer,
 							   timestamp_queries[ image_index ],
 							   camera,
@@ -705,32 +709,23 @@ int main( int argc, char** argv )
 							   ui_state.pbr,
 							   occlusion_culling );
 
-		{
-			PROFILER_GPU_EVENT( "Draw UI" );
-			const auto label = command_buffer->debug_label( "UI" );
-			const GpuTimingScope ui_scope( *command_buffer, timestamp_queries[ image_index ], GpuTiming::DRAW_UI );
-			command_buffer->begin_rendering( { .color_target = { .target = swapchain_image_view } } );
-			ImGui::Render();
-			ImGui_ImplVulkan_RenderDrawData( ImGui::GetDrawData(), command_buffer->get_impl() );
-			command_buffer->end_rendering();
-		}
-
-		command_buffer->transition_texture( swapchain_image, renderer::Texture::Layout::GENERAL, renderer::Texture::Layout::PRESENT_SRC );
+		output->end_frame( *command_buffer, timestamp_queries[ image_index ] );
 		frame_scope.end();
 		command_buffer->end_query( statistics_queries[ image_index ] );
 
-		command_buffer->end();
-
-		swapchain.submit( *command_buffer );
-
-		swapchain.present();
+		output->submit_and_present( *command_buffer );
 		++frame_count;
+
+		if ( capture_output && frame_count == settings.capture_frame )
+		{
+			capture_output->save_to_file( *capture_path );
+			quit = true;
+		}
 
 		if ( ui_state.vsync != vsync )
 		{
 			vsync = ui_state.vsync;
-			swapchain.recreate( vsync );
-			ImGui_ImplVulkan_SetMinImageCount( swapchain.get_image_count() );
+			output->set_vsync( vsync );
 		}
 		ui_state.stable_power = stable_power.set_enabled( ui_state.stable_power );
 	}
@@ -738,8 +733,7 @@ int main( int argc, char** argv )
 	// Wait for the GPU to finish before we roll all the destructors
 	device.wait_idle();
 
-	ImGui_ImplVulkan_Shutdown();
-	ImGui_ImplSDL3_Shutdown();
+	output.reset();
 	ImGui::DestroyContext();
 
 	PROFILER_SHUTDOWN();
