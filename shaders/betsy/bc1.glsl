@@ -1,37 +1,123 @@
-#version 430 core
+// BC1 block encoder. Include only: no bindings, no main.
+//
+// From Betsy (https://github.com/darksylinc/betsy), commit cc723dc, bin/Data/bc1.glsl and src/betsy/BC1_tables.inl.
+//
+// Copyright 2020-2022 Matias N. Goldberg
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+// documentation files (the "Software"), to deal in the Software without restriction, including without limitation the
+// rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or substantial portions of the
+// Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+// WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+// COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+//
+// Based on stb_dxt (https://github.com/nothings/stb/blob/master/stb_dxt.h), original by fabian "ryg" giesen, ported to C
+// by Sean Barrett, MIT (Copyright (c) 2017 Sean Barrett) or public domain. Adapted to a compute shader by Matias N.
+// Goldberg.
+//
+// Changes from Betsy: a function per block instead of a shader with its own bindings and main, GLSL types instead of
+// HLSL style macros, match tables as constants instead of an SSBO, no dithering, the single color path rounds instead
+// of truncating texels back to 8 bits.
 
-// #include "/media/matias/Datos/SyntaxHighlightingMisc.h"
+const float BC1_FLT_MAX = 340282346638528859811704183484516925440.0f;
 
-#include "CrossPlatformSettings_piece_all.glsl"
-#include "UavCrossPlatform_piece_all.glsl"
+// Best endpoints to reproduce one 8 bit value: max in the low byte, min in the next. From stb_dxt's stb__OMatch5 and
+// stb__OMatch6.
+// clang-format off
+const uint BC1_OMATCH5[ 256 ] = uint[ 256 ](
+	0x0000u, 0x0000u, 0x0100u, 0x0100u, 0x0001u, 0x0001u, 0x0001u, 0x0101u,
+	0x0101u, 0x0002u, 0x0002u, 0x0400u, 0x0102u, 0x0102u, 0x0102u, 0x0003u,
+	0x0003u, 0x0003u, 0x0103u, 0x0501u, 0x0203u, 0x0203u, 0x0004u, 0x0004u,
+	0x0104u, 0x0104u, 0x0204u, 0x0204u, 0x0204u, 0x0503u, 0x0105u, 0x0105u,
+	0x0205u, 0x0404u, 0x0305u, 0x0305u, 0x0305u, 0x0206u, 0x0206u, 0x0206u,
+	0x0306u, 0x0505u, 0x0406u, 0x0406u, 0x0804u, 0x0307u, 0x0307u, 0x0307u,
+	0x0407u, 0x0407u, 0x0407u, 0x0507u, 0x0905u, 0x0607u, 0x0607u, 0x0408u,
+	0x0408u, 0x0508u, 0x0508u, 0x0608u, 0x0608u, 0x0608u, 0x0907u, 0x0509u,
+	0x0509u, 0x0609u, 0x0808u, 0x0709u, 0x0709u, 0x0709u, 0x060au, 0x060au,
+	0x060au, 0x070au, 0x0909u, 0x080au, 0x080au, 0x0c08u, 0x070bu, 0x070bu,
+	0x070bu, 0x080bu, 0x080bu, 0x080bu, 0x090bu, 0x0d09u, 0x0a0bu, 0x0a0bu,
+	0x080cu, 0x080cu, 0x090cu, 0x090cu, 0x0a0cu, 0x0a0cu, 0x0a0cu, 0x0d0bu,
+	0x090du, 0x090du, 0x0a0du, 0x0c0cu, 0x0b0du, 0x0b0du, 0x0b0du, 0x0a0eu,
+	0x0a0eu, 0x0a0eu, 0x0b0eu, 0x0d0du, 0x0c0eu, 0x0c0eu, 0x100cu, 0x0b0fu,
+	0x0b0fu, 0x0b0fu, 0x0c0fu, 0x0c0fu, 0x0c0fu, 0x0d0fu, 0x110du, 0x0e0fu,
+	0x0e0fu, 0x0c10u, 0x0c10u, 0x0d10u, 0x0d10u, 0x0e10u, 0x0e10u, 0x0e10u,
+	0x110fu, 0x0d11u, 0x0d11u, 0x0e11u, 0x1010u, 0x0f11u, 0x0f11u, 0x0f11u,
+	0x0e12u, 0x0e12u, 0x0e12u, 0x0f12u, 0x1111u, 0x1012u, 0x1012u, 0x1410u,
+	0x0f13u, 0x0f13u, 0x0f13u, 0x1013u, 0x1013u, 0x1013u, 0x1113u, 0x1511u,
+	0x1213u, 0x1213u, 0x1014u, 0x1014u, 0x1114u, 0x1114u, 0x1214u, 0x1214u,
+	0x1214u, 0x1513u, 0x1115u, 0x1115u, 0x1215u, 0x1414u, 0x1315u, 0x1315u,
+	0x1315u, 0x1216u, 0x1216u, 0x1216u, 0x1316u, 0x1515u, 0x1416u, 0x1416u,
+	0x1814u, 0x1317u, 0x1317u, 0x1317u, 0x1417u, 0x1417u, 0x1417u, 0x1517u,
+	0x1915u, 0x1617u, 0x1617u, 0x1418u, 0x1418u, 0x1518u, 0x1518u, 0x1618u,
+	0x1618u, 0x1618u, 0x1917u, 0x1519u, 0x1519u, 0x1619u, 0x1818u, 0x1719u,
+	0x1719u, 0x1719u, 0x161au, 0x161au, 0x161au, 0x171au, 0x1919u, 0x181au,
+	0x181au, 0x1c18u, 0x171bu, 0x171bu, 0x171bu, 0x181bu, 0x181bu, 0x181bu,
+	0x191bu, 0x1d19u, 0x1a1bu, 0x1a1bu, 0x181cu, 0x181cu, 0x191cu, 0x191cu,
+	0x1a1cu, 0x1a1cu, 0x1a1cu, 0x1d1bu, 0x191du, 0x191du, 0x1a1du, 0x1c1cu,
+	0x1b1du, 0x1b1du, 0x1b1du, 0x1a1eu, 0x1a1eu, 0x1a1eu, 0x1b1eu, 0x1d1du,
+	0x1c1eu, 0x1c1eu, 0x1c1eu, 0x1b1fu, 0x1b1fu, 0x1b1fu, 0x1c1fu, 0x1c1fu,
+	0x1c1fu, 0x1d1fu, 0x1d1fu, 0x1e1fu, 0x1e1fu, 0x1e1fu, 0x1f1fu, 0x1f1fu
+);
 
-#define FLT_MAX 340282346638528859811704183484516925440.0f
+const uint BC1_OMATCH6[ 256 ] = uint[ 256 ](
+	0x0000u, 0x0100u, 0x0001u, 0x0001u, 0x0101u, 0x0002u, 0x0102u, 0x0003u,
+	0x0003u, 0x0103u, 0x0004u, 0x0004u, 0x0104u, 0x0005u, 0x0105u, 0x0006u,
+	0x0006u, 0x0106u, 0x0007u, 0x0007u, 0x0107u, 0x0008u, 0x0108u, 0x0108u,
+	0x0208u, 0x0109u, 0x0209u, 0x0209u, 0x0309u, 0x020au, 0x030au, 0x030au,
+	0x040au, 0x030bu, 0x040bu, 0x040bu, 0x050bu, 0x040cu, 0x050cu, 0x050cu,
+	0x060cu, 0x050du, 0x060du, 0x1008u, 0x070du, 0x060eu, 0x070eu, 0x1109u,
+	0x080eu, 0x070fu, 0x080fu, 0x100bu, 0x090fu, 0x0a0fu, 0x0810u, 0x0910u,
+	0x0a10u, 0x0d0fu, 0x0911u, 0x0a11u, 0x0b11u, 0x100fu, 0x0a12u, 0x0b12u,
+	0x0c12u, 0x1010u, 0x0b13u, 0x0c13u, 0x0d13u, 0x1111u, 0x0c14u, 0x0d14u,
+	0x0e14u, 0x1013u, 0x0d15u, 0x0e15u, 0x0f15u, 0x1114u, 0x0e16u, 0x0f16u,
+	0x0a19u, 0x1016u, 0x0f17u, 0x1017u, 0x0b1au, 0x1117u, 0x1018u, 0x1118u,
+	0x0c1bu, 0x1218u, 0x1119u, 0x1219u, 0x0d1cu, 0x1319u, 0x121au, 0x131au,
+	0x0e1du, 0x141au, 0x131bu, 0x141bu, 0x0f1eu, 0x151bu, 0x141cu, 0x151cu,
+	0x151cu, 0x161cu, 0x151du, 0x161du, 0x2018u, 0x171du, 0x161eu, 0x171eu,
+	0x2119u, 0x181eu, 0x171fu, 0x181fu, 0x201bu, 0x191fu, 0x1a1fu, 0x1820u,
+	0x1920u, 0x1a20u, 0x1d1fu, 0x1921u, 0x1a21u, 0x1b21u, 0x201fu, 0x1a22u,
+	0x1b22u, 0x1c22u, 0x2020u, 0x1b23u, 0x1c23u, 0x1d23u, 0x2121u, 0x1c24u,
+	0x1d24u, 0x1e24u, 0x2023u, 0x1d25u, 0x1e25u, 0x1f25u, 0x2124u, 0x1e26u,
+	0x1f26u, 0x1a29u, 0x2026u, 0x1f27u, 0x2027u, 0x1b2au, 0x2127u, 0x2028u,
+	0x2128u, 0x1c2bu, 0x2228u, 0x2129u, 0x2229u, 0x1d2cu, 0x2329u, 0x222au,
+	0x232au, 0x1e2du, 0x242au, 0x232bu, 0x242bu, 0x1f2eu, 0x252bu, 0x242cu,
+	0x252cu, 0x252cu, 0x262cu, 0x252du, 0x262du, 0x3028u, 0x272du, 0x262eu,
+	0x272eu, 0x3129u, 0x282eu, 0x272fu, 0x282fu, 0x302bu, 0x292fu, 0x2a2fu,
+	0x2830u, 0x2930u, 0x2a30u, 0x2d2fu, 0x2931u, 0x2a31u, 0x2b31u, 0x302fu,
+	0x2a32u, 0x2b32u, 0x2c32u, 0x3030u, 0x2b33u, 0x2c33u, 0x2d33u, 0x3131u,
+	0x2c34u, 0x2d34u, 0x2e34u, 0x3033u, 0x2d35u, 0x2e35u, 0x2f35u, 0x3134u,
+	0x2e36u, 0x2f36u, 0x2a39u, 0x3036u, 0x2f37u, 0x3037u, 0x2b3au, 0x3137u,
+	0x3038u, 0x3138u, 0x2c3bu, 0x3238u, 0x3139u, 0x3239u, 0x2d3cu, 0x3339u,
+	0x323au, 0x333au, 0x2e3du, 0x343au, 0x333bu, 0x343bu, 0x2f3eu, 0x353bu,
+	0x343cu, 0x353cu, 0x353cu, 0x363cu, 0x353du, 0x363du, 0x363du, 0x373du,
+	0x363eu, 0x373eu, 0x373eu, 0x383eu, 0x373fu, 0x383fu, 0x383fu, 0x393fu,
+	0x3a3fu, 0x3b3fu, 0x3b3fu, 0x3c3fu, 0x3d3fu, 0x3e3fu, 0x3e3fu, 0x3f3fu
+);
+// clang-format on
 
-layout( location = 0 ) uniform uint p_numRefinements;
-
-uniform sampler2D srcTex;
-
-layout( rg32ui ) uniform restrict writeonly uimage2D dstTexture;
-
-layout( std430, binding = 1 ) readonly restrict buffer globalBuffer
+// Returns the max (x) and min (y) RGB565 endpoints for a single color
+vec2 bc1_single_color_endpoints( uvec3 rgb )
 {
-	float2 c_oMatch5[ 256 ];
-	float2 c_oMatch6[ 256 ];
-};
+	const uvec3 entries = uvec3( BC1_OMATCH5[ rgb.r ], BC1_OMATCH6[ rgb.g ], BC1_OMATCH5[ rgb.b ] );
+	const vec3 to_565 = vec3( 2048.0f, 32.0f, 1.0f );
+	return vec2( dot( vec3( entries & 0xFFu ), to_565 ), dot( vec3( entries >> 8u ), to_565 ) );
+}
 
-layout( local_size_x = 8, //
-		local_size_y = 8, //
-		local_size_z = 1 ) in;
-
-float3 rgb565to888( float rgb565 )
+vec3 rgb565to888( float rgb565 )
 {
-	float3 retVal;
+	vec3 retVal;
 	retVal.x = floor( rgb565 / 2048.0f );
 	retVal.y = floor( mod( rgb565, 2048.0f ) / 32.0f );
 	retVal.z = floor( mod( rgb565, 32.0f ) );
 
 	// This is the correct 565 to 888 conversion:
-	//		rgb = floor( rgb * ( 255.0f / float3( 31.0f, 63.0f, 31.0f ) ) + 0.5f )
+	//		rgb = floor( rgb * ( 255.0f / vec3( 31.0f, 63.0f, 31.0f ) ) + 0.5f )
 	//
 	// However stb_dxt follows a different one:
 	//		rb = floor( rb * ( 256 / 32 + 8 / 32 ) );
@@ -48,10 +134,10 @@ float3 rgb565to888( float rgb565 )
 	// Perhaps when we make 888 -> 565 -> 888 it doesn't matter
 	// because they end up mapping to the original number
 
-	return floor( retVal * float3( 8.25f, 4.0625f, 8.25f ) );
+	return floor( retVal * vec3( 8.25f, 4.0625f, 8.25f ) );
 }
 
-float rgb888to565( float3 rgbValue )
+float rgb888to565( vec3 rgbValue )
 {
 	rgbValue.rb = floor( rgbValue.rb * 31.0f / 255.0f + 0.5f );
 	rgbValue.g = floor( rgbValue.g * 63.0f / 255.0f + 0.5f );
@@ -60,7 +146,7 @@ float rgb888to565( float3 rgbValue )
 }
 
 // linear interpolation at 1/3 point between a and b, using desired rounding type
-float3 lerp13( float3 a, float3 b )
+vec3 lerp13( vec3 a, vec3 b )
 {
 #ifdef STB_DXT_USE_ROUNDING_BIAS
 	// with rounding bias
@@ -72,7 +158,7 @@ float3 lerp13( float3 a, float3 b )
 }
 
 /// Unpacks a block of 4 colours from two 16-bit endpoints
-void EvalColors( out float3 colours[ 4 ], float c0, float c1 )
+void EvalColors( out vec3 colours[ 4 ], float c0, float c1 )
 {
 	colours[ 0 ] = rgb565to888( c0 );
 	colours[ 1 ] = rgb565to888( c1 );
@@ -89,14 +175,14 @@ void EvalColors( out float3 colours[ 4 ], float c0, float c1 )
 void OptimizeColorsBlock( const uint srcPixelsBlock[ 16 ], out float outMinEndp16, out float outMaxEndp16 )
 {
 	// determine color distribution
-	float3 avgColour;
-	float3 minColour;
-	float3 maxColour;
+	vec3 avgColour;
+	vec3 minColour;
+	vec3 maxColour;
 
 	avgColour = minColour = maxColour = unpackUnorm4x8( srcPixelsBlock[ 0 ] ).xyz;
 	for ( int i = 1; i < 16; ++i )
 	{
-		const float3 currColourUnorm = unpackUnorm4x8( srcPixelsBlock[ i ] ).xyz;
+		const vec3 currColourUnorm = unpackUnorm4x8( srcPixelsBlock[ i ] ).xyz;
 		avgColour += currColourUnorm;
 		minColour = min( minColour, currColourUnorm );
 		maxColour = max( maxColour, currColourUnorm );
@@ -113,8 +199,8 @@ void OptimizeColorsBlock( const uint srcPixelsBlock[ 16 ], out float outMinEndp1
 
 	for ( int i = 0; i < 16; ++i )
 	{
-		const float3 currColour = unpackUnorm4x8( srcPixelsBlock[ i ] ).xyz * 255.0f;
-		float3 rgbDiff = currColour - avgColour;
+		const vec3 currColour = unpackUnorm4x8( srcPixelsBlock[ i ] ).xyz * 255.0f;
+		vec3 rgbDiff = currColour - avgColour;
 
 		cov[ 0 ] += rgbDiff.r * rgbDiff.r;
 		cov[ 1 ] += rgbDiff.r * rgbDiff.g;
@@ -128,7 +214,7 @@ void OptimizeColorsBlock( const uint srcPixelsBlock[ 16 ], out float outMinEndp1
 	for ( int i = 0; i < 6; ++i )
 		cov[ i ] /= 255.0f;
 
-	float3 vF = maxColour - minColour;
+	vec3 vF = maxColour - minColour;
 
 	const int nIterPower = 4;
 	for ( int iter = 0; iter < nIterPower; ++iter )
@@ -142,8 +228,8 @@ void OptimizeColorsBlock( const uint srcPixelsBlock[ 16 ], out float outMinEndp1
 		vF.b = b;
 	}
 
-	float magn = max3( abs( vF.r ), abs( vF.g ), abs( vF.b ) );
-	float3 v;
+	float magn = max( abs( vF.r ), max( abs( vF.g ), abs( vF.b ) ) );
+	vec3 v;
 
 	if ( magn < 4.0f )
 	{ // too small, default to luminance
@@ -157,12 +243,12 @@ void OptimizeColorsBlock( const uint srcPixelsBlock[ 16 ], out float outMinEndp1
 	}
 
 	// Pick colors at extreme points
-	float3 minEndpoint, maxEndpoint;
-	float minDot = FLT_MAX;
-	float maxDot = -FLT_MAX;
+	vec3 minEndpoint, maxEndpoint;
+	float minDot = BC1_FLT_MAX;
+	float maxDot = -BC1_FLT_MAX;
 	for ( int i = 0; i < 16; ++i )
 	{
-		const float3 currColour = unpackUnorm4x8( srcPixelsBlock[ i ] ).xyz * 255.0f;
+		const vec3 currColour = unpackUnorm4x8( srcPixelsBlock[ i ] ).xyz * 255.0f;
 		const float dotValue = dot( currColour, v );
 
 		if ( dotValue < minDot )
@@ -183,10 +269,10 @@ void OptimizeColorsBlock( const uint srcPixelsBlock[ 16 ], out float outMinEndp1
 }
 
 // The color matching function
-uint MatchColorsBlock( const uint srcPixelsBlock[ 16 ], float3 colour[ 4 ] )
+uint MatchColorsBlock( const uint srcPixelsBlock[ 16 ], vec3 colour[ 4 ] )
 {
 	uint mask = 0u;
-	float3 dir = colour[ 0 ] - colour[ 1 ];
+	vec3 dir = colour[ 0 ] - colour[ 1 ];
 	float stops[ 4 ];
 
 	for ( int i = 0; i < 4; ++i )
@@ -204,11 +290,9 @@ uint MatchColorsBlock( const uint srcPixelsBlock[ 16 ], float3 colour[ 4 ] )
 	float halfPoint = trunc( ( stops[ 3 ] + stops[ 2 ] ) * 0.5f );
 	float c3Point = trunc( ( stops[ 2 ] + stops[ 0 ] ) * 0.5f );
 
-#ifndef BC1_DITHER
-	// the version without dithering is straightforward
 	for ( uint i = 16u; i-- > 0u; )
 	{
-		const float3 currColour = unpackUnorm4x8( srcPixelsBlock[ i ] ).xyz * 255.0f;
+		const vec3 currColour = unpackUnorm4x8( srcPixelsBlock[ i ] ).xyz * 255.0f;
 
 		const float dotValue = dot( currColour, dir );
 		mask <<= 2u;
@@ -218,75 +302,6 @@ uint MatchColorsBlock( const uint srcPixelsBlock[ 16 ], float3 colour[ 4 ] )
 		else
 			mask |= ( ( dotValue < c3Point ) ? 2u : 0u );
 	}
-#else
-	// with floyd-steinberg dithering
-	float4 ep1 = float4( 0, 0, 0, 0 );
-	float4 ep2 = float4( 0, 0, 0, 0 );
-
-	c0Point *= 16.0f;
-	halfPoint *= 16.0f;
-	c3Point *= 16.0f;
-
-	for ( uint y = 0u; y < 4u; ++y )
-	{
-		float ditherDot;
-		uint lmask, step;
-
-		float3 currColour;
-		float dotValue;
-
-		currColour = unpackUnorm4x8( srcPixelsBlock[ y * 4 + 0 ] ).xyz * 255.0f;
-		dotValue = dot( currColour, dir );
-
-		ditherDot = ( dotValue * 16.0f ) + ( 3 * ep2[ 1 ] + 5 * ep2[ 0 ] );
-		if ( ditherDot < halfPoint )
-			step = ( ditherDot < c0Point ) ? 1u : 3u;
-		else
-			step = ( ditherDot < c3Point ) ? 2u : 0u;
-		ep1[ 0 ] = dotValue - stops[ step ];
-		lmask = step;
-
-		currColour = unpackUnorm4x8( srcPixelsBlock[ y * 4 + 1 ] ).xyz * 255.0f;
-		dotValue = dot( currColour, dir );
-
-		ditherDot = ( dotValue * 16.0f ) + ( 7 * ep1[ 0 ] + 3 * ep2[ 2 ] + 5 * ep2[ 1 ] + ep2[ 0 ] );
-		if ( ditherDot < halfPoint )
-			step = ( ditherDot < c0Point ) ? 1u : 3u;
-		else
-			step = ( ditherDot < c3Point ) ? 2u : 0u;
-		ep1[ 1 ] = dotValue - stops[ step ];
-		lmask |= step << 2u;
-
-		currColour = unpackUnorm4x8( srcPixelsBlock[ y * 4 + 2 ] ).xyz * 255.0f;
-		dotValue = dot( currColour, dir );
-
-		ditherDot = ( dotValue * 16.0f ) + ( 7 * ep1[ 1 ] + 3 * ep2[ 3 ] + 5 * ep2[ 2 ] + ep2[ 1 ] );
-		if ( ditherDot < halfPoint )
-			step = ( ditherDot < c0Point ) ? 1u : 3u;
-		else
-			step = ( ditherDot < c3Point ) ? 2u : 0u;
-		ep1[ 2 ] = dotValue - stops[ step ];
-		lmask |= step << 4u;
-
-		currColour = unpackUnorm4x8( srcPixelsBlock[ y * 4 + 2 ] ).xyz * 255.0f;
-		dotValue = dot( currColour, dir );
-
-		ditherDot = ( dotValue * 16.0f ) + ( 7 * ep1[ 2 ] + 5 * ep2[ 3 ] + ep2[ 2 ] );
-		if ( ditherDot < halfPoint )
-			step = ( ditherDot < c0Point ) ? 1u : 3u;
-		else
-			step = ( ditherDot < c3Point ) ? 2u : 0u;
-		ep1[ 3 ] = dotValue - stops[ step ];
-		lmask |= step << 6u;
-
-		mask |= lmask << ( y * 8u );
-		{
-			float4 tmp = ep1;
-			ep1 = ep2;
-			ep2 = tmp;
-		} // swap
-	}
-#endif
 
 	return mask;
 }
@@ -304,18 +319,15 @@ bool RefineBlock( const uint srcPixelsBlock[ 16 ], uint mask, inout float inOutM
 	{
 		// yes, linear system would be singular; solve using optimal
 		// single-color match on average color
-		float3 rgbVal = float3( 8.0f / 255.0f, 8.0f / 255.0f, 8.0f / 255.0f );
+		vec3 rgbVal = vec3( 8.0f / 255.0f, 8.0f / 255.0f, 8.0f / 255.0f );
 		for ( int i = 0; i < 16; ++i )
 			rgbVal += unpackUnorm4x8( srcPixelsBlock[ i ] ).xyz;
 
 		rgbVal = floor( rgbVal * ( 255.0f / 16.0f ) );
 
-		newMax16 = c_oMatch5[ uint( rgbVal.r ) ][ 0 ] * 2048.0f + //
-			c_oMatch6[ uint( rgbVal.g ) ][ 0 ] * 32.0f + //
-			c_oMatch5[ uint( rgbVal.b ) ][ 0 ];
-		newMin16 = c_oMatch5[ uint( rgbVal.r ) ][ 1 ] * 2048.0f + //
-			c_oMatch6[ uint( rgbVal.g ) ][ 1 ] * 32.0f + //
-			c_oMatch5[ uint( rgbVal.b ) ][ 1 ];
+		const vec2 endpoints = bc1_single_color_endpoints( uvec3( rgbVal ) );
+		newMax16 = endpoints.x;
+		newMin16 = endpoints.y;
 	}
 	else
 	{
@@ -327,11 +339,11 @@ bool RefineBlock( const uint srcPixelsBlock[ 16 ], uint mask, inout float inOutM
 
 		float akku = 0.0f;
 		uint cm = mask;
-		float3 at1 = float3( 0, 0, 0 );
-		float3 at2 = float3( 0, 0, 0 );
+		vec3 at1 = vec3( 0, 0, 0 );
+		vec3 at2 = vec3( 0, 0, 0 );
 		for ( int i = 0; i < 16; ++i, cm >>= 2u )
 		{
-			const float3 currColour = unpackUnorm4x8( srcPixelsBlock[ i ] ).xyz * 255.0f;
+			const vec3 currColour = unpackUnorm4x8( srcPixelsBlock[ i ] ).xyz * 255.0f;
 
 			const uint step = cm & 3u;
 			const float w1 = w1Tab[ step ];
@@ -347,19 +359,15 @@ bool RefineBlock( const uint srcPixelsBlock[ 16 ], uint mask, inout float inOutM
 		const float yy = floor( mod( akku, 65535.0f ) / 256.0f );
 		const float xy = mod( akku, 256.0f );
 
-		float2 f_rb_g;
+		vec2 f_rb_g;
 		f_rb_g.x = 3.0f * 31.0f / 255.0f / ( xx * yy - xy * xy );
 		f_rb_g.y = f_rb_g.x * 63.0f / 31.0f;
 
 		// solve.
-		const float3 newMaxVal = clamp( floor( ( at1 * yy - at2 * xy ) * f_rb_g.xyx + 0.5f ),
-										float3( 0.0f, 0.0f, 0.0f ),
-										float3( 31, 63, 31 ) );
+		const vec3 newMaxVal = clamp( floor( ( at1 * yy - at2 * xy ) * f_rb_g.xyx + 0.5f ), vec3( 0.0f, 0.0f, 0.0f ), vec3( 31, 63, 31 ) );
 		newMax16 = newMaxVal.x * 2048.0f + newMaxVal.y * 32.0f + newMaxVal.z;
 
-		const float3 newMinVal = clamp( floor( ( at2 * xx - at1 * xy ) * f_rb_g.xyx + 0.5f ),
-										float3( 0.0f, 0.0f, 0.0f ),
-										float3( 31, 63, 31 ) );
+		const vec3 newMinVal = clamp( floor( ( at2 * xx - at1 * xy ) * f_rb_g.xyx + 0.5f ), vec3( 0.0f, 0.0f, 0.0f ), vec3( 31, 63, 31 ) );
 		newMin16 = newMinVal.x * 2048.0f + newMinVal.y * 32.0f + newMinVal.z;
 	}
 
@@ -369,73 +377,13 @@ bool RefineBlock( const uint srcPixelsBlock[ 16 ], uint mask, inout float inOutM
 	return oldMin != newMin16 || oldMax != newMax16;
 }
 
-#ifdef BC1_DITHER
-/// Quantizes 'srcValue' which is originally in 888 (full range),
-/// converting it to 565 and then back to 888 (quantized)
-float3 quant( float3 srcValue )
+// srcPixelsBlock holds the 16 texels row by row, packed with packUnorm4x8 with alpha set to 1. refinements is the number
+// of least squares passes (Betsy defaults to 2). Returns the 8 bytes of the block.
+uvec2 bc1_compress_block( const uint srcPixelsBlock[ 16 ], uint refinements )
 {
-	srcValue = clamp( srcValue, 0.0f, 255.0f );
-	// Convert 888 -> 565
-	srcValue = floor( srcValue * float3( 31.0f / 255.0f, 63.0f / 255.0f, 31.0f / 255.0f ) + 0.5f );
-	// Convert 565 -> 888 back
-	srcValue = floor( srcValue * float3( 8.25f, 4.0625f, 8.25f ) );
-
-	return srcValue;
-}
-
-void DitherBlock( const uint srcPixBlck[ 16 ], out uint dthPixBlck[ 16 ] )
-{
-	float3 ep1[ 4 ] = { float3( 0, 0, 0 ), float3( 0, 0, 0 ), float3( 0, 0, 0 ), float3( 0, 0, 0 ) };
-	float3 ep2[ 4 ] = { float3( 0, 0, 0 ), float3( 0, 0, 0 ), float3( 0, 0, 0 ), float3( 0, 0, 0 ) };
-
-	for ( uint y = 0u; y < 16u; y += 4u )
-	{
-		float3 srcPixel, dithPixel;
-
-		srcPixel = unpackUnorm4x8( srcPixBlck[ y + 0u ] ).xyz * 255.0f;
-		dithPixel = quant( srcPixel + trunc( ( 3 * ep2[ 1 ] + 5 * ep2[ 0 ] ) * ( 1.0f / 16.0f ) ) );
-		ep1[ 0 ] = srcPixel - dithPixel;
-		dthPixBlck[ y + 0u ] = packUnorm4x8( float4( dithPixel * ( 1.0f / 255.0f ), 1.0f ) );
-
-		srcPixel = unpackUnorm4x8( srcPixBlck[ y + 1u ] ).xyz * 255.0f;
-		dithPixel = quant( srcPixel + trunc( ( 7 * ep1[ 0 ] + 3 * ep2[ 2 ] + 5 * ep2[ 1 ] + ep2[ 0 ] ) * ( 1.0f / 16.0f ) ) );
-		ep1[ 1 ] = srcPixel - dithPixel;
-		dthPixBlck[ y + 1u ] = packUnorm4x8( float4( dithPixel * ( 1.0f / 255.0f ), 1.0f ) );
-
-		srcPixel = unpackUnorm4x8( srcPixBlck[ y + 2u ] ).xyz * 255.0f;
-		dithPixel = quant( srcPixel + trunc( ( 7 * ep1[ 1 ] + 3 * ep2[ 3 ] + 5 * ep2[ 2 ] + ep2[ 1 ] ) * ( 1.0f / 16.0f ) ) );
-		ep1[ 2 ] = srcPixel - dithPixel;
-		dthPixBlck[ y + 2u ] = packUnorm4x8( float4( dithPixel * ( 1.0f / 255.0f ), 1.0f ) );
-
-		srcPixel = unpackUnorm4x8( srcPixBlck[ y + 3u ] ).xyz * 255.0f;
-		dithPixel = quant( srcPixel + trunc( ( 7 * ep1[ 2 ] + 5 * ep2[ 3 ] + ep2[ 2 ] ) * ( 1.0f / 16.0f ) ) );
-		ep1[ 3 ] = srcPixel - dithPixel;
-		dthPixBlck[ y + 3u ] = packUnorm4x8( float4( dithPixel * ( 1.0f / 255.0f ), 1.0f ) );
-
-		// swap( ep1, ep2 )
-		for ( uint i = 0u; i < 4u; ++i )
-		{
-			float3 tmp = ep1[ i ];
-			ep1[ i ] = ep2[ i ];
-			ep2[ i ] = tmp;
-		}
-	}
-}
-#endif
-
-void main()
-{
-	uint srcPixelsBlock[ 16 ];
-
 	bool bAllColoursEqual = true;
-
-	// Load the whole 4x4 block
-	const uint2 pixelsToLoadBase = gl_GlobalInvocationID.xy << 2u;
-	for ( uint i = 0u; i < 16u; ++i )
+	for ( uint i = 1u; i < 16u; ++i )
 	{
-		const uint2 pixelsToLoad = pixelsToLoadBase + uint2( i & 0x03u, i >> 2u );
-		const float3 srcPixels0 = OGRE_Load2D( srcTex, int2( pixelsToLoad ), 0 ).xyz;
-		srcPixelsBlock[ i ] = packUnorm4x8( float4( srcPixels0, 1.0f ) );
 		bAllColoursEqual = bAllColoursEqual && srcPixelsBlock[ 0 ] == srcPixelsBlock[ i ];
 	}
 
@@ -444,41 +392,34 @@ void main()
 
 	if ( bAllColoursEqual )
 	{
-		const uint3 rgbVal = uint3( unpackUnorm4x8( srcPixelsBlock[ 0 ] ).xyz * 255.0f );
+		const uvec3 rgbVal = uvec3( round( unpackUnorm4x8( srcPixelsBlock[ 0 ] ).xyz * 255.0f ) );
 		mask = 0xAAAAAAAAu;
-		maxEndp16 = c_oMatch5[ rgbVal.r ][ 0 ] * 2048.0f + c_oMatch6[ rgbVal.g ][ 0 ] * 32.0f + c_oMatch5[ rgbVal.b ][ 0 ];
-		minEndp16 = c_oMatch5[ rgbVal.r ][ 1 ] * 2048.0f + c_oMatch6[ rgbVal.g ][ 1 ] * 32.0f + c_oMatch5[ rgbVal.b ][ 1 ];
+		const vec2 endpoints = bc1_single_color_endpoints( rgbVal );
+		maxEndp16 = endpoints.x;
+		minEndp16 = endpoints.y;
 	}
 	else
 	{
-#ifdef BC1_DITHER
-		uint ditherPixelsBlock[ 16 ];
-		// first step: compute dithered version for PCA if desired
-		DitherBlock( srcPixelsBlock, ditherPixelsBlock );
-#else
-#define ditherPixelsBlock srcPixelsBlock
-#endif
-
-		// second step: pca+map along principal axis
-		OptimizeColorsBlock( ditherPixelsBlock, minEndp16, maxEndp16 );
+		// first step: pca+map along principal axis
+		OptimizeColorsBlock( srcPixelsBlock, minEndp16, maxEndp16 );
 		if ( minEndp16 != maxEndp16 )
 		{
-			float3 colours[ 4 ];
+			vec3 colours[ 4 ];
 			EvalColors( colours, maxEndp16, minEndp16 ); // Note min/max are inverted
 			mask = MatchColorsBlock( srcPixelsBlock, colours );
 		}
 
-		// third step: refine (multiple times if requested)
+		// second step: refine (multiple times if requested)
 		bool bStopRefinement = false;
-		for ( uint i = 0u; i < p_numRefinements && !bStopRefinement; ++i )
+		for ( uint i = 0u; i < refinements && !bStopRefinement; ++i )
 		{
 			const uint lastMask = mask;
 
-			if ( RefineBlock( ditherPixelsBlock, mask, minEndp16, maxEndp16 ) )
+			if ( RefineBlock( srcPixelsBlock, mask, minEndp16, maxEndp16 ) )
 			{
 				if ( minEndp16 != maxEndp16 )
 				{
-					float3 colours[ 4 ];
+					vec3 colours[ 4 ];
 					EvalColors( colours, maxEndp16, minEndp16 ); // Note min/max are inverted
 					mask = MatchColorsBlock( srcPixelsBlock, colours );
 				}
@@ -502,10 +443,5 @@ void main()
 		mask ^= 0x55555555u;
 	}
 
-	uint2 outputBytes;
-	outputBytes.x = uint( maxEndp16 ) | ( uint( minEndp16 ) << 16u );
-	outputBytes.y = mask;
-
-	uint2 dstUV = gl_GlobalInvocationID.xy;
-	imageStore( dstTexture, int2( dstUV ), uint4( outputBytes.xy, 0u, 0u ) );
+	return uvec2( uint( maxEndp16 ) | ( uint( minEndp16 ) << 16u ), mask );
 }
