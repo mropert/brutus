@@ -83,3 +83,10 @@ set_target_properties(brutus-vulkan PROPERTIES
 if(MSVC)
     target_compile_options(brutus-vulkan PRIVATE "/d1trimfile:${CMAKE_SOURCE_DIR}\\")
 endif()
+
+add_executable(bc-compress-test test/bc_compress_test.cpp)
+target_link_libraries(bc-compress-test PRIVATE renderer SDL3::SDL3)
+target_link_libraries(bc-compress-test PRIVATE $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image-shared>,SDL3_image::SDL3_image-shared,SDL3_image::SDL3_image-static>)
+if(OPTICK_FOUND)
+	target_link_libraries(bc-compress-test PRIVATE Optick)
+endif()

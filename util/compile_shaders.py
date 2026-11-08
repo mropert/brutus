@@ -28,12 +28,17 @@ DEFINES = {
     "TASK_COMMANDS": ["0", "1"],
     "USE_ALPHA": ["false", "true"],
 }
+# Shaders with their own defines instead of DEFINES
+SHADER_DEFINES = {
+    "bc_compress.comp": {"BC_FORMAT": ["1", "3", "5"], "SRGB": ["0", "1"]},
+}
 
 
 def compile_all(glslang, out_dir):
     failures = 0
-    variants = [dict(zip(DEFINES, values)) for values in itertools.product(*DEFINES.values())]
     for path in sorted(p for p in glob.glob(os.path.join("shaders", "*")) if p.endswith(STAGES)):
+        defines = SHADER_DEFINES.get(os.path.basename(path), DEFINES)
+        variants = [dict(zip(defines, values)) for values in itertools.product(*defines.values())]
         for variant in variants:
             suffix = "_".join(f"{k}={v}" for k, v in variant.items())
             output = os.path.join(out_dir, f"{os.path.basename(path)}.{suffix}.spv")

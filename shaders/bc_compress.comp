@@ -1,0 +1,98 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "betsy/bc1.glsl"
+#include "betsy/bc4.glsl"
+
+// Compresses one mip of a texture to BC_FORMAT (1, 3 or 5). SRGB is 1 when the source is an sRGB texture: fetches return
+// linear values, re-encoded here because BC1/BC3 work on the stored gamma values.
+
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+layout( set = 0, binding = 0 ) uniform texture2D textures[ 1024 ];
+layout( set = 0, binding = 2 ) uniform sampler samplers[ 8 ];
+
+#if BC_FORMAT == 1
+#define BLOCK uvec2
+#else
+#define BLOCK uvec4
+#endif
+
+// Mips with blocks of 8 bytes can start at any multiple of 8
+layout( buffer_reference, std430, buffer_reference_align = 8 ) writeonly buffer Blocks
+{
+	BLOCK blocks[];
+};
+
+layout( push_constant, std430 ) uniform block
+{
+	uint source;
+	int mip;
+	ivec2 extent;
+	uint refinements;
+	Blocks output_blocks;
+};
+
+vec3 linear_to_srgb( vec3 color )
+{
+	return mix( 1.055 * pow( color, vec3( 1.0 / 2.4 ) ) - 0.055, color * 12.92, lessThan( color, vec3( 0.0031308 ) ) );
+}
+
+void main()
+{
+	const ivec2 block_extent = ( extent + 3 ) / 4;
+	const ivec2 block_position = ivec2( gl_GlobalInvocationID.xy );
+	if ( any( greaterThanEqual( block_position, block_extent ) ) )
+	{
+		return;
+	}
+
+	vec4 texels[ 16 ];
+	for ( int i = 0; i < 16; ++i )
+	{
+		// Mips smaller than a block replicate their edge
+		const ivec2 position = min( block_position * 4 + ivec2( i & 3, i >> 2 ), extent - 1 );
+		texels[ i ] = texelFetch( sampler2D( textures[ source ], samplers[ 0 ] ), position, mip );
+#if SRGB
+		texels[ i ].rgb = linear_to_srgb( texels[ i ].rgb );
+#endif
+	}
+
+#if BC_FORMAT == 1 || BC_FORMAT == 3
+	uint colors[ 16 ];
+	for ( int i = 0; i < 16; ++i )
+	{
+		colors[ i ] = packUnorm4x8( vec4( texels[ i ].rgb, 1.0 ) );
+	}
+	const uvec2 color_block = bc1_compress_block( colors, refinements );
+#endif
+
+#if BC_FORMAT == 3 || BC_FORMAT == 5
+	float first_channel[ 16 ];
+	for ( int i = 0; i < 16; ++i )
+	{
+		first_channel[ i ] = BC_FORMAT == 3 ? texels[ i ].a : texels[ i ].r;
+	}
+	const uvec2 first_block = bc4_compress_block( first_channel );
+#endif
+
+#if BC_FORMAT == 5
+	float second_channel[ 16 ];
+	for ( int i = 0; i < 16; ++i )
+	{
+		second_channel[ i ] = texels[ i ].g;
+	}
+	const uvec2 second_block = bc4_compress_block( second_channel );
+#endif
+
+#if BC_FORMAT == 1
+	const BLOCK compressed = color_block;
+#elif BC_FORMAT == 3
+	const BLOCK compressed = uvec4( first_block, color_block );
+#else
+	const BLOCK compressed = uvec4( first_block, second_block );
+#endif
+
+	output_blocks.blocks[ block_position.y * block_extent.x + block_position.x ] = compressed;
+}
