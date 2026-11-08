@@ -368,7 +368,7 @@ int main( int argc, char** argv )
 		bool occlusion_culling = true;
 		bool show_cascades = false;
 		int capture_frame = 16;
-		std::string texture_compression = "none";
+		std::string texture_compression = "gpu";
 		bool no_dds = false;
 	};
 

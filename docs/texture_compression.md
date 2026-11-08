@@ -6,8 +6,8 @@ Scenes and their textures: [scenes.md](scenes.md).
 
 ## Done so far
 
-Steps 1 to 4 of the plan below. `--texture-compression gpu` compresses decoded images at load, `none` stays the default
-until step 5's measurements. `--no-dds` ignores DDS images when a texture has another image. `bc-compress-test` (in
+The plan below is done. `--texture-compression gpu`, the default since the measurements in Experiments, compresses
+decoded images at load; `none` keeps them as RGBA8. `--no-dds` ignores DDS images when a texture has another image. `bc-compress-test` (in
 `test/`) checks the encoder alone.
 
 ## Current state
@@ -145,7 +145,7 @@ The loop in `upload_textures` stays as it is: `make_image_from_surface` returns 
 3. `Assets` needs the `PipelineManager` (constructed just before it in `main.cpp`). The upload waits for it with
    `wait_ready()` once images are decoded: pipelines can't be fetched while others are being added, and waiting that late
    lets shaders compile while images decode.
-4. **Command line**: `--texture-compression none|gpu` (default `none` until measured, then flip it) and `--no-dds`
+4. **Command line**: `--texture-compression none|gpu` (default `gpu`) and `--no-dds`
    (ignore `MSFT_texture_dds`) so Bistro can compare PNG, PNG + GPU BC and DDS BC7 in one build.
 
 **Kept simple on purpose.** Every crowd texture's mip 0 is at least 131k blocks (~2k groups of 64 threads), several
@@ -315,6 +315,16 @@ All are covered by `textureCompressionBC`, already mandatory. The DDS parser can
 - **Memory, crowd** (UI, Debug): VRAM 660 -> 417 MB (-243 MB), bindless textures 414 -> 172 MB including 45 MB of
   permanent scratch images. The 64 MB block buffer only lives during a load.
 - **Bistro with DDS**: scene pixel identical to before (UI excluded), no validation output.
+- **Load time, crowd** (2026-11-08, `--benchmark --capture --capture-frame 1`, Optick, median of 4 runs, unlocked clocks,
+  `scratch/texcomp/step5/`): `Startup` 1762 -> 2029 ms in Release (+266 ms), 12.5 -> 21.0 s in Debug (+8.4 s). Nearly all of
+  it is compiling the 5 `bc_compress.comp` variants, which the first upload waits for: `wait_ready` +209 ms in Release,
+  +11.0 s in Debug. The GPU work shows the same in both builds: `wait_for_fences` +13 ms, 6 ms of it the scratch images'
+  transition at creation, the rest waiting for compression of both files.
+- **Frame cost, crowd** (Release, Nsight at locked clocks, 2 runs of 5 frames per mode, clean median, same directory):
+  GPU frame 4.49 -> 4.38 ms (-0.11), Opaque Early 3.16 -> 3.05 ms; LOD 0 0.845 -> 0.792 ms (-6%), LOD 1 to 4 within
+  0.02 ms. Frames vary by more than that one to one, but both runs of each mode agree. DRAM throughput drops on close LODs:
+  LOD 0 29 -> 24%, LOD 1 28 -> 21%, LOD 2 18 -> 13%, whole opaque pass 17.4 -> 14.6%. The SM stays the limit there
+  (LOD 0 at 71-74%), so less bandwidth buys little time.
 
 ## Findings
 
