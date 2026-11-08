@@ -368,6 +368,8 @@ int main( int argc, char** argv )
 		bool occlusion_culling = true;
 		bool show_cascades = false;
 		int capture_frame = 16;
+		std::string texture_compression = "none";
+		bool no_dds = false;
 	};
 
 	initial_settings settings;
@@ -382,6 +384,13 @@ int main( int argc, char** argv )
 		.store_into( settings.capture_frame )
 		.help( "Frame saved by --capture, counting from 1: earlier frames warm up temporal state" );
 	command_line.add_argument( "--dump-scene" ).help( "Dump the crowd's meshes and transforms to the specified file" );
+	command_line.add_argument( "--no-dds" )
+		.store_into( settings.no_dds )
+		.help( "Ignore DDS images in glTF scenes when there's another image" );
+	command_line.add_argument( "--texture-compression" )
+		.choices( "none", "gpu" )
+		.store_into( settings.texture_compression )
+		.help( "How images that aren't already block compressed are stored" );
 	command_line.add_argument( "--mesh-shader" ).action( store_bool( settings.mesh_shading ) ).help( "Use mesh shaders if supported" );
 	command_line.add_argument( "--msaa" )
 		.scan<'i', int>()
@@ -494,7 +503,12 @@ int main( int argc, char** argv )
 	SceneRenderer scene_renderer( device, swapchain_format, settings.msaa, bindless_manager, pipelines );
 
 	// Bistro needs ~27M
-	Assets assets( device, bindless_manager, 32 * 1024 * 1024 );
+	Assets assets( device,
+				   bindless_manager,
+				   pipelines,
+				   32 * 1024 * 1024,
+				   { .compression = settings.texture_compression == "gpu" ? texture_compression::GPU : texture_compression::NONE,
+					 .use_dds = !settings.no_dds } );
 	std::vector<scene> crowd_models;
 	scene gltf_scene;
 	if ( scene_path )

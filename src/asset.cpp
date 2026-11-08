@@ -5,6 +5,8 @@
 #include "dds_parser.h"
 
 #include <SDL3_image/SDL_image.h>
+#include <algorithm>
+#include <bit>
 #include <fastgltf/core.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -48,63 +50,6 @@ constexpr glm::vec4 make_vec4( const fastgltf::math::nvec3& vec, float w )
 	return { vec.x(), vec.y(), vec.z(), w };
 }
 
-SDL_PixelFormat sdl_gpu_format( SDL_PixelFormat format )
-{
-	switch ( format )
-	{
-		case SDL_PIXELFORMAT_BGR565:
-			return SDL_PIXELFORMAT_BGR565;
-		case SDL_PIXELFORMAT_BGRA5551:
-			return SDL_PIXELFORMAT_BGRA5551;
-		case SDL_PIXELFORMAT_BGR24:
-		case SDL_PIXELFORMAT_BGRX32:
-			return SDL_PIXELFORMAT_BGRX32;
-		case SDL_PIXELFORMAT_BGRA32:
-			return SDL_PIXELFORMAT_BGRA32;
-		case SDL_PIXELFORMAT_RGB24:
-		case SDL_PIXELFORMAT_RGBX32:
-			return SDL_PIXELFORMAT_RGBX32;
-		case SDL_PIXELFORMAT_RGBA32:
-			return SDL_PIXELFORMAT_RGBA32;
-		default:
-			return SDL_PIXELFORMAT_UNKNOWN;
-	}
-}
-
-VkFormat sdl_to_vulkan_format( SDL_PixelFormat format, bool sRGB = false )
-{
-	switch ( format )
-	{
-		case SDL_PIXELFORMAT_BGR565:
-			return VK_FORMAT_B5G6R5_UNORM_PACK16;
-		case SDL_PIXELFORMAT_BGRA5551:
-			return VK_FORMAT_B5G5R5A1_UNORM_PACK16;
-		case SDL_PIXELFORMAT_BGRA32:
-		case SDL_PIXELFORMAT_BGRX32:
-			return sRGB ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM;
-		case SDL_PIXELFORMAT_RGBA32:
-		case SDL_PIXELFORMAT_RGBX32:
-			return sRGB ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
-		default:
-			return VK_FORMAT_UNDEFINED;
-	}
-}
-
-std::size_t get_format_size( VkFormat format )
-{
-	switch ( format )
-	{
-		case VK_FORMAT_B5G6R5_UNORM_PACK16:
-		case VK_FORMAT_B5G5R5A1_UNORM_PACK16:
-			return 2;
-		case VK_FORMAT_B8G8R8A8_UNORM:
-		case VK_FORMAT_R8G8B8A8_UNORM:
-			return 4;
-		default:
-			return 0;
-	}
-}
-
 struct mesh_vertex
 {
 	glm::vec3 position;
@@ -114,17 +59,12 @@ struct mesh_vertex
 	glm::vec4 tangent;
 };
 
-renderer::raii::Texture make_image_from_surface( renderer::Device& device, const SDL_Surface& surface, bool sRGB )
+renderer::raii::Texture make_image_from_surface( renderer::Device& device, const SDL_Surface& surface, renderer::Texture::Format format )
 {
 	PROFILER_SCOPE();
-	const auto format = sdl_to_vulkan_format( sdl_gpu_format( surface.format ), sRGB );
-	if ( format == VK_FORMAT_UNDEFINED )
-	{
-		throw renderer::Error( "Unsupported format" );
-	}
 	using TexUsage = renderer::Texture::Usage;
 	const renderer::Extent2D extent( surface.w, surface.h );
-	return device.create_texture( renderer::Texture::Desc { .format = static_cast<renderer::Texture::Format>( format ),
+	return device.create_texture( renderer::Texture::Desc { .format = format,
 															.usage = TexUsage::TRANSFER_SRC | TexUsage::TRANSFER_DST | TexUsage::SAMPLED,
 															.extent = extent,
 															.mips = calc_mip_levels( extent ) } );
@@ -244,6 +184,137 @@ namespace MikkTSpace
 												  .m_setTSpaceBasic = set_tangent };
 }
 
+// Compresses decoded textures to BC formats on the GPU. Mips are generated on an uncompressed scratch image, then each one
+// is compressed to a buffer and copied to the final texture.
+class texture_compressor
+{
+public:
+	// Upper bound of the textures that can be compressed
+	static constexpr uint32_t SCRATCH_SIZE = 2048;
+
+	texture_compressor( renderer::Device& device, BindlessManager& bindless_manager, renderer::PipelineManager& pipelines )
+		: _bindless_manager( bindless_manager )
+		, _pipelines( pipelines )
+		, _scratch_unorm( make_scratch( device, bindless_manager, renderer::Texture::Format::R8G8B8A8_UNORM ) )
+		, _scratch_srgb( make_scratch( device, bindless_manager, renderer::Texture::Format::R8G8B8A8_SRGB ) )
+	{
+		using Format = renderer::Texture::Format;
+		_variants = { { { Format::BC1_RGB_UNORM, add_pipeline( "1", "0" ) },
+						{ Format::BC1_RGB_SRGB, add_pipeline( "1", "1" ) },
+						{ Format::BC3_UNORM, add_pipeline( "3", "0" ) },
+						{ Format::BC3_SRGB, add_pipeline( "3", "1" ) },
+						{ Format::BC5_UNORM, add_pipeline( "5", "0" ) } } };
+
+		// They stay in GENERAL for good: each texture replaces what it uses, and transitioning from UNDEFINED wouldn't wait for
+		// the previous texture's dispatches
+		auto cmd = device.grab_command_buffer();
+		cmd->reset();
+		cmd->begin();
+		cmd->transition_texture( _scratch_unorm.texture, renderer::Texture::Layout::UNDEFINED, renderer::Texture::Layout::GENERAL );
+		cmd->transition_texture( _scratch_srgb.texture, renderer::Texture::Layout::UNDEFINED, renderer::Texture::Layout::GENERAL );
+		cmd->end();
+		device.submit_and_wait( *cmd );
+	}
+
+	// Must be called before compressing: pipelines can't be fetched while others are being added
+	void wait_ready() { _pipelines.wait_ready(); }
+
+	// Records the compression of a tightly packed RGBA8 image at upload_offset to texture, which has a full mip chain.
+	// blocks must have room for all its mips at blocks_offset.
+	void compress( renderer::CommandBuffer& cmd,
+				   const renderer::Buffer& upload,
+				   size_t upload_offset,
+				   const renderer::Buffer& blocks,
+				   size_t blocks_offset,
+				   const renderer::Texture& texture ) const
+	{
+		PROFILER_SCOPE();
+		const auto format = texture.get_format();
+		const bool srgb = format == renderer::Texture::Format::BC1_RGB_SRGB || format == renderer::Texture::Format::BC3_SRGB;
+		const auto& scratch = srgb ? _scratch_srgb : _scratch_unorm;
+		const renderer::Texture source = scratch.texture;
+
+		// The previous texture's dispatches read the scratch image
+		cmd.barrier( renderer::Stage::COMPUTE, renderer::Stage::TRANSFER );
+		cmd.copy_buffer_to_texture( upload, upload_offset, source, 0, texture.get_extent() );
+		for ( int mip = 1; mip < texture.get_mips(); ++mip )
+		{
+			cmd.barrier( renderer::Stage::TRANSFER, renderer::Stage::TRANSFER );
+			cmd.blit_texture( source, source, mip - 1, texture.get_extent( mip - 1 ), mip, texture.get_extent( mip ), true );
+		}
+
+		cmd.barrier( renderer::Stage::TRANSFER, renderer::Stage::COMPUTE );
+		const auto pipeline = _pipelines.get( get_pipeline( format ) );
+		cmd.bind_pipeline( pipeline, _bindless_manager );
+		size_t offset = blocks_offset;
+		for ( int mip = 0; mip < texture.get_mips(); ++mip )
+		{
+			const auto extent = texture.get_extent( mip );
+			cmd.push_constants( pipeline,
+								push_constants { .source = scratch.handles.sampled_texture,
+												 .mip = mip,
+												 .extent = extent,
+												 .blocks = blocks.get_device_address() + offset } );
+			// Each thread compresses a 4x4 block, a workgroup 8x8 blocks
+			cmd.dispatch( ( ( extent.width + 3 ) / 4 + 7 ) / 8, ( ( extent.height + 3 ) / 4 + 7 ) / 8, 1 );
+			offset += texture.get_mip_size( mip );
+		}
+
+		cmd.barrier( renderer::Stage::COMPUTE, renderer::Stage::TRANSFER );
+		cmd.transition_texture( texture, renderer::Texture::Layout::UNDEFINED, renderer::Texture::Layout::GENERAL );
+		offset = blocks_offset;
+		for ( int mip = 0; mip < texture.get_mips(); ++mip )
+		{
+			cmd.copy_buffer_to_texture( blocks, offset, texture, mip );
+			offset += texture.get_mip_size( mip );
+		}
+	}
+
+private:
+	// Matches the push constants of bc_compress.comp
+	struct push_constants
+	{
+		renderer::BindlessSampledTexture source;
+		int32_t mip;
+		renderer::Extent2D extent;
+		uint32_t refinements = 2;
+		uint32_t padding = 0;
+		renderer::BufferHandle blocks;
+	};
+
+	static renderer::BindlessTexture
+	make_scratch( renderer::Device& device, BindlessManager& bindless_manager, renderer::Texture::Format format )
+	{
+		using TexUsage = renderer::Texture::Usage;
+		const renderer::Extent2D extent( SCRATCH_SIZE, SCRATCH_SIZE );
+		return bindless_manager.add_texture(
+			device.create_texture( { .format = format,
+									 .usage = TexUsage::TRANSFER_SRC | TexUsage::TRANSFER_DST | TexUsage::SAMPLED,
+									 .extent = extent,
+									 .mips = calc_mip_levels( extent ) } ) );
+	}
+
+	renderer::PipelineHandle add_pipeline( const char* bc_format, const char* srgb )
+	{
+		const std::vector<renderer::ShaderSource::Define> defines { { "BC_FORMAT", bc_format }, { "SRGB", srgb } };
+		return _pipelines.add( renderer::Pipeline::Desc { .push_constants_size = sizeof( push_constants ) },
+							   { { .path = "bc_compress.comp", .stage = renderer::ShaderStage::COMPUTE, .defines = defines } } );
+	}
+
+	renderer::PipelineHandle get_pipeline( renderer::Texture::Format format ) const
+	{
+		const auto it = std::find_if( begin( _variants ), end( _variants ), [ format ]( const auto& v ) { return v.first == format; } );
+		assert( it != end( _variants ) );
+		return it->second;
+	}
+
+	const BindlessManager& _bindless_manager;
+	renderer::PipelineManager& _pipelines;
+	renderer::BindlessTexture _scratch_unorm;
+	renderer::BindlessTexture _scratch_srgb;
+	std::array<std::pair<renderer::Texture::Format, renderer::PipelineHandle>, 5> _variants;
+};
+
 class gpu_upload_job
 {
 	enum class state
@@ -254,8 +325,10 @@ class gpu_upload_job
 	};
 
 public:
-	gpu_upload_job( renderer::Device& device, uint32_t max_size )
+	// compressed_size is the room for texture blocks compressed on the GPU, 0 if the job doesn't compress any
+	gpu_upload_job( renderer::Device& device, uint32_t max_size, uint32_t compressed_size = 0 )
 		: _size( max_size )
+		, _compressed_size( compressed_size )
 		, _device( device )
 		, _cmd_buffer( device.grab_command_buffer() )
 		, _upload_buffer( device.create_buffer( renderer::Buffer::Usage::TRANSFER_SRC, _size, renderer::Buffer::CpuUsage::WRITE ) )
@@ -263,6 +336,12 @@ public:
 	{
 		_cmd_buffer->reset();
 		_cmd_buffer->begin();
+		if ( _compressed_size != 0 )
+		{
+			using BufUsage = renderer::Buffer::Usage;
+			_compressed_buffer = device.create_buffer( BufUsage::STORAGE_BUFFER | BufUsage::TRANSFER_SRC | BufUsage::SHADER_DEVICE_ADDRESS,
+													   _compressed_size );
+		}
 	}
 
 	~gpu_upload_job() { assert( _state == state::DONE ); }
@@ -295,23 +374,18 @@ public:
 		queue( std::span<const T>( data ), buffer, offset );
 	}
 
+	// The surface must be RGBA32
 	void queue( const SDL_Surface& surface, renderer::Texture& texture )
 	{
 		assert( _state == state::UPLOADING );
-		const auto ptr = static_cast<std::byte*>( _upload_buffer.get_mapped_address() );
-		const auto gpu_format = sdl_gpu_format( surface.format );
-		const auto pitch = static_cast<int>( surface.w * get_format_size( sdl_to_vulkan_format( gpu_format ) ) );
-		const auto size = static_cast<size_t>( pitch * surface.h );
+		const auto size = surface_size( surface );
 		assert( size < _size );
 		align_offset( renderer::Texture::get_texel_block_size( texture.get_format() ) );
 		if ( size + _offset > _size )
 		{
 			flush_full();
 		}
-		if ( !SDL_ConvertPixels( surface.w, surface.h, surface.format, surface.pixels, surface.pitch, gpu_format, ptr + _offset, pitch ) )
-		{
-			throw renderer::Error( SDL_GetError() );
-		}
+		copy_surface( surface );
 		_cmd_buffer->transition_texture( texture, renderer::Texture::Layout::UNDEFINED, renderer::Texture::Layout::GENERAL );
 		_cmd_buffer->copy_buffer_to_texture( _upload_buffer, _offset, texture );
 		for ( int mip = 1; mip < texture.get_mips(); ++mip )
@@ -320,6 +394,35 @@ public:
 			_cmd_buffer->blit_texture( texture, texture, mip - 1, mip, true );
 		}
 		_offset += size;
+	}
+
+	// The surface must be RGBA32, with power of two sides that fit in the compressor's scratch images. Texture is the final
+	// block compressed texture.
+	void queue( const SDL_Surface& surface, renderer::Texture& texture, const texture_compressor& compressor )
+	{
+		assert( _state == state::UPLOADING );
+		assert( std::has_single_bit( static_cast<uint32_t>( surface.w ) ) && std::has_single_bit( static_cast<uint32_t>( surface.h ) ) );
+		assert( static_cast<uint32_t>( surface.w ) <= texture_compressor::SCRATCH_SIZE
+				&& static_cast<uint32_t>( surface.h ) <= texture_compressor::SCRATCH_SIZE );
+		const auto size = surface_size( surface );
+		assert( size < _size );
+		size_t compressed_size = 0;
+		for ( int mip = 0; mip < texture.get_mips(); ++mip )
+		{
+			compressed_size += texture.get_mip_size( mip );
+		}
+		assert( compressed_size <= _compressed_size );
+		const auto block_size = renderer::Texture::get_texel_block_size( texture.get_format() );
+		align_offset( renderer::Texture::get_texel_block_size( renderer::Texture::Format::R8G8B8A8_UNORM ) );
+		_compressed_offset = ( _compressed_offset + block_size - 1 ) / block_size * block_size;
+		if ( size + _offset > _size || compressed_size + _compressed_offset > _compressed_size )
+		{
+			flush_full();
+		}
+		copy_surface( surface );
+		compressor.compress( *_cmd_buffer, _upload_buffer, _offset, _compressed_buffer, _compressed_offset, texture );
+		_offset += size;
+		_compressed_offset += compressed_size;
 	}
 
 	// DDS files come with their mips, copied as is
@@ -380,6 +483,20 @@ public:
 private:
 	void align_offset( size_t alignment ) { _offset = ( _offset + alignment - 1 ) / alignment * alignment; }
 
+	static constexpr size_t RGBA32_SIZE = 4;
+	static size_t surface_size( const SDL_Surface& surface )
+	{
+		return static_cast<size_t>( surface.w ) * static_cast<size_t>( surface.h ) * RGBA32_SIZE;
+	}
+
+	// Copies the surface at the current offset
+	void copy_surface( const SDL_Surface& surface )
+	{
+		assert( surface.format == SDL_PIXELFORMAT_RGBA32 );
+		assert( static_cast<size_t>( surface.pitch ) == surface.w * RGBA32_SIZE );
+		memcpy( static_cast<std::byte*>( _upload_buffer.get_mapped_address() ) + _offset, surface.pixels, surface_size( surface ) );
+	}
+
 	void flush_full()
 	{
 		submit();
@@ -387,17 +504,21 @@ private:
 		wait_done();
 		_device.reset_fences( { _upload_fence } );
 		_offset = 0;
+		_compressed_offset = 0;
 		_state = state::UPLOADING;
 		_cmd_buffer->reset();
 		_cmd_buffer->begin();
 	}
 
 	size_t _size;
+	size_t _compressed_size;
 	renderer::Device& _device;
 	renderer::raii::CommandBuffer _cmd_buffer;
 	renderer::raii::Buffer _upload_buffer;
+	renderer::raii::Buffer _compressed_buffer;
 	renderer::raii::Fence _upload_fence;
 	size_t _offset = 0;
+	size_t _compressed_offset = 0;
 	state _state = state::UPLOADING;
 };
 
@@ -491,12 +612,88 @@ class Assets::load_job
 		std::vector<uint8_t> meshlet_triangles;
 	};
 
+	// How the shaders read a texture, which decides its formats
 	enum class texture_usage
 	{
 		UNUSED,
-		LINEAR,
-		SRGB
+		ALBEDO,
+		ALBEDO_ALPHA, // Alpha tested or blended
+		NORMAL,
+		METALLIC_ROUGHNESS,
+		OCCLUSION,
+		OCCLUSION_METALLIC_ROUGHNESS, // One texture referenced with both usages
+		EMISSIVE,
+		SPECULAR_GLOSSINESS,
+		SPECULAR // KHR_materials_specular's factor, in alpha
 	};
+
+	static bool is_srgb( texture_usage usage )
+	{
+		return usage == texture_usage::ALBEDO || usage == texture_usage::ALBEDO_ALPHA || usage == texture_usage::EMISSIVE
+			|| usage == texture_usage::SPECULAR_GLOSSINESS;
+	}
+
+	static renderer::Texture::Format uncompressed_format( texture_usage usage )
+	{
+		return is_srgb( usage ) ? renderer::Texture::Format::R8G8B8A8_SRGB : renderer::Texture::Format::R8G8B8A8_UNORM;
+	}
+
+	static renderer::Texture::Format compressed_format( texture_usage usage )
+	{
+		using Format = renderer::Texture::Format;
+		switch ( usage )
+		{
+			case texture_usage::ALBEDO:
+			case texture_usage::EMISSIVE:
+				return Format::BC1_RGB_SRGB;
+			case texture_usage::ALBEDO_ALPHA:
+			case texture_usage::SPECULAR_GLOSSINESS:
+				return Format::BC3_SRGB;
+			case texture_usage::NORMAL:
+				return Format::BC5_UNORM;
+			case texture_usage::METALLIC_ROUGHNESS:
+			case texture_usage::OCCLUSION:
+			case texture_usage::OCCLUSION_METALLIC_ROUGHNESS:
+				return Format::BC1_RGB_UNORM;
+			case texture_usage::SPECULAR:
+				return Format::BC3_UNORM;
+			case texture_usage::UNUSED:
+				break;
+		}
+		throw renderer::Error( "Unused texture has no format" );
+	}
+
+	// The usage of a texture referenced with both, if it can serve them
+	static std::optional<texture_usage> merge_usages( texture_usage a, texture_usage b )
+	{
+		const auto is_any_of = []( texture_usage usage, std::initializer_list<texture_usage> usages )
+		{ return std::find( begin( usages ), end( usages ), usage ) != end( usages ); };
+		if ( a == b )
+		{
+			return a;
+		}
+		// These all read RGB as sRGB, so one image can serve them, keeping alpha if one of them needs it. eg: an opaque and a
+		// blended material sharing a texture, or a glowing sign reusing its albedo and cutout alpha as emissive
+		const std::initializer_list<texture_usage> color { texture_usage::ALBEDO, texture_usage::ALBEDO_ALPHA, texture_usage::EMISSIVE };
+		if ( is_any_of( a, color ) && is_any_of( b, color ) )
+		{
+			return a == texture_usage::ALBEDO_ALPHA || b == texture_usage::ALBEDO_ALPHA ? texture_usage::ALBEDO_ALPHA
+																						: texture_usage::ALBEDO;
+		}
+		const std::initializer_list<texture_usage> orm { texture_usage::METALLIC_ROUGHNESS,
+														 texture_usage::OCCLUSION,
+														 texture_usage::OCCLUSION_METALLIC_ROUGHNESS };
+		if ( is_any_of( a, orm ) && is_any_of( b, orm ) )
+		{
+			return texture_usage::OCCLUSION_METALLIC_ROUGHNESS;
+		}
+		return std::nullopt;
+	}
+
+	static texture_usage albedo_usage( const fastgltf::Material& material )
+	{
+		return material.alphaMode == fastgltf::AlphaMode::Opaque ? texture_usage::ALBEDO : texture_usage::ALBEDO_ALPHA;
+	}
 
 	enum class image_usage : uint8_t
 	{
@@ -515,13 +712,20 @@ class Assets::load_job
 	using loaded_image = std::variant<std::monostate, sdl::raii::Surface, data_source>;
 
 public:
-	load_job( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& index_buffer, std::filesystem::path path )
+	load_job( renderer::Device& device,
+			  BindlessManager& bindless_manager,
+			  index_buffer& index_buffer,
+			  texture_compressor* compressor,
+			  bool use_dds,
+			  std::filesystem::path path )
 		: _device( device )
 		, _bindless_manager( bindless_manager )
 		, _index_buffer( index_buffer )
+		, _compressor( compressor )
+		, _use_dds( use_dds )
 		, _path( std::move( path ) )
 		, _mesh_upload( device, 32 * 1024 * 1024 )
-		, _texture_upload( device, 128 * 1024 * 1024 )
+		, _texture_upload( device, 128 * 1024 * 1024, compressor ? 64 * 1024 * 1024 : 0 )
 	{
 	}
 
@@ -594,28 +798,34 @@ private:
 		}
 	}
 
-	// Prefers the DDS image when there is one: block compressed with precomputed mips
-	static size_t get_image_index( const fastgltf::Texture& texture )
+	// Prefers the DDS image when there is one, block compressed with precomputed mips, unless it isn't wanted and there's
+	// another image
+	size_t get_image_index( const fastgltf::Texture& texture ) const
 	{
-		return texture.ddsImageIndex ? *texture.ddsImageIndex : *texture.imageIndex;
+		return texture.ddsImageIndex && ( _use_dds || !texture.imageIndex ) ? *texture.ddsImageIndex : *texture.imageIndex;
 	}
 
-	void add_texture_usage( size_t index, bool sRGB )
+	void add_texture_usage( size_t index, texture_usage usage )
 	{
-		const auto usage = sRGB ? texture_usage::SRGB : texture_usage::LINEAR;
 		if ( _textures_usage[ index ] == texture_usage::UNUSED )
 		{
-			const auto image_index = get_image_index( _asset.textures[ index ] );
+			const auto& texture = _asset.textures[ index ];
+			const auto image_index = get_image_index( texture );
 			if ( _images_usage[ image_index ] != image_usage::UNUSED )
 			{
 				throw renderer::Error( "Unsupported multiple texture references to the same image" );
 			}
-			_images_usage[ image_index ] = _asset.textures[ index ].ddsImageIndex ? image_usage::DDS : image_usage::DECODED;
+			_images_usage[ image_index ] = texture.ddsImageIndex && *texture.ddsImageIndex == image_index ? image_usage::DDS
+																										  : image_usage::DECODED;
 			_textures_usage[ index ] = usage;
 		}
-		else if ( _textures_usage[ index ] != usage )
+		else if ( const auto merged = merge_usages( _textures_usage[ index ], usage ) )
 		{
-			throw renderer::Error( "Unsupported mixed use of texture as both LINEAR and SRGB" );
+			_textures_usage[ index ] = *merged;
+		}
+		else
+		{
+			throw renderer::Error( "Unsupported use of a texture with incompatible usages" );
 		}
 	}
 
@@ -853,42 +1063,43 @@ private:
 					}
 					if ( material.specularGlossiness->diffuseTexture )
 					{
-						add_texture_usage( material.specularGlossiness->diffuseTexture->textureIndex, true );
+						add_texture_usage( material.specularGlossiness->diffuseTexture->textureIndex, albedo_usage( material ) );
 					}
 					if ( material.specularGlossiness->specularGlossinessTexture )
 					{
-						add_texture_usage( material.specularGlossiness->specularGlossinessTexture->textureIndex, true );
+						add_texture_usage( material.specularGlossiness->specularGlossinessTexture->textureIndex,
+										   texture_usage::SPECULAR_GLOSSINESS );
 					}
 				}
 				else
 				{
 					if ( material.pbrData.baseColorTexture )
 					{
-						add_texture_usage( material.pbrData.baseColorTexture->textureIndex, true );
+						add_texture_usage( material.pbrData.baseColorTexture->textureIndex, albedo_usage( material ) );
 					}
 					if ( material.pbrData.metallicRoughnessTexture )
 					{
-						add_texture_usage( material.pbrData.metallicRoughnessTexture->textureIndex, false );
+						add_texture_usage( material.pbrData.metallicRoughnessTexture->textureIndex, texture_usage::METALLIC_ROUGHNESS );
 					}
 					if ( material.specular )
 					{
 						if ( material.specular->specularTexture )
 						{
-							add_texture_usage( material.specular->specularTexture->textureIndex, false );
+							add_texture_usage( material.specular->specularTexture->textureIndex, texture_usage::SPECULAR );
 						}
 					}
 				}
 				if ( material.normalTexture )
 				{
-					add_texture_usage( material.normalTexture->textureIndex, false );
+					add_texture_usage( material.normalTexture->textureIndex, texture_usage::NORMAL );
 				}
 				if ( material.occlusionTexture )
 				{
-					add_texture_usage( material.occlusionTexture->textureIndex, false );
+					add_texture_usage( material.occlusionTexture->textureIndex, texture_usage::OCCLUSION );
 				}
 				if ( material.emissiveTexture )
 				{
-					add_texture_usage( material.emissiveTexture->textureIndex, true );
+					add_texture_usage( material.emissiveTexture->textureIndex, texture_usage::EMISSIVE );
 				}
 			}
 		}
@@ -1275,8 +1486,8 @@ private:
 			{
 				throw renderer::Error( SDL_GetError() );
 			}
-			// Palettes and grayscale are expanded to RGBA. XXX: grayscale and INDEX1MSB should probably be turned into R8_UNORM
-			else if ( sdl_gpu_format( surface->format ) == SDL_PIXELFORMAT_UNKNOWN )
+			// Every format is expanded to RGBA, including palettes and grayscale
+			else if ( surface->format != SDL_PIXELFORMAT_RGBA32 )
 			{
 				sdl::raii::Surface converted_image( SDL_ConvertSurface( surface.get(), SDL_PIXELFORMAT_RGBA32 ) );
 				if ( !converted_image )
@@ -1292,24 +1503,33 @@ private:
 	void upload_textures()
 	{
 		PROFILER_SCOPE();
+		if ( _compressor )
+		{
+			_compressor->wait_ready();
+		}
 		_textures.resize( _textures_usage.size() );
 		for ( size_t i = 0; i < _textures_usage.size(); ++i )
 		{
-			if ( _textures_usage[ i ] != texture_usage::UNUSED )
+			const auto usage = _textures_usage[ i ];
+			if ( usage != texture_usage::UNUSED )
 			{
 				const auto& image = _images[ get_image_index( _asset.textures[ i ] ) ];
-				const auto sRGB = _textures_usage[ i ] == texture_usage::SRGB;
 				if ( const auto dds_source = std::get_if<data_source>( &image ) )
 				{
-					const DDSFile dds( dds_source->data, sRGB );
+					const DDSFile dds( dds_source->data, is_srgb( usage ) );
 					auto tex = make_image_from_dds( _device, dds );
 					_texture_upload.queue( dds, tex );
 					_textures[ i ] = _bindless_manager.add_texture( std::move( tex ) );
 				}
+				else if ( const auto& surface = std::get<sdl::raii::Surface>( image ); _compressor )
+				{
+					auto tex = make_image_from_surface( _device, *surface, compressed_format( usage ) );
+					_texture_upload.queue( *surface, tex, *_compressor );
+					_textures[ i ] = _bindless_manager.add_texture( std::move( tex ) );
+				}
 				else
 				{
-					const auto& surface = std::get<sdl::raii::Surface>( image );
-					auto tex = make_image_from_surface( _device, *surface, sRGB );
+					auto tex = make_image_from_surface( _device, *surface, uncompressed_format( usage ) );
 					_texture_upload.queue( *surface, tex );
 					_textures[ i ] = _bindless_manager.add_texture( std::move( tex ) );
 				}
@@ -1478,6 +1698,8 @@ private:
 	renderer::Device& _device;
 	BindlessManager& _bindless_manager;
 	index_buffer& _index_buffer;
+	texture_compressor* _compressor;
+	bool _use_dds;
 	std::filesystem::path _path;
 	gpu_upload_job _mesh_upload;
 	gpu_upload_job _texture_upload;
@@ -1495,17 +1717,28 @@ private:
 	std::vector<mesh> _meshes;
 };
 
-Assets::Assets( renderer::Device& device, BindlessManager& bindless_manager, size_t max_indices )
+Assets::Assets( renderer::Device& device,
+				BindlessManager& bindless_manager,
+				renderer::PipelineManager& pipelines,
+				size_t max_indices,
+				const texture_options& options )
 	: _device( device )
 	, _bindless_manager( bindless_manager )
 	, _indices( device, max_indices )
+	, _texture_options( options )
 {
+	if ( options.compression == texture_compression::GPU )
+	{
+		_texture_compressor = std::make_unique<texture_compressor>( device, bindless_manager, pipelines );
+	}
 }
+
+Assets::~Assets() = default;
 
 scene Assets::load( const std::filesystem::path& path )
 {
 	PROFILER_SCOPE();
-	load_job job( _device, _bindless_manager, _indices, path );
+	load_job job( _device, _bindless_manager, _indices, _texture_compressor.get(), _texture_options.use_dds, path );
 	auto asset = job.run();
 	add_content( asset );
 	return std::move( asset.contents );

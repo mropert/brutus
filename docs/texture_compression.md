@@ -6,17 +6,19 @@ Scenes and their textures: [scenes.md](scenes.md).
 
 ## Done so far
 
-Nothing implemented yet. This file holds the plan.
+Steps 1 to 4 of the plan below. `--texture-compression gpu` compresses decoded images at load, `none` stays the default
+until step 5's measurements. `--no-dds` ignores DDS images when a texture has another image. `bc-compress-test` (in
+`test/`) checks the encoder alone.
 
 ## Current state
 
-- Decoded textures (`image_usage::DECODED`) are uploaded as RGBA8/BGRA8 (or 565/5551) with a full mip chain blitted
-  on the GPU (`gpu_upload_job::queue( const SDL_Surface&, ... )` in `src/asset.cpp`).
+- Decoded textures (`image_usage::DECODED`) are converted to RGBA8 and uploaded with a full mip chain blitted on the
+  GPU (`gpu_upload_job::queue( const SDL_Surface&, ... )` in `src/asset.cpp`), or compressed to BC with
+  `--texture-compression gpu`.
 - `MSFT_texture_dds` images are BC7 with offline mips, copied as is (`gpu_upload_job::queue( const DDSFile&, ... )`).
 - **Target: the crowd.** `player.glb` and `sabrina.glb` embed 20 PNGs, all 2048x2048 (13) or 2048x1024 (7):
   ~66M texels at mip 0, ~350 MB as RGBA8 with mips. Bistro has a BC7 DDS for every texture (normals included) and needs
   no recompression; its PNGs (7.8 GB) only serve as a stress test and a comparison against offline BC7.
-- `Texture::Format` (vk-renderer `src/renderer/texture.h`) has BC7 as its only block format.
 
 ## Plan
 
@@ -71,7 +73,7 @@ Plain functions, no bindings, no `main`, no `#version`:
     selection as Betsy, written for one thread per block instead of 4 threads + shared memory + atomics. Same output,
     and it lets BC3 and BC5 be one thread per block without a stitch pass.
   - Values rounded to integers after `* 255` (Betsy doesn't round, the bias thresholds compare exact integers).
-- No `common.glsl`: `min3` / `max3` are local helpers.
+- No `common.glsl`: `max3` is written out where it's used once, `min3` isn't needed anymore.
 
 BC3 = `uvec4( bc4_compress_block( alpha ), bc1_compress_block( rgb ) )` (alpha block first), BC5 =
 `uvec4( bc4( r ), bc4( g ) )`. BC1's block is written with `max >= min` endpoints, so it decodes the same in BC3
@@ -83,15 +85,14 @@ BC3 = `uvec4( bc4_compress_block( alpha ), bc1_compress_block( rgb ) )` (alpha b
 see below):
 
 - `local_size 8 x 8`, one thread per 4x4 block, one dispatch per mip.
-- Push constants: source `textures[]` index, mip, mip extent, blocks per row, output address (`buffer_reference`,
-  like `shadow_cascades.comp`), BC1 refinement count (Betsy uses 2).
+- Push constants: source `textures[]` index, mip, mip extent, BC1 refinement count (Betsy uses 2), output address
+  (`buffer_reference`, like `shadow_cascades.comp`). Mips are tightly packed, so blocks per row come from the extent.
 - Loads the 16 texels with `texelFetch( sampler2D( textures[ src ], samplers[ 0 ] ), clamp( pos, 0, extent - 1 ), mip )`
   (edge texels replicated for the last mips, smaller than a block: 2x2, 2x1, 1x1).
 - sRGB: the temporary source keeps today's `*_SRGB` format so the blits filter in linear space (mips identical to
   today's), the fetch returns linear values and the shader re-encodes to sRGB before quantizing to 8 bits; BC1/BC3
-  then encode the gamma values, written to a `BC1_RGB_SRGB` / `BC3_SRGB` texture. To check: the 8 bit round trip is
-  exact (all 256 values through a test dispatch); if not, vk-renderer needs `MUTABLE_FORMAT` views and we read a UNORM
-  view instead.
+  then encode the gamma values, written to a `BC1_RGB_SRGB` / `BC3_SRGB` texture. The 8 bit round trip is
+  exact: all 256 values come back through a test dispatch (`bc-compress-test`).
 - Writes `uvec2` (BC1) or `uvec4` (BC3, BC5) at `block_y * blocks_per_row + block_x`, mips one after the other: the
   layout `copy_buffer_to_texture` expects, as for DDS files.
 
@@ -124,9 +125,9 @@ The loop in `upload_textures` stays as it is: `make_image_from_surface` returns 
    | `SPECULAR` (`KHR_materials_specular`) | A | `BC3_UNORM` (BC4 later) | `R8G8B8A8_UNORM` |
 
    - sRGB formats only decode RGB as sRGB, alpha stays linear: what alpha and glossiness need.
-   - One texture referenced with two usages: `ALBEDO` + `ALBEDO_ALPHA` -> `ALBEDO_ALPHA`, `METALLIC_ROUGHNESS` +
-     `OCCLUSION` -> `OCCLUSION_METALLIC_ROUGHNESS` (the shader already reuses that sample); any other mix throws, like
-     the mixed sRGB case today.
+   - One texture referenced with two usages: any mix of `ALBEDO`, `ALBEDO_ALPHA` and `EMISSIVE` -> `ALBEDO_ALPHA` if one
+     of them is, else `ALBEDO` (Bistro's bakery sign is both albedo and emissive); `METALLIC_ROUGHNESS` + `OCCLUSION` ->
+     `OCCLUSION_METALLIC_ROUGHNESS` (the shader already reuses that sample); any other mix throws.
    - BC4 for `OCCLUSION` / `SPECULAR` puts the value in `.r`, `mesh.frag` reads specular from `.a`: needs a shader
      change or swizzled views (not in vk-renderer), later.
    - All-RGBA8 drops today's 565 / 5551 uploads in uncompressed mode; nothing in the crowd uses them.
@@ -141,7 +142,9 @@ The loop in `upload_textures` stays as it is: `make_image_from_surface` returns 
      input, so it fills more slowly than the 128 MB staging buffer);
    - `barrier( COMPUTE, TRANSFER )`, `transition_texture` + `copy_buffer_to_texture` per mip into the final texture.
    - `flush_full` also triggers when the scratch buffer is full.
-3. `Assets` needs the `PipelineManager` (constructed just before it in `main.cpp`).
+3. `Assets` needs the `PipelineManager` (constructed just before it in `main.cpp`). The upload waits for it with
+   `wait_ready()` once images are decoded: pipelines can't be fetched while others are being added, and waiting that late
+   lets shaders compile while images decode.
 4. **Command line**: `--texture-compression none|gpu` (default `none` until measured, then flip it) and `--no-dds`
    (ignore `MSFT_texture_dds`) so Bistro can compare PNG, PNG + GPU BC and DDS BC7 in one build.
 
@@ -158,15 +161,18 @@ Only if measurements show otherwise:
 
 ### Resource management
 
-**Scratch images, created once per load.** The same idea as virtual texturing systems compressing fixed size pages
-into a fixed scratch area (id Tech 5, Far Cry 4's adaptive virtual textures, Unreal's runtime virtual textures):
+**Scratch images, permanent.** The same idea as virtual texturing systems compressing fixed size pages into a fixed
+scratch area (id Tech 5, Far Cry 4's adaptive virtual textures, Unreal's runtime virtual textures):
 
-- Two images, `R8G8B8A8_UNORM` and `R8G8B8A8_SRGB`, `TRANSFER_SRC | TRANSFER_DST | SAMPLED`, full mip chain, sized to
-  the largest decoded texture of the load (sizes are known after decoding, before the upload): 2048x2048 for the
-  crowd, ~22 MB each with mips. Two because blits filter in the image's own format, not a view's: one image with
-  `MUTABLE_FORMAT` views would filter sRGB mips in gamma space. They can share one allocation since only one is used
-  at a time (~22 MB instead of ~44 MB for the crowd); first version: two plain allocations.
-- Owned by `gpu_upload_job`, with their bindless slots added once, destroyed with the job.
+- Two images, `R8G8B8A8_UNORM` and `R8G8B8A8_SRGB`, `TRANSFER_SRC | TRANSFER_DST | SAMPLED`, full mip chain,
+  2048x2048 (22.4 MB each with mips). Two because blits filter in the image's own format, not a view's: one image with
+  `MUTABLE_FORMAT` views would filter sRGB mips in gamma space. They could share one allocation since only one is used
+  at a time.
+- Owned by `texture_compressor`, itself owned by `Assets` and only created with `--texture-compression gpu`. Permanent
+  because `add_texture` takes ownership forever and vk-renderer has no bindless removal; temporary ones need
+  `remove_texture` first. The crowd loads 2 files, each through its own `load_job`, so they outlive the jobs either way.
+- They stay in `GENERAL` once transitioned at creation. Each texture only replaces what it uses, and a transition from
+  `UNDEFINED` has no source scope: it wouldn't wait for the previous texture's dispatches.
 - SDL converts every surface to RGBA32 (instead of BGRA32 / 565 / 5551 today), so one format per scratch image fits
   all.
 - The real extent goes in the compress shader's push constants, its fetches clamp to it.
@@ -177,11 +183,10 @@ into a fixed scratch area (id Tech 5, Far Cry 4's adaptive virtual textures, Unr
   the previous texture. Exact 2:1 levels only read the 2x2 inside. If a non power of two asset needs compressing: copy
   one more row and column replicating the edge, or accept a 1 texel seam.
 - **Serial textures**: the next texture's copy waits for the current one's dispatches to finish reading
-  (`barrier( COMPUTE, TRANSFER )` before the copy, then `transition_texture( UNDEFINED, GENERAL )`). The PCIe copy of
-  one texture no longer overlaps the compression of the previous one: ~20 x (1-1.5 ms copy + up to ~1 ms compression)
-  ~ 50 ms for the crowd. If it shows, two pairs of scratch images used in alternation.
-- A texture bigger than the scratch image can't happen (sized to the largest); a cap (e.g. 4096) with a dedicated
-  temporary above it only if a huge texture makes the scratch size unreasonable.
+  (`barrier( COMPUTE, TRANSFER )` before the copy). The PCIe copy of one texture no longer overlaps the compression of
+  the previous one. If it shows, two pairs of scratch images used in alternation.
+- **Size limit**: textures above 2048x2048, or that aren't powers of two, are asserted on. The crowd fits. Bistro's PNGs
+  don't (46 at 4096x4096, 6 at 4096x2048, one at 2560x2560), so `--no-dds --texture-compression gpu` can't load it yet.
 
 Rejected for now: a temporary texture per texture, released after each fence wait. It needs a VMA allocation per
 texture and `remove_texture` with a free list of bindless slots. Its later refinement, temporaries aliased on one
@@ -203,8 +208,7 @@ to have completed, so handles and slots live until the fence.
   Not needed for the load, needed for streaming later, free to set now.
 - `PARTIALLY_BOUND`: by default every element of an array a shader references must be valid (written, resource
   alive) whenever a draw or dispatch uses the set. Only the descriptors actually accessed need to be with the flag.
-  Our `textures[]` has 8192 slots and only the loaded textures written, which strictly breaks the default rule today;
-  the scratch images' slots go stale once the job is destroyed, which would make every later draw invalid without it.
+  Our `textures[]` has 8192 slots and only the loaded textures written, which strictly breaks the default rule today.
 - Setup: `eUpdateAfterBind | eUpdateUnusedWhilePending | ePartiallyBound` on the texture, image and sampler bindings,
   `eUpdateAfterBindPool` on the layout, `eUpdateAfterBind` on the pool, and the features
   `descriptorBindingSampledImageUpdateAfterBind`, `descriptorBindingStorageImageUpdateAfterBind`,
@@ -299,12 +303,29 @@ All are covered by `textureCompressionBC`, already mandatory. The DDS parser can
 
 ## Experiments
 
-None yet.
+- **Encoder alone** (`bc-compress-test <output directory> <images>`, Debug, 2026-11-08, `scratch/texcomp/bc/`): decoded
+  by the GPU (BC texture blitted to RGBA8), compared per mip. The crowd's 17 referenced textures, each in its planned
+  format, 2 refinements, mip 0 / whole chain PSNR: BC1 sRGB 46.3-51.7 / 41.3-50.0 dB, BC1 UNORM 48.4-52.0 / 44.5-52.1 dB,
+  BC3 sRGB 48.7 / 47.3 dB, BC5 51.1-61.7 / 46.4-56.2 dB. BC3 alpha on a test image with real alpha: 49.5 dB. Not compared
+  against stb_dxt (not available here).
+- **Crowd, `none` vs `gpu`** (`--benchmark --capture`, Debug, 2026-11-08, `scratch/texcomp/step4/`): `none` is pixel
+  identical to before this work. `gpu`: 4.79% of pixels change by more than 2/255, 0.42% by more than 8, 0.08% by more
+  than 16, 0.01% by more than 32, mean 0.80/255, no validation output. A faint BC1 mark shows next to the mouth of the
+  front character.
+- **Memory, crowd** (UI, Debug): VRAM 660 -> 417 MB (-243 MB), bindless textures 414 -> 172 MB including 45 MB of
+  permanent scratch images. The 64 MB block buffer only lives during a load.
+- **Bistro with DDS**: scene pixel identical to before (UI excluded), no validation output.
 
 ## Findings
 
 - Betsy has no BC2 or BC7; BC3 and BC5 are BC1 and BC4 passes stitched on the host. `master` and `v1.1-beta` have the
   same encoding code.
 - Betsy's dithered BC1 path reads pixel 2 of each row twice (`MatchColorsBlock`, `BC1_DITHER`).
-- vk-renderer's bindless set has no `UPDATE_AFTER_BIND`: any pass that binds it during the load blocks `add_texture`
+- vk-renderer's bindless set had no `UPDATE_AFTER_BIND` before step 1: any pass binding it during the load blocked `add_texture`
   until that command buffer is done.
+- BC formats can't be storage images, and optimal tiling is opaque: the shader writes blocks to a buffer, and a copy
+  does the tiling, as for DDS files.
+- The refinement step isn't always better: 2 refinements gain up to 2.9 dB on detailed textures but lose 0.8 dB on four
+  metallic/roughness textures, because new endpoints are kept without checking the error went down.
+- A BC1 block's worst case is colors off a single line: `player_02`'s 16x16 mip is at 20.6 dB, its blocks mix cream, cyan
+  and dark grey. Not a bug, and only visible at that mip's distance.
