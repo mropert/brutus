@@ -6,6 +6,7 @@
 
 # Local runtime state written by the app
 /imgui.ini
+/shadercache/
 /startup_*.opt
 
 # Temporary files from tools and experiments: captures, traces, screenshots, benchmark output

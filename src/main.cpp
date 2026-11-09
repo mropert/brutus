@@ -360,15 +360,16 @@ int main( int argc, char** argv )
 {
 	struct initial_settings
 	{
+		std::string texture_compression = "gpu";
+		std::string shader_cache_dir = "shadercache";
 		int msaa = 4;
 		int shadow_cascades = 4;
 		int shadow_distance = 25;
+		int capture_frame = 16;
 		bool benchmark = false;
 		bool mesh_shading = true;
 		bool occlusion_culling = true;
 		bool show_cascades = false;
-		int capture_frame = 16;
-		std::string texture_compression = "gpu";
 		bool no_dds = false;
 	};
 
@@ -397,8 +398,10 @@ int main( int argc, char** argv )
 		.choices( 1, 2, 4, 8 )
 		.store_into( settings.msaa )
 		.help( "MSAA sample count of the main passes, 1 renders without resolves" );
+	command_line.add_argument( "--no-shader-cache" ).flag().help( "Disable shader cache" );
 	command_line.add_argument( "--occlusion-culling" ).action( store_bool( settings.occlusion_culling ) ).help( "Use occlusion culling" );
 	command_line.add_argument( "--scene" ).help( "glTF scene to render instead of the crowd" );
+	command_line.add_argument( "--shader-cache" ).store_into( settings.shader_cache_dir ).help( "Shader cache directory" );
 	command_line.add_argument( "--shadow-cascades" )
 		.scan<'i', int>()
 		.choices( 0, 1, 2, 3, 4 )
@@ -434,6 +437,11 @@ int main( int argc, char** argv )
 	{
 		std::print( stderr, "Capture frame must be at least 1\n" );
 		return EINVAL;
+	}
+
+	if ( command_line.get<bool>( "--no-shader-cache" ) )
+	{
+		settings.shader_cache_dir = { };
 	}
 
 	const auto scene_path = command_line.present( "--scene" );
@@ -498,7 +506,7 @@ int main( int argc, char** argv )
 	}
 
 	BindlessManager bindless_manager( device, std::array { MAX_MESHES, MAX_MATERIALS } );
-	renderer::PipelineManager pipelines( device, "shaders", bindless_manager );
+	renderer::PipelineManager pipelines( device, "shaders", bindless_manager, settings.shader_cache_dir );
 
 	SceneRenderer scene_renderer( device, swapchain_format, settings.msaa, bindless_manager, pipelines );
 
