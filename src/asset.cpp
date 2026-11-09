@@ -492,6 +492,7 @@ private:
 	// Copies the surface at the current offset
 	void copy_surface( const SDL_Surface& surface )
 	{
+		PROFILER_SCOPE();
 		assert( surface.format == SDL_PIXELFORMAT_RGBA32 );
 		assert( static_cast<size_t>( surface.pitch ) == surface.w * RGBA32_SIZE );
 		memcpy( static_cast<std::byte*>( _upload_buffer.get_mapped_address() ) + _offset, surface.pixels, surface_size( surface ) );
