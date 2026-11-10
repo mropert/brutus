@@ -34,6 +34,7 @@
 #include "frame_output.h"
 #include "gpu_timing.h"
 #include "scene_renderer.h"
+#include "texture_compressor.h"
 
 static constexpr uint32_t MAX_MESHES = 4096;
 static constexpr uint32_t MAX_MATERIALS = 8192;
@@ -510,13 +511,11 @@ int main( int argc, char** argv )
 
 	SceneRenderer scene_renderer( device, swapchain_format, settings.msaa, bindless_manager, pipelines );
 
+	const auto compressor = settings.texture_compression == "gpu"
+		? std::make_unique<texture_compressor>( device, bindless_manager, pipelines )
+		: nullptr;
 	// Bistro needs ~27M
-	Assets assets( device,
-				   bindless_manager,
-				   pipelines,
-				   32 * 1024 * 1024,
-				   { .compression = settings.texture_compression == "gpu" ? texture_compression::GPU : texture_compression::NONE,
-					 .use_dds = !settings.no_dds } );
+	Assets assets( device, bindless_manager, compressor.get(), 32 * 1024 * 1024, { .use_dds = !settings.no_dds } );
 	std::vector<scene> crowd_models;
 	scene gltf_scene;
 	if ( scene_path )

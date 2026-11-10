@@ -3,6 +3,7 @@
 #include "asset.h"
 
 #include "dds_parser.h"
+#include "texture_compressor.h"
 
 #include <SDL3_image/SDL_image.h>
 #include <algorithm>
@@ -183,137 +184,6 @@ namespace MikkTSpace
 												  .m_getTexCoord = get_texcoord,
 												  .m_setTSpaceBasic = set_tangent };
 }
-
-// Compresses decoded textures to BC formats on the GPU. Mips are generated on an uncompressed scratch image, then each one
-// is compressed to a buffer and copied to the final texture.
-class texture_compressor
-{
-public:
-	// Upper bound of the textures that can be compressed
-	static constexpr uint32_t SCRATCH_SIZE = 2048;
-
-	texture_compressor( renderer::Device& device, BindlessManager& bindless_manager, renderer::PipelineManager& pipelines )
-		: _bindless_manager( bindless_manager )
-		, _pipelines( pipelines )
-		, _scratch_unorm( make_scratch( device, bindless_manager, renderer::Texture::Format::R8G8B8A8_UNORM ) )
-		, _scratch_srgb( make_scratch( device, bindless_manager, renderer::Texture::Format::R8G8B8A8_SRGB ) )
-	{
-		using Format = renderer::Texture::Format;
-		_variants = { { { Format::BC1_RGB_UNORM, add_pipeline( "1", "0" ) },
-						{ Format::BC1_RGB_SRGB, add_pipeline( "1", "1" ) },
-						{ Format::BC3_UNORM, add_pipeline( "3", "0" ) },
-						{ Format::BC3_SRGB, add_pipeline( "3", "1" ) },
-						{ Format::BC5_UNORM, add_pipeline( "5", "0" ) } } };
-
-		// They stay in GENERAL for good: each texture replaces what it uses, and transitioning from UNDEFINED wouldn't wait for
-		// the previous texture's dispatches
-		auto cmd = device.grab_command_buffer();
-		cmd->reset();
-		cmd->begin();
-		cmd->transition_texture( _scratch_unorm.texture, renderer::Texture::Layout::UNDEFINED, renderer::Texture::Layout::GENERAL );
-		cmd->transition_texture( _scratch_srgb.texture, renderer::Texture::Layout::UNDEFINED, renderer::Texture::Layout::GENERAL );
-		cmd->end();
-		device.submit_and_wait( *cmd );
-	}
-
-	// Must be called before compressing: pipelines can't be fetched while others are being added
-	void wait_ready() { _pipelines.wait_ready(); }
-
-	// Records the compression of a tightly packed RGBA8 image at upload_offset to texture, which has a full mip chain.
-	// blocks must have room for all its mips at blocks_offset.
-	void compress( renderer::CommandBuffer& cmd,
-				   const renderer::Buffer& upload,
-				   size_t upload_offset,
-				   const renderer::Buffer& blocks,
-				   size_t blocks_offset,
-				   const renderer::Texture& texture ) const
-	{
-		PROFILER_SCOPE();
-		const auto format = texture.get_format();
-		const bool srgb = format == renderer::Texture::Format::BC1_RGB_SRGB || format == renderer::Texture::Format::BC3_SRGB;
-		const auto& scratch = srgb ? _scratch_srgb : _scratch_unorm;
-		const renderer::Texture source = scratch.texture;
-
-		// The previous texture's dispatches read the scratch image
-		cmd.barrier( renderer::Stage::COMPUTE, renderer::Stage::TRANSFER );
-		cmd.copy_buffer_to_texture( upload, upload_offset, source, 0, texture.get_extent() );
-		for ( int mip = 1; mip < texture.get_mips(); ++mip )
-		{
-			cmd.barrier( renderer::Stage::TRANSFER, renderer::Stage::TRANSFER );
-			cmd.blit_texture( source, source, mip - 1, texture.get_extent( mip - 1 ), mip, texture.get_extent( mip ), true );
-		}
-
-		cmd.barrier( renderer::Stage::TRANSFER, renderer::Stage::COMPUTE );
-		const auto pipeline = _pipelines.get( get_pipeline( format ) );
-		cmd.bind_pipeline( pipeline, _bindless_manager );
-		size_t offset = blocks_offset;
-		for ( int mip = 0; mip < texture.get_mips(); ++mip )
-		{
-			const auto extent = texture.get_extent( mip );
-			cmd.push_constants( pipeline,
-								push_constants { .source = scratch.handles.sampled_texture,
-												 .mip = mip,
-												 .extent = extent,
-												 .blocks = blocks.get_device_address() + offset } );
-			// Each thread compresses a 4x4 block, a workgroup 8x8 blocks
-			cmd.dispatch( ( ( extent.width + 3 ) / 4 + 7 ) / 8, ( ( extent.height + 3 ) / 4 + 7 ) / 8, 1 );
-			offset += texture.get_mip_size( mip );
-		}
-
-		cmd.barrier( renderer::Stage::COMPUTE, renderer::Stage::TRANSFER );
-		cmd.transition_texture( texture, renderer::Texture::Layout::UNDEFINED, renderer::Texture::Layout::GENERAL );
-		offset = blocks_offset;
-		for ( int mip = 0; mip < texture.get_mips(); ++mip )
-		{
-			cmd.copy_buffer_to_texture( blocks, offset, texture, mip );
-			offset += texture.get_mip_size( mip );
-		}
-	}
-
-private:
-	// Matches the push constants of bc_compress.comp
-	struct push_constants
-	{
-		renderer::BindlessSampledTexture source;
-		int32_t mip;
-		renderer::Extent2D extent;
-		uint32_t refinements = 2;
-		uint32_t padding = 0;
-		renderer::BufferHandle blocks;
-	};
-
-	static renderer::BindlessTexture
-	make_scratch( renderer::Device& device, BindlessManager& bindless_manager, renderer::Texture::Format format )
-	{
-		using TexUsage = renderer::Texture::Usage;
-		const renderer::Extent2D extent( SCRATCH_SIZE, SCRATCH_SIZE );
-		return bindless_manager.add_texture(
-			device.create_texture( { .format = format,
-									 .usage = TexUsage::TRANSFER_SRC | TexUsage::TRANSFER_DST | TexUsage::SAMPLED,
-									 .extent = extent,
-									 .mips = calc_mip_levels( extent ) } ) );
-	}
-
-	renderer::PipelineHandle add_pipeline( const char* bc_format, const char* srgb )
-	{
-		const std::vector<renderer::ShaderSource::Define> defines { { "BC_FORMAT", bc_format }, { "SRGB", srgb } };
-		return _pipelines.add( renderer::Pipeline::Desc { .push_constants_size = sizeof( push_constants ) },
-							   { { .path = "bc_compress.comp", .stage = renderer::ShaderStage::COMPUTE, .defines = defines } } );
-	}
-
-	renderer::PipelineHandle get_pipeline( renderer::Texture::Format format ) const
-	{
-		const auto it = std::find_if( begin( _variants ), end( _variants ), [ format ]( const auto& v ) { return v.first == format; } );
-		assert( it != end( _variants ) );
-		return it->second;
-	}
-
-	const BindlessManager& _bindless_manager;
-	renderer::PipelineManager& _pipelines;
-	renderer::BindlessTexture _scratch_unorm;
-	renderer::BindlessTexture _scratch_srgb;
-	std::array<std::pair<renderer::Texture::Format, renderer::PipelineHandle>, 5> _variants;
-};
 
 class gpu_upload_job
 {
@@ -1720,26 +1590,21 @@ private:
 
 Assets::Assets( renderer::Device& device,
 				BindlessManager& bindless_manager,
-				renderer::PipelineManager& pipelines,
+				texture_compressor* compressor,
 				size_t max_indices,
 				const texture_options& options )
 	: _device( device )
 	, _bindless_manager( bindless_manager )
 	, _indices( device, max_indices )
 	, _texture_options( options )
+	, _texture_compressor( compressor )
 {
-	if ( options.compression == texture_compression::GPU )
-	{
-		_texture_compressor = std::make_unique<texture_compressor>( device, bindless_manager, pipelines );
-	}
 }
-
-Assets::~Assets() = default;
 
 scene Assets::load( const std::filesystem::path& path )
 {
 	PROFILER_SCOPE();
-	load_job job( _device, _bindless_manager, _indices, _texture_compressor.get(), _texture_options.use_dds, path );
+	load_job job( _device, _bindless_manager, _indices, _texture_compressor, _texture_options.use_dds, path );
 	auto asset = job.run();
 	add_content( asset );
 	return std::move( asset.contents );

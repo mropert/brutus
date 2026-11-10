@@ -7,12 +7,10 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_aligned.hpp>
-#include <memory>
 #include <optional>
 #include <renderer/bindless.h>
 #include <renderer/buffer.h>
 #include <renderer/device.h>
-#include <renderer/pipeline_manager.h>
 #include <span>
 #include <vector>
 
@@ -145,15 +143,8 @@ struct scene
 	std::optional<glm::vec3> sun_direction; // The direction the light travels
 };
 
-enum class texture_compression
-{
-	NONE,
-	GPU // Decoded images are compressed to BC formats at load, see docs/texture_compression.md
-};
-
 struct texture_options
 {
-	texture_compression compression = texture_compression::NONE;
 	bool use_dds = true; // Prefer MSFT_texture_dds images when a texture has one
 };
 
@@ -162,12 +153,12 @@ class texture_compressor;
 class Assets
 {
 public:
+	// Without a compressor, decoded images are uploaded uncompressed
 	Assets( renderer::Device& device,
 			BindlessManager& bindless_manager,
-			renderer::PipelineManager& pipelines,
+			texture_compressor* compressor,
 			size_t max_indices,
 			const texture_options& options );
-	~Assets();
 
 	scene load( const std::filesystem::path& path );
 
@@ -189,5 +180,5 @@ private:
 	std::vector<mesh> _meshes;
 	index_buffer _indices;
 	texture_options _texture_options;
-	std::unique_ptr<texture_compressor> _texture_compressor; // Null without compression
+	texture_compressor* _texture_compressor; // Null without compression
 };

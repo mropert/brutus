@@ -51,6 +51,7 @@ target_sources(brutus-vulkan PRIVATE
 		src/frame_output.cpp
 		src/main.cpp
 		src/scene_renderer.cpp
+		src/texture_compressor.cpp
 )
 target_compile_definitions(brutus-vulkan PRIVATE GLM_FORCE_INTRINSICS GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_link_libraries(brutus-vulkan PRIVATE
