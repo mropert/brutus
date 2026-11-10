@@ -266,14 +266,10 @@ public:
 		_offset += size;
 	}
 
-	// The surface must be RGBA32, with power of two sides that fit in the compressor's scratch images. Texture is the final
-	// block compressed texture.
+	// The surface must be RGBA32 and meet the compressor's requirements. Texture is the final block compressed texture.
 	void queue( const SDL_Surface& surface, renderer::Texture& texture, const texture_compressor& compressor )
 	{
 		assert( _state == state::UPLOADING );
-		assert( std::has_single_bit( static_cast<uint32_t>( surface.w ) ) && std::has_single_bit( static_cast<uint32_t>( surface.h ) ) );
-		assert( static_cast<uint32_t>( surface.w ) <= texture_compressor::SCRATCH_SIZE
-				&& static_cast<uint32_t>( surface.h ) <= texture_compressor::SCRATCH_SIZE );
 		const auto size = surface_size( surface );
 		assert( size < _size );
 		size_t compressed_size = 0;
@@ -289,8 +285,9 @@ public:
 		{
 			flush_full();
 		}
-		copy_surface( surface );
+		// Recording first: compress() rejects a texture too large before it's copied, the copy is only read at submit
 		compressor.compress( *_cmd_buffer, _upload_buffer, _offset, _compressed_buffer, _compressed_offset, texture );
+		copy_surface( surface );
 		_offset += size;
 		_compressed_offset += compressed_size;
 	}

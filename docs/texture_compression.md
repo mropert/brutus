@@ -185,8 +185,10 @@ scratch area (id Tech 5, Far Cry 4's adaptive virtual textures, Unreal's runtime
 - **Serial textures**: the next texture's copy waits for the current one's dispatches to finish reading
   (`barrier( COMPUTE, TRANSFER )` before the copy). The PCIe copy of one texture no longer overlaps the compression of
   the previous one. If it shows, two pairs of scratch images used in alternation.
-- **Size limit**: textures above 2048x2048, or that aren't powers of two, are asserted on. The crowd fits. Bistro's PNGs
-  don't (46 at 4096x4096, 6 at 4096x2048, one at 2560x2560), so `--no-dds --texture-compression gpu` can't load it yet.
+- **Size limit**: the compressor's constructor takes the largest side it accepts, which sizes its scratch images (2048 in
+  `main`). Larger textures throw `std::invalid_argument` before anything is copied; sides that aren't powers of two are
+  asserted on. The crowd fits. Bistro's PNGs don't (46 at 4096x4096, 6 at 4096x2048, one at 2560x2560), so
+  `--no-dds --texture-compression gpu` can't load it yet.
 
 Rejected for now: a temporary texture per texture, released after each fence wait. It needs a VMA allocation per
 texture and `remove_texture` with a free list of bindless slots. Its later refinement, temporaries aliased on one

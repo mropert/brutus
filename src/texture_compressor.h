@@ -16,17 +16,19 @@
 class texture_compressor
 {
 public:
-	// Upper bound of the textures that can be compressed
-	static constexpr uint32_t SCRATCH_SIZE = 2048;
-
-	texture_compressor( renderer::Device& device, BindlessManager& bindless_manager, renderer::PipelineManager& pipelines );
+	// max_size bounds the sides of the textures it can compress, its two scratch images are that size
+	texture_compressor( renderer::Device& device,
+						BindlessManager& bindless_manager,
+						renderer::PipelineManager& pipelines,
+						uint32_t max_size );
 
 	// Must be called before compressing: pipelines can't be fetched while others are being added
 	void wait_ready() { _pipelines.wait_ready(); }
 	bool is_ready() { return _pipelines.is_ready(); }
 
 	// Records the compression of a tightly packed RGBA8 image at upload_offset to texture, which has a full mip chain.
-	// blocks must have room for all its mips at blocks_offset.
+	// blocks must have room for all its mips at blocks_offset. Its sides must be powers of two, throws
+	// std::invalid_argument if one is above max_size.
 	void compress( renderer::CommandBuffer& cmd,
 				   const renderer::Buffer& upload,
 				   size_t upload_offset,
@@ -40,6 +42,7 @@ private:
 
 	const BindlessManager& _bindless_manager;
 	renderer::PipelineManager& _pipelines;
+	uint32_t _max_size;
 	renderer::BindlessTexture _scratch_unorm;
 	renderer::BindlessTexture _scratch_srgb;
 	std::array<std::pair<renderer::Texture::Format, renderer::PipelineHandle>, 5> _variants;

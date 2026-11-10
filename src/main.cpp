@@ -537,7 +537,8 @@ int main( int argc, char** argv )
 	SceneRenderer scene_renderer( device, swapchain_format, settings.msaa, bindless_manager, pipelines );
 
 	const auto compressor = settings.texture_compression == "gpu"
-		? std::make_unique<texture_compressor>( device, bindless_manager, pipelines )
+		// The crowd's textures are 2048x2048 at most, Bistro has larger ones
+		? std::make_unique<texture_compressor>( device, bindless_manager, pipelines, 2048 )
 		: nullptr;
 	// Bistro needs ~27M
 	Assets assets( device, bindless_manager, compressor.get(), 32 * 1024 * 1024, { .use_dds = !settings.no_dds } );

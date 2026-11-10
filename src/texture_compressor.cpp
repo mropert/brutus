@@ -1,8 +1,11 @@
 #include "texture_compressor.h"
 
 #include <algorithm>
+#include <bit>
 #include <cassert>
+#include <format>
 #include <renderer/details/profiler.h>
+#include <stdexcept>
 #include <vector>
 
 namespace
@@ -18,10 +21,11 @@ namespace
 		renderer::BufferHandle blocks;
 	};
 
-	renderer::BindlessTexture make_scratch( renderer::Device& device, BindlessManager& bindless_manager, renderer::Texture::Format format )
+	renderer::BindlessTexture
+	make_scratch( renderer::Device& device, BindlessManager& bindless_manager, renderer::Texture::Format format, uint32_t size )
 	{
 		using TexUsage = renderer::Texture::Usage;
-		const renderer::Extent2D extent( texture_compressor::SCRATCH_SIZE, texture_compressor::SCRATCH_SIZE );
+		const renderer::Extent2D extent( size, size );
 		return bindless_manager.add_texture(
 			device.create_texture( { .format = format,
 									 .usage = TexUsage::TRANSFER_SRC | TexUsage::TRANSFER_DST | TexUsage::SAMPLED,
@@ -30,11 +34,15 @@ namespace
 	}
 }
 
-texture_compressor::texture_compressor( renderer::Device& device, BindlessManager& bindless_manager, renderer::PipelineManager& pipelines )
+texture_compressor::texture_compressor( renderer::Device& device,
+										BindlessManager& bindless_manager,
+										renderer::PipelineManager& pipelines,
+										uint32_t max_size )
 	: _bindless_manager( bindless_manager )
 	, _pipelines( pipelines )
-	, _scratch_unorm( make_scratch( device, bindless_manager, renderer::Texture::Format::R8G8B8A8_UNORM ) )
-	, _scratch_srgb( make_scratch( device, bindless_manager, renderer::Texture::Format::R8G8B8A8_SRGB ) )
+	, _max_size( max_size )
+	, _scratch_unorm( make_scratch( device, bindless_manager, renderer::Texture::Format::R8G8B8A8_UNORM, max_size ) )
+	, _scratch_srgb( make_scratch( device, bindless_manager, renderer::Texture::Format::R8G8B8A8_SRGB, max_size ) )
 {
 	using Format = renderer::Texture::Format;
 	_variants = { { { Format::BC1_RGB_UNORM, add_pipeline( "1", "0" ) },
@@ -62,6 +70,13 @@ void texture_compressor::compress( renderer::CommandBuffer& cmd,
 								   const renderer::Texture& texture ) const
 {
 	PROFILER_SCOPE();
+	const auto extent0 = texture.get_extent();
+	if ( extent0.width > _max_size || extent0.height > _max_size )
+	{
+		throw std::invalid_argument(
+			std::format( "Texture of {}x{} too large to compress, the limit is {}", extent0.width, extent0.height, _max_size ) );
+	}
+	assert( std::has_single_bit( extent0.width ) && std::has_single_bit( extent0.height ) );
 	const auto format = texture.get_format();
 	const bool srgb = format == renderer::Texture::Format::BC1_RGB_SRGB || format == renderer::Texture::Format::BC3_SRGB;
 	const auto& scratch = srgb ? _scratch_srgb : _scratch_unorm;
