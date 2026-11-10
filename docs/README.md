@@ -14,5 +14,7 @@ One file per feature stream, with its state, plan, experiments and findings:
 - [scenes.md](scenes.md): loading and describing scenes (the crowd, glTF scenes with their camera and sun, Bistro).
 - [texture_compression.md](texture_compression.md): compressing decoded textures to BC1/BC3/BC5 on the GPU at load
   (from Betsy).
+- [startup_loading.md](startup_loading.md): startup and scene loading (shader cache, splitting loading into stages that
+  run in parallel and overlap device creation).
 
 A new stream gets its own file, following the same layout (done so far, current state, plan, experiments, findings).
