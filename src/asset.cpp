@@ -579,36 +579,50 @@ class Assets::load_job
 	// A decoded surface, or a DDS file uploaded as is and parsed once its sRGB usage is known
 	using loaded_image = std::variant<std::monostate, sdl::raii::Surface, data_source>;
 
+	// What committing needs, created by commit()
+	struct gpu_state
+	{
+		gpu_state( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& indices, texture_compressor* compressor )
+			: device( device )
+			, bindless_manager( bindless_manager )
+			, indices( indices )
+			, compressor( compressor )
+			, mesh_upload( device, 32 * 1024 * 1024 )
+			, texture_upload( device, 128 * 1024 * 1024, compressor ? 64 * 1024 * 1024 : 0 )
+		{
+		}
+
+		renderer::Device& device;
+		BindlessManager& bindless_manager;
+		index_buffer& indices;
+		texture_compressor* compressor; // Null without compression
+		gpu_upload_job mesh_upload;
+		gpu_upload_job texture_upload;
+	};
+
 public:
-	load_job( renderer::Device& device,
-			  BindlessManager& bindless_manager,
-			  index_buffer& index_buffer,
-			  texture_compressor* compressor,
-			  bool use_dds,
-			  std::filesystem::path path )
-		: _device( device )
-		, _bindless_manager( bindless_manager )
-		, _index_buffer( index_buffer )
-		, _compressor( compressor )
-		, _use_dds( use_dds )
+	load_job( bool use_dds, std::filesystem::path path )
+		: _use_dds( use_dds )
 		, _path( std::move( path ) )
-		, _mesh_upload( device, 32 * 1024 * 1024 )
-		, _texture_upload( device, 128 * 1024 * 1024, compressor ? 64 * 1024 * 1024 : 0 )
 	{
 	}
 
-	loaded_asset run()
+	// Reads, parses and processes the file, doesn't touch the device
+	void prepare()
 	{
 		PROFILER_SCOPE();
 		parse();
-		tbb::parallel_invoke(
-			[ & ]()
-			{
-				prepare_meshes();
-				upload_meshes();
-			},
-			[ & ] { decompress_textures(); } );
-		// Can't upload texs while meshes are uploading, the command pool isn't thread safe...
+		tbb::parallel_invoke( [ & ] { prepare_meshes(); }, [ & ] { decompress_textures(); } );
+	}
+
+	// Uploads the prepared asset and adds it to the bindless manager. Not thread safe: commits share the device's command
+	// pool, and their handles must be added in load order. A compressor must be ready.
+	loaded_asset
+	commit( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& indices, texture_compressor* compressor )
+	{
+		PROFILER_SCOPE();
+		_gpu.emplace( device, bindless_manager, indices, compressor );
+		upload_meshes();
 		upload_textures();
 		return finalize();
 	}
@@ -1238,7 +1252,7 @@ private:
 		{
 			upload_mesh( i );
 		}
-		_mesh_upload.submit();
+		_gpu->mesh_upload.submit();
 	}
 
 	void upload_mesh( size_t mesh_index )
@@ -1275,24 +1289,24 @@ private:
 		data_buffer_size += upload_data.meshlet_vertices.size() * sizeof( uint32_t );
 		data_buffer_size += upload_data.meshlet_triangles.size() * sizeof( uint8_t );
 
-		mesh.data_buffer = _device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
-													  | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-												  data_buffer_size );
+		mesh.data_buffer = _gpu->device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
+														   | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+													   data_buffer_size );
 
 		mesh.gpu_data.vertices = mesh.data_buffer.get_device_address();
-		_mesh_upload.queue( upload_data.vertices, mesh.data_buffer );
+		_gpu->mesh_upload.queue( upload_data.vertices, mesh.data_buffer );
 		auto offset = upload_data.vertices.size() * sizeof( mesh_vertex );
 
 		mesh.gpu_data.meshlets = mesh.data_buffer.get_device_address() + offset;
-		_mesh_upload.queue( upload_data.meshlets, mesh.data_buffer, offset );
+		_gpu->mesh_upload.queue( upload_data.meshlets, mesh.data_buffer, offset );
 		offset += upload_data.meshlets.size() * sizeof( gpu_meshlet );
 
 		mesh.gpu_data.meshlet_vertices = mesh.data_buffer.get_device_address() + offset;
-		_mesh_upload.queue( upload_data.meshlet_vertices, mesh.data_buffer, offset );
+		_gpu->mesh_upload.queue( upload_data.meshlet_vertices, mesh.data_buffer, offset );
 		offset += upload_data.meshlet_vertices.size() * sizeof( uint32_t );
 
 		mesh.gpu_data.meshlet_triangles = mesh.data_buffer.get_device_address() + offset;
-		_mesh_upload.queue( upload_data.meshlet_triangles, mesh.data_buffer, offset );
+		_gpu->mesh_upload.queue( upload_data.meshlet_triangles, mesh.data_buffer, offset );
 		offset += upload_data.meshlet_triangles.size() * sizeof( uint8_t );
 	}
 
@@ -1305,15 +1319,15 @@ private:
 						  std::array<gpu_mesh_lod, MESH_LOD_COUNT>& lods )
 	{
 		const size_t index_count = lod0_indices.size() + chain.indices.size();
-		auto index_offset = static_cast<uint32_t>( _index_buffer.size.fetch_add( index_count ) );
-		if ( index_offset + index_count > _index_buffer.capacity )
+		auto index_offset = static_cast<uint32_t>( _gpu->indices.size.fetch_add( index_count ) );
+		if ( index_offset + index_count > _gpu->indices.capacity )
 		{
 			throw renderer::Error( "Index buffer is full" );
 		}
-		_mesh_upload.queue( lod0_indices, _index_buffer.buffer, index_offset * sizeof( uint32_t ) );
+		_gpu->mesh_upload.queue( lod0_indices, _gpu->indices.buffer, index_offset * sizeof( uint32_t ) );
 		if ( !chain.indices.empty() )
 		{
-			_mesh_upload.queue( chain.indices, _index_buffer.buffer, ( index_offset + lod0_indices.size() ) * sizeof( uint32_t ) );
+			_gpu->mesh_upload.queue( chain.indices, _gpu->indices.buffer, ( index_offset + lod0_indices.size() ) * sizeof( uint32_t ) );
 		}
 
 		auto meshlet_offset = first_meshlet;
@@ -1371,9 +1385,9 @@ private:
 	void upload_textures()
 	{
 		PROFILER_SCOPE();
-		if ( _compressor )
+		if ( _gpu->compressor )
 		{
-			_compressor->wait_ready();
+			_gpu->compressor->wait_ready();
 		}
 		_textures.resize( _textures_usage.size() );
 		for ( size_t i = 0; i < _textures_usage.size(); ++i )
@@ -1385,26 +1399,26 @@ private:
 				if ( const auto dds_source = std::get_if<data_source>( &image ) )
 				{
 					const DDSFile dds( dds_source->data, is_srgb( usage ) );
-					auto tex = make_image_from_dds( _device, dds );
-					_texture_upload.queue( dds, tex );
-					_textures[ i ] = _bindless_manager.add_texture( std::move( tex ) );
+					auto tex = make_image_from_dds( _gpu->device, dds );
+					_gpu->texture_upload.queue( dds, tex );
+					_textures[ i ] = _gpu->bindless_manager.add_texture( std::move( tex ) );
 				}
-				else if ( const auto& surface = std::get<sdl::raii::Surface>( image ); _compressor )
+				else if ( const auto& surface = std::get<sdl::raii::Surface>( image ); _gpu->compressor )
 				{
-					auto tex = make_image_from_surface( _device, *surface, compressed_format( usage ) );
-					_texture_upload.queue( *surface, tex, *_compressor );
-					_textures[ i ] = _bindless_manager.add_texture( std::move( tex ) );
+					auto tex = make_image_from_surface( _gpu->device, *surface, compressed_format( usage ) );
+					_gpu->texture_upload.queue( *surface, tex, *_gpu->compressor );
+					_textures[ i ] = _gpu->bindless_manager.add_texture( std::move( tex ) );
 				}
 				else
 				{
-					auto tex = make_image_from_surface( _device, *surface, uncompressed_format( usage ) );
-					_texture_upload.queue( *surface, tex );
-					_textures[ i ] = _bindless_manager.add_texture( std::move( tex ) );
+					auto tex = make_image_from_surface( _gpu->device, *surface, uncompressed_format( usage ) );
+					_gpu->texture_upload.queue( *surface, tex );
+					_textures[ i ] = _gpu->bindless_manager.add_texture( std::move( tex ) );
 				}
 			}
 		}
 
-		_texture_upload.submit();
+		_gpu->texture_upload.submit();
 	}
 
 	loaded_asset finalize()
@@ -1422,7 +1436,7 @@ private:
 														 &bounding_spheres[ 0 ].w,
 														 sizeof( glm::vec4 ) );
 
-		gpu_upload_job::wait_all_done( { &_mesh_upload, &_texture_upload } );
+		gpu_upload_job::wait_all_done( { &_gpu->mesh_upload, &_gpu->texture_upload } );
 
 		_materials.resize( _asset.materials.size() );
 		for ( size_t i = 0; i < _materials_usage.size(); ++i )
@@ -1518,14 +1532,14 @@ private:
 				}
 				material.type = material.gpu_data.type;
 
-				material.handle = _bindless_manager.add_buffer_entry( material.gpu_data );
+				material.handle = _gpu->bindless_manager.add_buffer_entry( material.gpu_data );
 			}
 		}
 
 		for ( const auto& parsed_mesh : _parsed_meshes )
 		{
 			auto& mesh = _meshes[ parsed_mesh.gltf_index ];
-			mesh.handle = _bindless_manager.add_buffer_entry( mesh.gpu_data );
+			mesh.handle = _gpu->bindless_manager.add_buffer_entry( mesh.gpu_data );
 			mesh.material = _materials[ *_asset.meshes[ parsed_mesh.gltf_index ].primitives[ 0 ].materialIndex ].handle;
 		}
 
@@ -1563,14 +1577,9 @@ private:
 	std::size_t get_texture_count() const { return _textures.size(); }
 
 private:
-	renderer::Device& _device;
-	BindlessManager& _bindless_manager;
-	index_buffer& _index_buffer;
-	texture_compressor* _compressor;
 	bool _use_dds;
 	std::filesystem::path _path;
-	gpu_upload_job _mesh_upload;
-	gpu_upload_job _texture_upload;
+	std::optional<gpu_state> _gpu;
 	fastgltf::Asset _asset;
 	std::vector<uint8_t> _meshes_usage; // Could be a dynamic bitset
 	std::vector<image_usage> _images_usage;
@@ -1601,8 +1610,9 @@ Assets::Assets( renderer::Device& device,
 scene Assets::load( const std::filesystem::path& path )
 {
 	PROFILER_SCOPE();
-	load_job job( _device, _bindless_manager, _indices, _texture_compressor, _texture_options.use_dds, path );
-	auto asset = job.run();
+	load_job job( _texture_options.use_dds, path );
+	job.prepare();
+	auto asset = job.commit( _device, _bindless_manager, _indices, _texture_compressor );
 	add_content( asset );
 	return std::move( asset.contents );
 }
