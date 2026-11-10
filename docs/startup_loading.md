@@ -29,7 +29,43 @@ Shader compilation, which was most of the visible startup cost, is no longer on 
   `Assets::load` waited in `wait_ready()`. Polling every 100 ms: crowd Release warm startup 3.05 s -> 2.24 s, Debug
   4.8 s -> 3.9 s (whole process, `--capture` runs).
 
-## Current state
+Assets are then prepared while the device is created (steps 2 and 3 of the order of work):
+
+| Commit | Change |
+| --- | --- |
+| vk-renderer `33c2bcd`, brutus-ng `6f32f67` | `PipelineManager::is_ready()`: checks without waiting, false if a pipeline failed |
+| brutus-ng `dd35d32` | `texture_compressor` in its own files, created by `main` and passed to `Assets` |
+| brutus-ng `5a5a796` | Terminate handler printing uncaught exceptions, without unwinding (see Findings) |
+| brutus-ng `5e8aaef` | The compressor's max texture size is a constructor parameter, larger textures throw |
+| brutus-ng `72295d9` | `load_job` split into `prepare()` and `commit()`, see Prepare and commit |
+| brutus-ng `7360d78` | `Assets::load()` before `Device`, then `attach()` and `wait_ready()` |
+
+`main` now calls `SDL_Init( 0 )`, starts every load, creates the device and the rest, waits for the pipelines when
+compressing (`attach()` asserts the compressor is ready), then `attach()` and `wait_ready()`. The device lives in a
+`std::optional` declared before `Assets`, so it's still destroyed after the assets' buffers.
+
+Release, 5 alternating runs against the previous commit, medians in ms (`scratch/step3`):
+
+| | Crowd before | Crowd after | Bistro before | Bistro after |
+| --- | --- | --- | --- | --- |
+| Startup | 1,343 | 959 | 5,333 | 4,766 |
+| `create_device` | 613 | 730 | 599 | 1,515 |
+| `prepare` (all loads) | 582 | 770 | 3,667 | 3,843 |
+| `commit` | 90 | 85 | 810 | 675 |
+| `Assets::wait_ready` | | 104 | | 2,819 |
+
+- Images are pixel identical (crowd, Bistro, crowd without compression).
+- **Device creation slows down next to the prepare work**: on Bistro it more than doubles, as mesh work keeps all 16
+  hardware threads busy and the main thread competes with the TBB workers for a core. The crowd's prepare work slows
+  the same way (582 -> 770 ms). See step 9.
+- Bistro still waits 2.8 s in `wait_ready()` for its meshes: hiding the device was worth ~0.6 s, as estimated.
+- Memory: the crowd's peak working set goes from 766 to 876 MB, private bytes +36 MB (within build noise, see Findings).
+  Both crowd assets are now prepared at once, where the first one's CPU data used to be freed before the second
+  started. Bistro is within noise.
+- Both builds ran slower than earlier sessions (the baseline crowd took 1,169 ms in the previous step's runs): compare
+  only alternating runs of one session.
+
+## Profile before the loading work
 
 Crowd, Release, warm shader cache (Optick capture, `util/optick_report.py`), 1,255 ms of startup:
 
@@ -39,9 +75,18 @@ Crowd, Release, warm shader cache (Optick capture, `util/optick_report.py`), 1,2
 | `Assets::load` (`player.glb`) | 455 ms | One mesh's `prepare_mesh` takes 413 ms: LODs 227, shadow LODs 121, meshlets 63 |
 | `Assets::load` (`sabrina.glb`) | 191 ms | Meshes 115 ms, textures decoded in 86 ms, texture upload 36 ms |
 
-In `player.glb`, one TBB worker grinds through the big mesh while the others are idle. Bistro (Release, DDS textures):
-`Assets::load` 4.4-5.6 s, of which `prepare_meshes` 3.5-4.0 s over 551 meshes, `decompress_textures` 0.7-2.4 s
-(reading 2.05 GB of DDS, see Experiments) and `upload_textures` ~580 ms.
+In `player.glb`, one TBB worker grinds through the big mesh while the others are idle.
+
+Bistro, Release, DDS textures, 5,605 ms of startup (one capture, analyzed in Experiments):
+
+| Step | Start | Time | Notes |
+| --- | --- | --- | --- |
+| `create_device` | 0 ms | 611 ms | |
+| `parse` | 648 ms | 110 ms | Includes reading `bistro.bin` (95.7 MB) |
+| `decompress_textures` | 758 ms | 717 ms | Reading 2.05 GB of DDS, alongside the meshes; varied 0.7-2.4 s over runs |
+| `prepare_meshes` | 758 ms | 4,004 ms | 551 meshes, 38.9 s of CPU time; the second half is a tail of a few big meshes |
+| `upload_meshes` | 4,762 ms | 152 ms | |
+| `upload_textures` | 4,915 ms | 522 ms | Only starts after every mesh is prepared and uploaded |
 
 **The prewarm on the rebuild thread doesn't pay off yet.** It cuts the first shader batch from 112 ms to 8 ms, but
 alternating runs gave Release +45 ms warm and +90 ms cold for the whole process (Debug -73 ms): it delays the
@@ -75,12 +120,12 @@ only options they read (`--no-dds`, `--texture-compression`) come from the comma
 4. **Image decoding**: PNG to RGBA8. Embedded PNGs depend on stage 1 only, external ones on stage 2. DDS skip this
    stage.
 5. **Shader preparation**: prewarm, cache lookups, compiles. No device needed, but the shader set is: meshlet pipelines
-   are only registered with `mesh_shader_support` (`scene_renderer.cpp`), the compressor's pipelines by the `Assets`
+   are only registered with `mesh_shader_support` (`scene_renderer.cpp`), the compressor's pipelines by its
    constructor. Prewarm before `Device`, then either compile once the properties are known or compile the possible set
    speculatively (~4 extra shaders). glslang frees its tables when the last shaderc compiler is destroyed: an early
    prewarm needs the `ShaderCompiler` that `PipelineManager` will use, created before `Device` and handed over.
 6. **GPU work**, after `Device`: pipelines, buffer and texture creation, staging copies (mapped Vulkan memory), uploads,
-   BC compression (waits for the compressor pipelines: `wait_ready()` in `upload_textures`), mip blits, bindless
+   BC compression (needs the compressor pipelines: `main` waits for them before `Assets::attach()`), mip blits, bindless
    registration. Then CPU work that needs handles: `gpu_material` from glTF materials (texture handles), scene
    instances (mesh handles).
 
@@ -95,50 +140,87 @@ only options they read (`--no-dds`, `--texture-compression`) come from the comma
 
 ### Prepare and commit
 
-Split `load_job` in two:
+Done (`72295d9`, `7360d78`). `load_job` is split in two:
 
-- `prepare()`: stages 1 to 4, CPU only, no `Device` or `BindlessManager` (already true of `parse`, `prepare_meshes` and
-  `decompress_textures`; the upload jobs created in `load_job`'s constructor move to commit). Its output is plain data:
-  parsed glTF, mesh data, decoded surfaces or DDS bytes.
-- `commit()`: stage 6, **serially and in input order** on the main thread. This keeps the rules we rely on without
-  locks: the command pool used by uploads isn't thread safe (`asset.cpp`, `run()`), `BindlessManager` has no locking,
-  `Assets::add_content` asserts handles arrive in order, the compressor shares scratch textures, and a fixed handle
-  order keeps the benchmark bit-identical.
+- `prepare()`: stages 1 to 4 (`parse`, then `prepare_meshes` and `decompress_textures` in parallel), CPU only, no
+  `Device` or `BindlessManager`. Its output is plain data: parsed glTF, mesh data, decoded surfaces or DDS bytes.
+- `commit()`: stage 6, **serially and in input order** on the main thread. It builds a `gpu_state` with the device,
+  bindless manager, index buffer, compressor and both upload jobs (so staging buffers only exist during commit), then
+  uploads meshes, uploads textures and registers everything. This keeps the rules we rely on without locks: the command
+  pool used by uploads isn't thread safe, `BindlessManager` has no locking, `Assets::add_content` asserts handles
+  arrive in order, the compressor shares scratch textures, and a fixed handle order keeps the benchmark bit-identical.
 
 Prepared data is the queue of pending uploads: no recorded upload commands are needed before the device exists (buffer
 sizes and handles aren't known before commit anyway).
 
+`Assets` on top of it (`asset.h`), modeled on Granite's asset manager (device-side instantiator attached later) and
+Godot's threaded loads (request, then a blocking get):
+
+- `Assets( max_indices, options )` needs no device.
+- `load( path )` returns a `scene_handle` (an index) and queues `prepare()` with
+  `tbb::this_task_arena::enqueue( f, _prepare_tasks )`, the documented way for a thread outside TBB to submit work.
+- `attach( device, bindless_manager, compressor )` creates the GPU side, including the index buffer. A compressor must
+  be ready: it asserts `PipelineManager::is_ready()`.
+- `wait_ready()` waits on the task group (the main thread helps with any TBB task meanwhile), then commits every
+  prepared load in order and frees each job's CPU data after its commit. It rethrows the first load error.
+- `get( handle )` asserts the load was committed. Scenes live in a `std::deque`, so references stay valid as more
+  loads commit.
+- Not copyable or movable: running prepare tasks are registered with the `tbb::task_group` member. The destructor
+  cancels and waits for loads that were never waited for (only after an error).
+
+One gate for every load is enough at startup, where everything is waited for anyway. Per-load waits (a task group per
+slot, `get()` waiting instead of asserting) can come later without changing call sites.
+
 ### Order of work
 
-1. Prepare/commit split, behavior unchanged (pixel identical, same timings).
-2. Start `prepare()` for every asset right after argument parsing, before `Device`; commit after it, waiting on each
-   prepared asset in order. Crowd prepare work adds up to ~559 ms even serially, against 571 ms of device creation.
-3. Prewarm before `Device` (see stage 5). Without it, commit waits ~190 ms for the compressor pipelines (prewarm,
+1. Largest meshes first: **tried, kept on branch `mesh-largest-first`, not merged.** It removes Bistro's tail but the
+   mesh phase only drops 6%, and startup is within noise: the big meshes get much slower when they all run at once
+   (Experiments).
+2. Prepare/commit split, behavior unchanged: **done** (`72295d9`), pixel identical, same load times.
+3. Start `prepare()` for every asset before `Device`, commit after it in order: **done** (`7360d78`). Startup crowd
+   1,343 -> 959 ms, Bistro 5,333 -> 4,766 ms (Done so far).
+4. Prewarm before `Device` (see stage 5). Without it, commit waits ~190 ms for the compressor pipelines (prewarm,
    compile, pipeline creation) once asset work is hidden.
-4. Parallel LODs, chains and meshlets (stage 3). Matters most for Bistro, whose mesh work (3.5-4 s) is far longer than
-   device creation.
-5. Dedicated reader threads for stage 2 (see Open questions).
-6. Later: an on-disk cache for LODs and meshlets, the same pattern as the shader cache.
+5. Commit textures as soon as they're prepared, while meshes are still processed, then meshes. Texture and mesh
+   handles are separate kinds, so their order stays deterministic; materials need both and come last. Bistro's
+   textures are read 1.5 s into startup but uploaded at the very end (522 ms). Also worth trying: two staging buffers,
+   so the copy into one overlaps the GPU transfer from the other (2 GB through 128 MB is ~16 rounds of copy, submit,
+   wait).
+6. Parallel chains, LODs and meshlets (stage 3). For the crowd, where cores sit idle while one mesh is the critical
+   path. For Bistro, expect it to hit the same limit as largest-first ordering: once every thread is busy, more
+   parallelism on the big meshes mostly makes each of them slower.
+7. Dedicated reader threads for stage 2 (see Open questions).
+8. Later: an on-disk cache for LODs and meshlets, the same pattern as the shader cache. It's the only item that reduces
+   the CPU work itself, which bounds Bistro once the rest is done.
+9. Keep a hardware thread for the main thread while it creates the device: since step 3, the prepare work takes every
+   hardware thread and `create_device` slows from ~600 ms to 730 ms (crowd) and 1,515 ms (Bistro). Options: run
+   prepare work in a `tbb::task_arena` one thread smaller than the default (or a `tbb::global_control` limit) until
+   the device exists, or raise the main thread's priority. Cheap to try, so worth doing next.
 
-Estimates for the crowd from one capture, not measurements: 1,255 ms today, ~860 ms with step 2, ~700-750 ms with step
-3. After that, device creation dominates.
+Estimates were from one capture each, before step 3:
+
+- Crowd: 1,255 ms in that capture, ~860 ms with step 3 (measured: 959 ms, with device creation slowed down), ~700-750
+  ms with step 4. After that, device creation dominates.
+- Bistro: 5,605 ms in that capture, 5.0-5.1 s median over 5 runs. Step 3 ~0.6 s (measured: 0.57 s), step 5 up to
+  ~0.5 s. Step 1 was estimated at 1.1-1.6 s from a replay of measured mesh durations, but measured 0.2 s on the mesh
+  phase: the mesh work is limited by core throughput, not by scheduling (Experiments).
 
 ### Open questions
 
-**Task system.** Plain TBB looks sufficient for now:
+**Task system.** Plain TBB looks sufficient for now (step 3 uses `this_task_arena::enqueue` into a `task_group`):
 
 - Nested `parallel_for` / `parallel_invoke` for stage 3: they share the existing pool and scheduler.
 - `tbb::task_arena::enqueue` (with a counter or task group to wait on) is the documented way for threads outside TBB,
   like readers or the main thread, to submit work.
-- `tbb::parallel_pipeline` (serial-in-order input, parallel prepare, serial-in-order commit) was the first idea, with its
-  token count as the budget. It doesn't fit once commit waits for the device, since a filter would block on it.
+- `tbb::parallel_pipeline` (serial-in-order input, parallel prepare, serial-in-order commit) was the first idea, with
+  its token count as the budget. It doesn't fit once commit waits for the device, since a filter would block on it.
 - `tbb::flow::graph` or our own task graph only becomes worth it for priorities, cancellation or streaming during
   frames.
 
 **Budget.** Prepared assets can't commit before the device exists, so the peak is every prepared asset at once. A token
 count still caps how much prepares ahead (the rest waits for the device). Not needed for the crowd (156 MB of assets
-in total) or Bistro (one asset, whose decoded images already stay in memory until `upload_textures` today). A byte
-budget would weigh each file before admitting it.
+in total, +110 MB peak working set since both are prepared at once) or Bistro (one asset, whose decoded images already
+stayed in memory until `upload_textures`). A byte budget would weigh each file before admitting it.
 
 **Reader threads.** Blocking reads in TBB tasks occupy workers that mesh processing needs. Options:
 
@@ -154,11 +236,11 @@ budget would weigh each file before admitting it.
 
 **Other questions:**
 
-- Is SDL safe for surface decoding while `SDL_Init` runs inside `Device` on another thread? Calling `SDL_Init( 0 )`
-  before starting prepare work is cheap insurance; unverified.
-- Errors: a task group must be waited on even if `Device` throws; a bad asset now reports at commit, after the window
-  opened.
-- On low core counts, prepare work could slow device creation.
+- SDL decodes surfaces on workers while `SDL_Init( SDL_INIT_VIDEO )` runs inside `Device`. `main` calls
+  `SDL_Init( 0 )` before the first load to set up SDL's main thread state; whether that's needed was never verified.
+- Errors: a bad asset reports from `wait_ready()`, after the window opened. If `Device` throws first, nothing catches
+  it: the terminate handler prints it without unwinding, so `~Assets` never runs.
+- Prepare work slows device creation even on 16 hardware threads (step 9); worse on low core counts.
 
 ## Experiments
 
@@ -184,8 +266,111 @@ PCIe 3):
 Above ~3.4 GB/s this is memory speed through the OS cache, not the drive. Cold numbers need the cache cleared (reboot);
 not measured.
 
+### Bistro mesh scheduling
+
+From the capture in Profile before the loading work (`scratch/bistro_profile/analyze.py` replays its timeline).
+Threads busy with `prepare_mesh` or `decompress_tex`, out of 16:
+
+| Time into the mesh phase | 0-2.0 s | 2.1 s | 2.4 s | 2.7 s | 3.0 s | 3.4 s | 3.8 s | 4.0 s |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Busy threads | 16 | 11.9 | 10.5 | 8.0 | 5.0 | 4.2 | 1.9 | 0 |
+
+The longest meshes and when they started:
+
+| Mesh time | Starts at | Ends at | LODs | Shadow LODs | Meshlets |
+| --- | --- | --- | --- | --- | --- |
+| 2,172 ms | 1,715 ms | 3,887 ms | 1,425 ms | 557 ms | 185 ms |
+| 2,115 ms | 1,539 ms | 3,654 ms | 1,205 ms | 588 ms | 320 ms |
+| 1,813 ms | 2,191 ms | 4,004 ms | 894 ms | 500 ms | 414 ms |
+| 1,657 ms | 1,575 ms | 3,232 ms | 973 ms | 471 ms | 211 ms |
+| 1,633 ms | 1,859 ms | 3,492 ms | 649 ms | 423 ms | 554 ms |
+| 1,379 ms | 487 ms | 1,866 ms | 628 ms | 534 ms | 215 ms |
+| 1,261 ms | 1,678 ms | 2,939 ms | 741 ms | 349 ms | 168 ms |
+
+The other 544 meshes are small (median 9 ms). Replaying the measured durations on 16 threads, greedily:
+
+| Schedule | Mesh phase |
+| --- | --- |
+| Measured | 4,004 ms |
+| Same start order as measured | 3,477 ms (the model doesn't capture TBB's range splitting) |
+| Largest first | 2,434 ms |
+| Floor: 38.9 s of CPU / 16 threads | 2,434 ms |
+
+The replay assumed each mesh takes the same time whatever runs alongside it. Measuring largest-first ordering showed
+that's wrong (next section): the floor above is not reachable on this CPU.
+
+### Largest-first ordering
+
+Branch `mesh-largest-first`: `prepare_meshes` sorts meshes by index count, largest first, and one task per TBB thread
+pulls the next mesh from an atomic counter (a `parallel_for` over the sorted list wouldn't keep the order: thieves
+steal the far half of the range first). Release, `--capture`, alternating runs against a baseline build, medians:
+
+| | Bistro baseline | Bistro ordered | Crowd baseline | Crowd ordered |
+| --- | --- | --- | --- | --- |
+| Runs | 5 | 5 | 8 | 8 |
+| Startup | 5,075 ms | 5,036 ms | 1,253 ms | 1,222 ms |
+| `prepare_meshes` | 3,520 ms | 3,307 ms | 517 ms | 507 ms |
+| `prepare_mesh` CPU time, all threads | 34.7 s | 46.2 s | 1.08 s | 1.05 s |
+| `decompress_textures` (DDS reads done) | 856 ms | 3,306 ms | 162 ms | 162 ms |
+| Peak working set | 1,732 MB | 1,938 MB | 768 MB | 804 MB |
+
+Images are pixel identical. Single runs vary by ~0.1-0.3 s, so the startup differences are within noise. From one
+capture of each (`scratch/bistro_profile/analyze.py`):
+
+- **The tail is gone**: all 16 threads stay busy until the end of the mesh phase.
+- **The work got slower**: the 7 biggest meshes took 17.7 s of CPU together instead of 10.9 s (+62%), the 544 others
+  28.4 s instead of 23.2 s (+23%). The baseline ran its big meshes partly in its tail, with 8 threads or fewer busy on
+  8 cores; ordered runs them all at once on 16 hardware threads, two per core. Mostly hyper-threading (next section).
+- **DDS reads were starved**: the pulling tasks never hand their thread back to TBB, so the read tasks of the other
+  `parallel_invoke` branch waited for meshes to run out. Harmless today (the texture upload waits for meshes anyway)
+  but it would block committing textures early (step 5). Fewer pullers than threads, or one TBB task per mesh, would
+  fix it.
+- **More memory**: +206 MB peak on Bistro, with the big meshes in memory together.
+
+So once every hardware thread is busy, Bistro's mesh phase is bound by core throughput, ~3.3 s here, and scheduling
+can't take it much lower. Reducing the work (step 8) is the lever for Bistro. Splitting meshes (step 6) should hit
+the same limit there, but still applies to the crowd.
+
+### Thread affinity
+
+Core bound or memory bound? Bistro, Release master build, process affinity set with `start /affinity`
+(`scratch/affinity/run.ps1`). Logical processors 2n and 2n+1 share a core on the i7-10700F, so a mask of every other
+bit gives one thread per core. 3 runs per configuration in rotating order, medians:
+
+| Configuration | Mask | `prepare_meshes` | `prepare_mesh` CPU time | 7 biggest meshes | Median small mesh |
+| --- | --- | --- | --- | --- | --- |
+| 4 threads, 4 cores | `0x0055` | 4,643 ms | 15.2 s | 5.0 s | 3.65 ms |
+| 4 threads, 2 cores | `0x000F` | 6,567 ms | 21.9 s | 6.9 s | 5.62 ms |
+| 8 threads, 8 cores | `0x5555` | 3,026 ms | 17.3 s | 6.0 s | 3.93 ms |
+| 8 threads, 4 cores | `0x00FF` | 3,729 ms | 22.8 s | 7.2 s | 5.51 ms |
+| 16 threads, 8 cores (default) | `0xFFFF` | 2,861 ms | 27.3 s | 8.3 s | 5.75 ms |
+
+TBB ran meshes on exactly the threads each mask allowed; images are pixel identical. Same work in every run, so CPU
+time measures how fast each thread goes:
+
+- **Sharing a core costs the most**: at the same thread count, two threads per core make each thread 1.32x (8
+  threads) to 1.44x (4 threads) slower. Hyper-threading still gets 1.4-1.5x more work out of each core.
+- **Memory bandwidth isn't the limit**: from 4 to 8 cores, one thread each, each thread is only 14% slower. A
+  bandwidth-bound workload would degrade far more when doubling the cores doing it.
+- **Some contention across the chip remains**: doubling the active cores costs 14-20% per thread with or without
+  hyper-threading. Memory traffic, the shared L3, or lower all-core clocks (65 W part); not separated. xperf's PMC
+  counters would split it (core vs reference cycles for clocks, LLC misses for traffic, against ~34 GB/s for the
+  installed DDR4-2133).
+- **16 threads is still the fastest**: fewer threads would be a loss.
+
+The default runs used 27 s of mesh CPU time, against 35 s for the same code in the largest-first runs a day earlier:
+only compare runs made in the same session, alternated.
+
 ## Findings
 
+- **Bistro's mesh phase is half tail**: all 16 threads are busy for 2.0 s, then a few big meshes started late keep 1 to
+  8 threads busy for another 2.0 s. Removing it barely helps: the tail runs on uncontended cores (Experiments).
+- **Thread time isn't a fixed cost**: on 8 cores with 16 hardware threads, a mesh takes far longer when every thread
+  is busy. Estimates that replay measured durations on a different schedule overestimate the gain.
+- **Mesh work is core bound, not memory bound**: sharing a core slows each thread 1.3-1.45x, while doubling the
+  cores costs only 14-20% per thread (Experiments).
+- **`lod_generation` dominates the big meshes**: 40-66% of each of Bistro's 7 longest meshes (over half for 4 of
+  them), against 26-39% for shadow LODs and 9-34% for meshlets.
 - **`decompress_tex` is misleading**: it also covers DDS reads and unused images. Return early for unused images before
   the scope and use separate scopes (e.g. `read_dds`, `decode_image`) so a fallback to PNG shows up.
 - **`decompress_textures` time isn't read time**: it shares TBB workers with `prepare_meshes`, and varied 0.7-2.4 s
@@ -195,6 +380,18 @@ not measured.
   `make_unique_for_overwrite` skips it. Not measured.
 - **Optick drops events** in these captures: 229-328 of Bistro's 338 DDS scopes were recorded depending on the run.
   Treat scope counts as approximate.
+- **Peak memory varies by build, not just by run**: the same code built twice peaked at 1,653 and 1,718 MB of private
+  bytes on the crowd, consistently over 5 runs each, even under swapped exe names. Crowd memory deltas below ~65 MB
+  between two builds aren't attributable to the change. Bistro's peak working set varies 1,425-2,041 MB between runs
+  of one exe. Measure with `PeakPagedMemorySize64` (private bytes) as well as the working set.
+- **Run exes under neutral names** when comparing: the first run of a new exe path is slow (a cold driver cache, ~2.1
+  s for the crowd instead of ~1.2 s), so copy both builds to new names and drop or discount the first round.
+- **Uncaught exceptions print**: `main` installs a terminate handler that prints `what()` and aborts. Nothing unwinds
+  (checked with MSVC), so breaking on throw and crash dumps still show the throw site. A crash that prints nothing is
+  not an exception: 0xC0000409 is also what a /GS failure or any other fail-fast exits with.
+- **`--no-dds` needs `--texture-compression none` on Bistro**: 53 of its PNGs exceed the compressor's 2048 limit, and
+  one is 2560x2560. It now throws `std::invalid_argument` instead of losing the device (see
+  [texture_compression.md](texture_compression.md)).
 - Profiles: Optick saves `startup_debug.opt` / `startup_release.opt` at every startup (overwritten), read with
   `util/optick_report.py`. Compare startup timings with alternating runs of both builds and medians: single runs vary
   by ~0.1 s.
