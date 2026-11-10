@@ -2,6 +2,8 @@
 #include <argparse/argparse.hpp>
 #include <array>
 #include <chrono>
+#include <cstdlib>
+#include <exception>
 #include <format>
 #include <fstream>
 #include <glm/ext/matrix_clip_space.hpp>
@@ -357,8 +359,31 @@ auto store_bool( bool& value )
 	};
 }
 
+// Doesn't catch the exception: nothing unwinds, so a debugger or crash dump still sees the stack at the throw
+[[noreturn]] void print_uncaught_exception()
+{
+	if ( const auto exception = std::current_exception() )
+	{
+		try
+		{
+			std::rethrow_exception( exception );
+		}
+		catch ( const std::exception& e )
+		{
+			std::print( stderr, "Uncaught exception: {}\n", e.what() );
+		}
+		catch ( ... )
+		{
+			std::print( stderr, "Uncaught exception of unknown type\n" );
+		}
+	}
+	std::abort();
+}
+
 int main( int argc, char** argv )
 {
+	std::set_terminate( print_uncaught_exception );
+
 	struct initial_settings
 	{
 		std::string texture_compression = "gpu";
