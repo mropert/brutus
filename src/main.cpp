@@ -501,11 +501,35 @@ int main( int argc, char** argv )
 	tbb_observer observer { };
 	observer.observe();
 
+	// Sets up SDL's main thread state before workers decode images with it, Device adds the video subsystem
+	if ( !SDL_Init( 0 ) )
+	{
+		throw std::runtime_error( SDL_GetError() );
+	}
+
+	// Created after the loads start, declared before them to outlive their GPU resources
+	std::optional<renderer::Device> device_storage;
+
+	// Bistro needs ~27M
+	Assets assets( 32 * 1024 * 1024, { .use_dds = !settings.no_dds } );
+	std::vector<scene_handle> scene_handles;
+	if ( scene_path )
+	{
+		scene_handles.push_back( assets.load( *scene_path ) );
+	}
+	else
+	{
+		for ( const auto path : CROWD_ASSETS )
+		{
+			scene_handles.push_back( assets.load( path ) );
+		}
+	}
+
 	gpu_stable_power::Context stable_power( settings.benchmark );
 
 	PROFILER_SCOPE_PUSH( create_device, "create_device" );
-	renderer::Device device( "Brutus-NG [Vulkan]",
-							 capture_path ? renderer::Device::WindowMode::HIDDEN : renderer::Device::WindowMode::BORDERLESS );
+	auto& device = device_storage.emplace( "Brutus-NG [Vulkan]",
+										   capture_path ? renderer::Device::WindowMode::HIDDEN : renderer::Device::WindowMode::BORDERLESS );
 	const auto props = device.get_properties();
 	PROFILER_SCOPE_POP( create_device );
 
@@ -540,20 +564,26 @@ int main( int argc, char** argv )
 		// The crowd's textures are 2048x2048 at most, Bistro has larger ones
 		? std::make_unique<texture_compressor>( device, bindless_manager, pipelines, 2048 )
 		: nullptr;
-	// Bistro needs ~27M
-	Assets assets( device, bindless_manager, compressor.get(), 32 * 1024 * 1024, { .use_dds = !settings.no_dds } );
+	if ( compressor )
+	{
+		// attach() requires a ready compressor
+		pipelines.wait_ready();
+	}
+	assets.attach( device, bindless_manager, compressor.get() );
+	assets.wait_ready();
+
 	std::vector<scene> crowd_models;
 	scene gltf_scene;
 	if ( scene_path )
 	{
-		gltf_scene = assets.load( *scene_path );
+		gltf_scene = assets.get( scene_handles.front() );
 		draw_scene( assets, gltf_scene, scene_renderer );
 	}
 	else
 	{
-		for ( const auto path : CROWD_ASSETS )
+		for ( const auto handle : scene_handles )
 		{
-			crowd_models.push_back( assets.load( path ) );
+			crowd_models.push_back( assets.get( handle ) );
 		}
 	}
 

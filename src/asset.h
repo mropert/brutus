@@ -3,14 +3,17 @@
 #include "camera.h"
 
 #include <array>
+#include <deque>
 #include <filesystem>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_aligned.hpp>
+#include <memory>
 #include <optional>
 #include <renderer/bindless.h>
 #include <renderer/buffer.h>
 #include <renderer/device.h>
+#include <renderer/third_party/tbb.h>
 #include <span>
 #include <vector>
 
@@ -150,35 +153,60 @@ struct texture_options
 
 class texture_compressor;
 
+// A scene passed to Assets::load(), valid in Assets::get() once Assets::wait_ready() returned
+struct scene_handle
+{
+	uint32_t index;
+};
+
+// Loads glTF files in two phases: load() starts preparing them on TBB workers without a device, wait_ready() then
+// uploads them in load order once attach() provided the device. Not thread safe, calls are expected from one thread.
 class Assets
 {
 public:
-	// Without a compressor, decoded images are uploaded uncompressed
-	Assets( renderer::Device& device,
-			BindlessManager& bindless_manager,
-			texture_compressor* compressor,
-			size_t max_indices,
-			const texture_options& options );
+	Assets( size_t max_indices, const texture_options& options );
+	~Assets();
+	// Not copyable or movable: prepare tasks still running are registered with _prepare_tasks
+	Assets( const Assets& ) = delete;
+	Assets( Assets&& ) = delete;
+	Assets& operator=( const Assets& ) = delete;
+	Assets& operator=( Assets&& ) = delete;
 
-	scene load( const std::filesystem::path& path );
+	scene_handle load( std::filesystem::path path );
+	// Without a compressor, decoded images are uploaded uncompressed. A compressor must be ready to compress.
+	void attach( renderer::Device& device, BindlessManager& bindless_manager, texture_compressor* compressor );
+	// Waits for every load to be prepared, then commits them. Requires attach(), rethrows the first load error.
+	void wait_ready();
+	const scene& get( scene_handle handle ) const;
 
 	const material& get_material( material_handle h ) const { return _materials[ h.index ]; }
 	const mesh& get_mesh( mesh_handle h ) const { return _meshes[ h.index ]; }
 	std::span<const material> get_materials() const { return _materials; }
 	std::span<const mesh> get_meshes() const { return _meshes; }
 
-	const index_buffer& get_indices() const { return _indices; }
+	const index_buffer& get_indices() const;
 
 private:
 	struct loaded_asset;
 	class load_job;
 	void add_content( loaded_asset& asset );
 
-	renderer::Device& _device;
-	BindlessManager& _bindless_manager;
+	// What attach() provides
+	struct gpu_state
+	{
+		renderer::Device& device;
+		BindlessManager& bindless_manager;
+		texture_compressor* compressor; // Null without compression
+		index_buffer indices;
+	};
+
+	size_t _max_indices;
+	texture_options _texture_options;
+	std::unique_ptr<gpu_state> _gpu; // Not an optional: its index_buffer can't be moved in
+	tbb::task_group _prepare_tasks;
+	// Loads not committed yet. Jobs are on the heap: workers prepare them while load() adds more.
+	std::vector<std::unique_ptr<load_job>> _jobs;
+	std::deque<scene> _scenes; // Committed scenes in load order, a deque so get() references stay valid
 	std::vector<material> _materials;
 	std::vector<mesh> _meshes;
-	index_buffer _indices;
-	texture_options _texture_options;
-	texture_compressor* _texture_compressor; // Null without compression
 };

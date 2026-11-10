@@ -22,8 +22,8 @@ public:
 						renderer::PipelineManager& pipelines,
 						uint32_t max_size );
 
-	// Must be called before compressing: pipelines can't be fetched while others are being added
-	void wait_ready() { _pipelines.wait_ready(); }
+	// Must be true before compressing: pipelines can't be fetched while others are being added, see
+	// PipelineManager::wait_ready()
 	bool is_ready() { return _pipelines.is_ready(); }
 
 	// Records the compression of a tightly packed RGBA8 image at upload_offset to texture, which has a full mip chain.

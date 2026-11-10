@@ -579,19 +579,9 @@ class Assets::load_job
 	// A decoded surface, or a DDS file uploaded as is and parsed once its sRGB usage is known
 	using loaded_image = std::variant<std::monostate, sdl::raii::Surface, data_source>;
 
-	// What committing needs, created by commit()
+	// What committing needs, only lives during commit()
 	struct gpu_state
 	{
-		gpu_state( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& indices, texture_compressor* compressor )
-			: device( device )
-			, bindless_manager( bindless_manager )
-			, indices( indices )
-			, compressor( compressor )
-			, mesh_upload( device, 32 * 1024 * 1024 )
-			, texture_upload( device, 128 * 1024 * 1024, compressor ? 64 * 1024 * 1024 : 0 )
-		{
-		}
-
 		renderer::Device& device;
 		BindlessManager& bindless_manager;
 		index_buffer& indices;
@@ -621,10 +611,15 @@ public:
 	commit( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& indices, texture_compressor* compressor )
 	{
 		PROFILER_SCOPE();
-		_gpu.emplace( device, bindless_manager, indices, compressor );
-		upload_meshes();
-		upload_textures();
-		return finalize();
+		gpu_state gpu { .device = device,
+						.bindless_manager = bindless_manager,
+						.indices = indices,
+						.compressor = compressor,
+						.mesh_upload = gpu_upload_job( device, 32 * 1024 * 1024 ),
+						.texture_upload = gpu_upload_job( device, 128 * 1024 * 1024, compressor ? 64 * 1024 * 1024 : 0 ) };
+		upload_meshes( gpu );
+		upload_textures( gpu );
+		return finalize( gpu );
 	}
 
 private:
@@ -1244,18 +1239,18 @@ private:
 		}
 	}
 
-	void upload_meshes()
+	void upload_meshes( gpu_state& gpu )
 	{
 		PROFILER_SCOPE();
 		_meshes.resize( _asset.meshes.size() );
 		for ( size_t i = 0; i < _parsed_meshes.size(); ++i )
 		{
-			upload_mesh( i );
+			upload_mesh( gpu, i );
 		}
-		_gpu->mesh_upload.submit();
+		gpu.mesh_upload.submit();
 	}
 
-	void upload_mesh( size_t mesh_index )
+	void upload_mesh( gpu_state& gpu, size_t mesh_index )
 	{
 		PROFILER_SCOPE();
 		const auto& upload_data = _mesh_upload_data[ mesh_index ];
@@ -1272,8 +1267,8 @@ private:
 		mesh.gpu_data.bounding_sphere.w = bounds.radius;
 
 		// Index buffer + LOD descriptors, shadow meshlets are stored after the regular ones
-		mesh.meshlets_count = upload_lods( upload_data.indices, upload_data.lods, 0, mesh.gpu_data.lods );
-		upload_lods( upload_data.shadow_indices, upload_data.shadow_lods, mesh.meshlets_count, mesh.gpu_data.shadow_lods );
+		mesh.meshlets_count = upload_lods( gpu, upload_data.indices, upload_data.lods, 0, mesh.gpu_data.lods );
+		upload_lods( gpu, upload_data.shadow_indices, upload_data.shadow_lods, mesh.meshlets_count, mesh.gpu_data.shadow_lods );
 		mesh.max_task_groups = 0;
 		for ( const auto chain : { &upload_data.lods, &upload_data.shadow_lods } )
 		{
@@ -1289,45 +1284,46 @@ private:
 		data_buffer_size += upload_data.meshlet_vertices.size() * sizeof( uint32_t );
 		data_buffer_size += upload_data.meshlet_triangles.size() * sizeof( uint8_t );
 
-		mesh.data_buffer = _gpu->device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
-														   | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
-													   data_buffer_size );
+		mesh.data_buffer = gpu.device.create_buffer( renderer::Buffer::Usage::STORAGE_BUFFER | renderer::Buffer::Usage::TRANSFER_DST
+														 | renderer::Buffer::Usage::SHADER_DEVICE_ADDRESS,
+													 data_buffer_size );
 
 		mesh.gpu_data.vertices = mesh.data_buffer.get_device_address();
-		_gpu->mesh_upload.queue( upload_data.vertices, mesh.data_buffer );
+		gpu.mesh_upload.queue( upload_data.vertices, mesh.data_buffer );
 		auto offset = upload_data.vertices.size() * sizeof( mesh_vertex );
 
 		mesh.gpu_data.meshlets = mesh.data_buffer.get_device_address() + offset;
-		_gpu->mesh_upload.queue( upload_data.meshlets, mesh.data_buffer, offset );
+		gpu.mesh_upload.queue( upload_data.meshlets, mesh.data_buffer, offset );
 		offset += upload_data.meshlets.size() * sizeof( gpu_meshlet );
 
 		mesh.gpu_data.meshlet_vertices = mesh.data_buffer.get_device_address() + offset;
-		_gpu->mesh_upload.queue( upload_data.meshlet_vertices, mesh.data_buffer, offset );
+		gpu.mesh_upload.queue( upload_data.meshlet_vertices, mesh.data_buffer, offset );
 		offset += upload_data.meshlet_vertices.size() * sizeof( uint32_t );
 
 		mesh.gpu_data.meshlet_triangles = mesh.data_buffer.get_device_address() + offset;
-		_gpu->mesh_upload.queue( upload_data.meshlet_triangles, mesh.data_buffer, offset );
+		gpu.mesh_upload.queue( upload_data.meshlet_triangles, mesh.data_buffer, offset );
 		offset += upload_data.meshlet_triangles.size() * sizeof( uint8_t );
 	}
 
 	// Upload the chain indices (LOD 0 first) to the index buffer and fill the matching LOD descriptors
 	// Meshlets of the chain are expected to be contiguous, starting at first_meshlet
 	// Returns the meshlet offset following the chain
-	uint32_t upload_lods( std::span<const uint32_t> lod0_indices,
+	uint32_t upload_lods( gpu_state& gpu,
+						  std::span<const uint32_t> lod0_indices,
 						  const lod_chain& chain,
 						  uint32_t first_meshlet,
 						  std::array<gpu_mesh_lod, MESH_LOD_COUNT>& lods )
 	{
 		const size_t index_count = lod0_indices.size() + chain.indices.size();
-		auto index_offset = static_cast<uint32_t>( _gpu->indices.size.fetch_add( index_count ) );
-		if ( index_offset + index_count > _gpu->indices.capacity )
+		auto index_offset = static_cast<uint32_t>( gpu.indices.size.fetch_add( index_count ) );
+		if ( index_offset + index_count > gpu.indices.capacity )
 		{
 			throw renderer::Error( "Index buffer is full" );
 		}
-		_gpu->mesh_upload.queue( lod0_indices, _gpu->indices.buffer, index_offset * sizeof( uint32_t ) );
+		gpu.mesh_upload.queue( lod0_indices, gpu.indices.buffer, index_offset * sizeof( uint32_t ) );
 		if ( !chain.indices.empty() )
 		{
-			_gpu->mesh_upload.queue( chain.indices, _gpu->indices.buffer, ( index_offset + lod0_indices.size() ) * sizeof( uint32_t ) );
+			gpu.mesh_upload.queue( chain.indices, gpu.indices.buffer, ( index_offset + lod0_indices.size() ) * sizeof( uint32_t ) );
 		}
 
 		auto meshlet_offset = first_meshlet;
@@ -1382,13 +1378,9 @@ private:
 		}
 	}
 
-	void upload_textures()
+	void upload_textures( gpu_state& gpu )
 	{
 		PROFILER_SCOPE();
-		if ( _gpu->compressor )
-		{
-			_gpu->compressor->wait_ready();
-		}
 		_textures.resize( _textures_usage.size() );
 		for ( size_t i = 0; i < _textures_usage.size(); ++i )
 		{
@@ -1399,29 +1391,29 @@ private:
 				if ( const auto dds_source = std::get_if<data_source>( &image ) )
 				{
 					const DDSFile dds( dds_source->data, is_srgb( usage ) );
-					auto tex = make_image_from_dds( _gpu->device, dds );
-					_gpu->texture_upload.queue( dds, tex );
-					_textures[ i ] = _gpu->bindless_manager.add_texture( std::move( tex ) );
+					auto tex = make_image_from_dds( gpu.device, dds );
+					gpu.texture_upload.queue( dds, tex );
+					_textures[ i ] = gpu.bindless_manager.add_texture( std::move( tex ) );
 				}
-				else if ( const auto& surface = std::get<sdl::raii::Surface>( image ); _gpu->compressor )
+				else if ( const auto& surface = std::get<sdl::raii::Surface>( image ); gpu.compressor )
 				{
-					auto tex = make_image_from_surface( _gpu->device, *surface, compressed_format( usage ) );
-					_gpu->texture_upload.queue( *surface, tex, *_gpu->compressor );
-					_textures[ i ] = _gpu->bindless_manager.add_texture( std::move( tex ) );
+					auto tex = make_image_from_surface( gpu.device, *surface, compressed_format( usage ) );
+					gpu.texture_upload.queue( *surface, tex, *gpu.compressor );
+					_textures[ i ] = gpu.bindless_manager.add_texture( std::move( tex ) );
 				}
 				else
 				{
-					auto tex = make_image_from_surface( _gpu->device, *surface, uncompressed_format( usage ) );
-					_gpu->texture_upload.queue( *surface, tex );
-					_textures[ i ] = _gpu->bindless_manager.add_texture( std::move( tex ) );
+					auto tex = make_image_from_surface( gpu.device, *surface, uncompressed_format( usage ) );
+					gpu.texture_upload.queue( *surface, tex );
+					_textures[ i ] = gpu.bindless_manager.add_texture( std::move( tex ) );
 				}
 			}
 		}
 
-		_gpu->texture_upload.submit();
+		gpu.texture_upload.submit();
 	}
 
-	loaded_asset finalize()
+	loaded_asset finalize( gpu_state& gpu )
 	{
 		PROFILER_SCOPE();
 		std::vector<glm::vec4> bounding_spheres;
@@ -1436,7 +1428,7 @@ private:
 														 &bounding_spheres[ 0 ].w,
 														 sizeof( glm::vec4 ) );
 
-		gpu_upload_job::wait_all_done( { &_gpu->mesh_upload, &_gpu->texture_upload } );
+		gpu_upload_job::wait_all_done( { &gpu.mesh_upload, &gpu.texture_upload } );
 
 		_materials.resize( _asset.materials.size() );
 		for ( size_t i = 0; i < _materials_usage.size(); ++i )
@@ -1532,14 +1524,14 @@ private:
 				}
 				material.type = material.gpu_data.type;
 
-				material.handle = _gpu->bindless_manager.add_buffer_entry( material.gpu_data );
+				material.handle = gpu.bindless_manager.add_buffer_entry( material.gpu_data );
 			}
 		}
 
 		for ( const auto& parsed_mesh : _parsed_meshes )
 		{
 			auto& mesh = _meshes[ parsed_mesh.gltf_index ];
-			mesh.handle = _gpu->bindless_manager.add_buffer_entry( mesh.gpu_data );
+			mesh.handle = gpu.bindless_manager.add_buffer_entry( mesh.gpu_data );
 			mesh.material = _materials[ *_asset.meshes[ parsed_mesh.gltf_index ].primitives[ 0 ].materialIndex ].handle;
 		}
 
@@ -1579,7 +1571,6 @@ private:
 private:
 	bool _use_dds;
 	std::filesystem::path _path;
-	std::optional<gpu_state> _gpu;
 	fastgltf::Asset _asset;
 	std::vector<uint8_t> _meshes_usage; // Could be a dynamic bitset
 	std::vector<image_usage> _images_usage;
@@ -1594,27 +1585,65 @@ private:
 	std::vector<mesh> _meshes;
 };
 
-Assets::Assets( renderer::Device& device,
-				BindlessManager& bindless_manager,
-				texture_compressor* compressor,
-				size_t max_indices,
-				const texture_options& options )
-	: _device( device )
-	, _bindless_manager( bindless_manager )
-	, _indices( device, max_indices )
+Assets::Assets( size_t max_indices, const texture_options& options )
+	: _max_indices( max_indices )
 	, _texture_options( options )
-	, _texture_compressor( compressor )
 {
 }
 
-scene Assets::load( const std::filesystem::path& path )
+Assets::~Assets()
+{
+	// Loads that were never waited for, after an error elsewhere: their jobs must outlive their tasks
+	_prepare_tasks.cancel();
+	_prepare_tasks.wait();
+}
+
+scene_handle Assets::load( std::filesystem::path path )
 {
 	PROFILER_SCOPE();
-	load_job job( _texture_options.use_dds, path );
-	job.prepare();
-	auto asset = job.commit( _device, _bindless_manager, _indices, _texture_compressor );
-	add_content( asset );
-	return std::move( asset.contents );
+	const scene_handle handle { static_cast<uint32_t>( _scenes.size() + _jobs.size() ) };
+	const auto job = _jobs.emplace_back( std::make_unique<load_job>( _texture_options.use_dds, std::move( path ) ) ).get();
+	tbb::this_task_arena::enqueue( [ job ] { job->prepare(); }, _prepare_tasks );
+	return handle;
+}
+
+void Assets::attach( renderer::Device& device, BindlessManager& bindless_manager, texture_compressor* compressor )
+{
+	PROFILER_SCOPE();
+	assert( !_gpu );
+	assert( !compressor || compressor->is_ready() );
+	_gpu.reset( new gpu_state { .device = device,
+								.bindless_manager = bindless_manager,
+								.compressor = compressor,
+								.indices = index_buffer( device, _max_indices ) } );
+}
+
+void Assets::wait_ready()
+{
+	PROFILER_SCOPE();
+	assert( _gpu );
+	_prepare_tasks.wait();
+	for ( auto& job : _jobs )
+	{
+		auto asset = job->commit( _gpu->device, _gpu->bindless_manager, _gpu->indices, _gpu->compressor );
+		add_content( asset );
+		_scenes.push_back( std::move( asset.contents ) );
+		// Frees its CPU side data before the next commit
+		job.reset();
+	}
+	_jobs.clear();
+}
+
+const scene& Assets::get( scene_handle handle ) const
+{
+	assert( handle.index < _scenes.size() );
+	return _scenes[ handle.index ];
+}
+
+const index_buffer& Assets::get_indices() const
+{
+	assert( _gpu );
+	return _gpu->indices;
 }
 
 void Assets::add_content( loaded_asset& asset )
