@@ -1101,7 +1101,9 @@ private:
 		}
 	}
 
-	// Simplify lod0_indices into the LODs 1+ of the chain
+	// Simplify lod0_indices into the LODs 1+ of the chain, each LOD from the previous one as meshoptimizer recommends: the
+	// collapses done for the previous LODs aren't redone, and with meshopt_SimplifySparse a coarse LOD's cost scales with
+	// its own indices rather than with the whole vertex buffer
 	// Attributes (normals) are only taken into account if use_attributes is set, which is meant for regular (shaded) rendering
 	static void
 	generate_lods( std::span<const mesh_vertex> vertices, std::span<const uint32_t> lod0_indices, lod_chain& chain, bool use_attributes )
@@ -1110,19 +1112,28 @@ private:
 		// so that the LOD selected for a pixel tolerance never exceeds twice the error it could afford
 		constexpr float first_lod_error = 0.0025f;
 		std::vector<uint32_t> buffer( lod0_indices.size() );
-		// Simplification errors (targets and results) are relative to the mesh extents, but LOD selection compares them
-		// against world space distances (in mesh units, before instance scale) so convert results to absolute
+		// LOD selection compares errors against world space distances (in mesh units, before instance scale), so they're
+		// absolute: limits are relative to the whole mesh extents, the scale the simplifier uses for relative errors
 		const float error_scale = meshopt_simplifyScale( &vertices.front().position.x, vertices.size(), sizeof( mesh_vertex ) );
+		std::span<const uint32_t> source = lod0_indices;
+		// Each step's result error is measured against its source LOD, not LOD0. Like niagara (by meshoptimizer's author), the
+		// LOD's error grows by at least 1.5x per step rather than summing the steps' errors, which is a strict bound but
+		// inflates errors enough to select much denser LODs. Every step gets the LOD's full limit, so recorded errors stay
+		// within it: 1.5x the previous limit is 0.75x this one.
+		float source_error = 0.f;
 		for ( size_t lod = 0; lod < chain.indices_per_lod.size(); ++lod )
 		{
-			const float target_error = first_lod_error * static_cast<float>( 1 << lod );
+			const float target_error = first_lod_error * static_cast<float>( 1 << lod ) * error_scale;
+			// Sparse only pays off on subsets, LOD0 references most of the vertices
+			const unsigned int options = meshopt_SimplifyErrorAbsolute | ( lod > 0 ? meshopt_SimplifySparse : 0 );
+			float step_error = 0.f;
 			size_t size = 0;
 			if ( use_attributes )
 			{
 				const float attr_weights[ 3 ] = { 0.5f, 0.5f, 0.5f };
 				size = meshopt_simplifyWithAttributes( buffer.data(),
-													   lod0_indices.data(),
-													   lod0_indices.size(),
+													   source.data(),
+													   source.size(),
 													   &vertices.front().position.x,
 													   vertices.size(),
 													   sizeof( mesh_vertex ),
@@ -1133,27 +1144,30 @@ private:
 													   nullptr,
 													   0,
 													   target_error,
-													   0,
-													   &chain.error_per_lod[ lod ] );
+													   options,
+													   &step_error );
 			}
 			else
 			{
 				size = meshopt_simplify( buffer.data(),
-										 lod0_indices.data(),
-										 lod0_indices.size(),
+										 source.data(),
+										 source.size(),
 										 &vertices.front().position.x,
 										 vertices.size(),
 										 sizeof( mesh_vertex ),
 										 0,
 										 target_error,
-										 0,
-										 &chain.error_per_lod[ lod ] );
+										 options,
+										 &step_error );
 			}
-			chain.error_per_lod[ lod ] *= error_scale;
+			source_error = std::max( source_error * 1.5f, step_error );
+			chain.error_per_lod[ lod ] = source_error;
 
 			meshopt_optimizeVertexCache( buffer.data(), buffer.data(), size, vertices.size() );
 			chain.indices_per_lod[ lod ] = static_cast<uint32_t>( size );
+			const auto offset = chain.indices.size();
 			chain.indices.insert( end( chain.indices ), buffer.data(), buffer.data() + size );
+			source = std::span( chain.indices ).subspan( offset, size );
 		}
 	}
 
