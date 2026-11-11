@@ -510,6 +510,13 @@ int main( int argc, char** argv )
 	// Created after the loads start, declared before them to outlive their GPU resources
 	std::optional<renderer::Device> device_storage;
 
+	// The bindless manager is referenced by the pipeline manager in pipeline layouts,
+	// so it must be declared before to be deleted after
+	std::optional<BindlessManager> bindless_manager;
+
+	// Create pipeline manager early so we can start compiling shaders / run warmup
+	renderer::PipelineManager pipelines( "shaders", settings.shader_cache_dir );
+
 	// Bistro needs ~27M
 	Assets assets( 32 * 1024 * 1024, { .use_dds = !settings.no_dds } );
 	std::vector<scene_handle> scene_handles;
@@ -555,21 +562,20 @@ int main( int argc, char** argv )
 		output = std::make_unique<WindowOutput>( device, swapchain_format, vsync );
 	}
 
-	BindlessManager bindless_manager( device, std::array { MAX_MESHES, MAX_MATERIALS } );
-	renderer::PipelineManager pipelines( device, "shaders", bindless_manager, settings.shader_cache_dir );
-
-	SceneRenderer scene_renderer( device, swapchain_format, settings.msaa, bindless_manager, pipelines );
+	bindless_manager.emplace( device, std::array { MAX_MESHES, MAX_MATERIALS } );
+	pipelines.attach( device, *bindless_manager );
+	SceneRenderer scene_renderer( device, swapchain_format, settings.msaa, *bindless_manager, pipelines );
 
 	const auto compressor = settings.texture_compression == "gpu"
 		// The crowd's textures are 2048x2048 at most, Bistro has larger ones
-		? std::make_unique<texture_compressor>( device, bindless_manager, pipelines, 2048 )
+		? std::make_unique<texture_compressor>( device, *bindless_manager, pipelines, 2048 )
 		: nullptr;
 	if ( compressor )
 	{
 		// attach() requires a ready compressor
 		pipelines.wait_ready();
 	}
-	assets.attach( device, bindless_manager, compressor.get() );
+	assets.attach( device, *bindless_manager, compressor.get() );
 	assets.wait_ready();
 
 	std::vector<scene> crowd_models;
@@ -751,7 +757,7 @@ int main( int argc, char** argv )
 		draw_ui( ui_state,
 				 props,
 				 device.get_memory_usage(),
-				 bindless_manager,
+				 *bindless_manager,
 				 gpu_timings.averages,
 				 stats,
 				 scene_renderer.get_statistics(),
@@ -768,7 +774,7 @@ int main( int argc, char** argv )
 
 		command_buffer->reset_query( timestamp_queries[ image_index ], 0, GpuTimings::TIMESTAMPS_COUNT );
 		GpuTimingScope frame_scope( *command_buffer, timestamp_queries[ image_index ], GpuTiming::FRAME );
-		scene_renderer.render( bindless_manager,
+		scene_renderer.render( *bindless_manager,
 							   pipelines,
 							   *command_buffer,
 							   output_image,
