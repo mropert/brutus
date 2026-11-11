@@ -65,6 +65,53 @@ Release, 5 alternating runs against the previous commit, medians in ms (`scratch
 - Both builds ran slower than earlier sessions (the baseline crowd took 1,169 ms in the previous step's runs): compare
   only alternating runs of one session.
 
+Then device creation and mesh processing got cheaper:
+
+| Commit | Change |
+| --- | --- |
+| vk-renderer `3ec5c6e`, brutus-ng `8e53f95` | `VK_EXT_debug_utils` always required, without a `vkb::SystemInfo` scan; `debug_labels_support` removed |
+| brutus-ng `5eeb1f3` | Each LOD simplified from the previous one, errors tracked like niagara and Godot |
+
+**Debug utils** (`scratch/devicefix`): `Device` made a `vkb::SystemInfo` only to check for `VK_EXT_debug_utils`, and
+`InstanceBuilder::build()` makes its own. Each one enumerates every layer's extensions, and each loader enumeration
+reparses every layer manifest: ~280 ms each on this machine, with 18 layers registered (see Findings). The Khronos
+loader implements the extension itself, so it's now required. Medians over 5 alternating Release runs:
+
+| | Crowd before | Crowd after | Bistro before | Bistro after |
+| --- | --- | --- | --- | --- |
+| `create_device` | 672 | 515 | 1,242 | 933 |
+| Startup | 889 | 732 | 4,016 | 4,323 |
+
+Bistro got slower in all 5 rounds, from scheduling rather than added work: `main` reaches `wait_ready()` ~330 ms
+earlier and joins the mesh work there (`task_group::wait()` runs tasks), which changes how TBB splits the meshes. The
+mesh that finished last started at 1,916 ms instead of 1,521 ms (median), and `main` more often took one of the huge
+meshes itself (`scratch/devicefix/tail.py`). Chained LODs below shortened those meshes enough to make this moot.
+
+**Chained LODs** (`scratch/lodchain2`): as meshoptimizer's README recommends, each LOD simplifies the previous one
+instead of LOD 0, with `meshopt_SimplifySparse` from LOD 2 so a coarse LOD's cost scales with its own indices, and
+absolute errors with the same limits as before. A step's error is measured against its source LOD, so each LOD records
+`max(1.5 x previous, step error)` and every step gets the LOD's full limit. Medians over 5 alternating Release runs, GPU
+from Nsight traces (`util/gputrace.py`):
+
+| | Crowd before | Crowd after | Bistro before | Bistro after |
+| --- | --- | --- | --- | --- |
+| Startup | 729 ms | 680 ms | 3,632 ms | 2,530 ms |
+| `prepare` | 667 ms | 395 ms | 3,020 ms | 1,910 ms |
+| `prepare_mesh` CPU time, all threads | 1.31 s | 0.69 s | 29.8 s | 14.4 s |
+| Longest `prepare_mesh` | 457 ms | 216 ms | 1,654 ms | 845 ms |
+| `lod_generation` + `shadow_lod_generation` CPU time | 1.08 s | 0.42 s | 22.5 s | 7.6 s |
+| `meshlet_generation` CPU time | 0.20 s | 0.25 s | 6.9 s | 6.6 s |
+| GPU frame | 4.33 ms | 4.28 ms | 2.40 ms | 2.41 ms |
+
+- The crowd's startup is still bound by device creation: its prepare work is 270 ms shorter, startup within noise.
+- Meshlet generation is now the largest share of Bistro's mesh work.
+- LODs differ: 9% of the crowd's benchmark pixels change (1.2% on Bistro), without visible artifacts when moving
+  around. Distant characters show small silhouette and shading differences.
+- Memory within build variance: peak working set crowd +36 MB, Bistro -5 MB.
+- **Summing step errors selected much denser LODs**: the first version summed them (a strict bound) and only allowed
+  each step what was left of the LOD's limit. Crowd GPU frame time went from 4.45 to 5.32 ms, LODs 2-5 costing 35-55%
+  more. niagara, Godot's importer and meshoptimizer's `clusterlod.h` all use a max instead (Findings).
+
 ## Profile before the loading work
 
 Crowd, Release, warm shader cache (Optick capture, `util/optick_report.py`), 1,255 ms of startup:
@@ -112,10 +159,11 @@ only options they read (`--no-dds`, `--texture-compression`) come from the comma
      primitives, none in Bistro), vertex repack. Both LOD chains depend on it.
    - Main LOD chain (simplify with normals) and shadow LOD chain (positions only, then remapped to shadow indices) are
      independent: they only read the vertices and LOD 0 indices.
-   - Within a chain, every LOD simplifies from LOD 0 (`generate_lods`): all LODs are independent.
-   - Meshlets per chain, and per LOD. LOD 0 meshlets only need vertex prep. `build_meshlets` appends to shared vectors
-     with absolute offsets: parallel LODs need local outputs, merged and rebased in today's order to keep the GPU data
-     byte-identical.
+   - Within a chain, every LOD simplifies the previous one (`generate_lods`, since `5eeb1f3`): a chain is serial. Until
+     then every LOD simplified LOD 0 and they were independent, at twice the total CPU time.
+   - Meshlets per chain, and per LOD: each LOD's meshlets only need that LOD's indices, LOD 0's only vertex prep.
+     `build_meshlets` appends to shared vectors with absolute offsets: parallel LODs need local outputs, merged and
+     rebased in today's order to keep the GPU data byte-identical.
    - Bounds (`meshopt_computeSphereBounds`, in `upload_mesh` today) can move here.
 4. **Image decoding**: PNG to RGBA8. Embedded PNGs depend on stage 1 only, external ones on stage 2. DDS skip this
    stage.
@@ -186,16 +234,22 @@ slot, `get()` waiting instead of asserting) can come later without changing call
    textures are read 1.5 s into startup but uploaded at the very end (522 ms). Also worth trying: two staging buffers,
    so the copy into one overlaps the GPU transfer from the other (2 GB through 128 MB is ~16 rounds of copy, submit,
    wait).
-6. Parallel chains, LODs and meshlets (stage 3). For the crowd, where cores sit idle while one mesh is the critical
-   path. For Bistro, expect it to hit the same limit as largest-first ordering: once every thread is busy, more
-   parallelism on the big meshes mostly makes each of them slower.
+6. Smaller tasks within a mesh (stage 3): after vertex prep, the main and shadow LOD chains as two tasks, and each
+   LOD's meshlets as soon as that LOD exists. A single continuation runs inline in the task that finishes its input
+   (scheduler bypass: earliest start, warm cache, no queueing); only fan-out spawns tasks. A per-mesh atomic counter
+   lets the last task to finish run the merge (concatenating LOD outputs in a fixed order) inline. This shortens the
+   tail that decides Bistro's end and stops starving the DDS reads, without reducing total work. Chained LODs (since
+   `5eeb1f3`) already halved the longest meshes.
 7. Dedicated reader threads for stage 2 (see Open questions).
-8. Later: an on-disk cache for LODs and meshlets, the same pattern as the shader cache. It's the only item that reduces
-   the CPU work itself, which bounds Bistro once the rest is done.
-9. Keep a hardware thread for the main thread while it creates the device: since step 3, the prepare work takes every
-   hardware thread and `create_device` slows from ~600 ms to 730 ms (crowd) and 1,515 ms (Bistro). Options: run
-   prepare work in a `tbb::task_arena` one thread smaller than the default (or a `tbb::global_control` limit) until
-   the device exists, or raise the main thread's priority. Cheap to try, so worth doing next.
+8. Later: an on-disk cache for LODs and meshlets, the same pattern as the shader cache. With chained LODs, meshlet
+   generation is the largest share of the remaining mesh CPU work, which bounds Bistro once the rest is done.
+9. Device creation next to the prepare work: since step 3, `create_device` slows from ~600 ms to 730 ms (crowd) and
+   1,515 ms (Bistro). TBB already leaves `main` a slot (the default arena creates hardware threads - 1 workers), so a
+   smaller arena isn't the fix. Likely causes: `main` sharing a core with a worker (~1.3-1.4x, see Experiments),
+   driver and SDL threads on top of 16 busy threads, and on Bistro the 2 GB of DDS reads and page faults while the
+   loader and driver load their DLLs. Device creation isn't on Bistro's critical path, so this only costs the crowd.
+   Removing the duplicate layer scan (`3ec5c6e`) took ~160 ms off; the rest is `vkCreateInstance` and the scan inside
+   `vkb::InstanceBuilder::build()`.
 
 Estimates were from one capture each, before step 3:
 
@@ -240,7 +294,7 @@ stayed in memory until `upload_textures`). A byte budget would weigh each file b
   `SDL_Init( 0 )` before the first load to set up SDL's main thread state; whether that's needed was never verified.
 - Errors: a bad asset reports from `wait_ready()`, after the window opened. If `Device` throws first, nothing catches
   it: the terminate handler prints it without unwinding, so `~Assets` never runs.
-- Prepare work slows device creation even on 16 hardware threads (step 9); worse on low core counts.
+- Prepare work slows device creation even on 16 hardware threads (step 9); likely worse on low core counts.
 
 ## Experiments
 
@@ -369,8 +423,29 @@ only compare runs made in the same session, alternated.
   is busy. Estimates that replay measured durations on a different schedule overestimate the gain.
 - **Mesh work is core bound, not memory bound**: sharing a core slows each thread 1.3-1.45x, while doubling the
   cores costs only 14-20% per thread (Experiments).
-- **`lod_generation` dominates the big meshes**: 40-66% of each of Bistro's 7 longest meshes (over half for 4 of
-  them), against 26-39% for shadow LODs and 9-34% for meshlets.
+- **`lod_generation` dominated the big meshes** before chained LODs: 40-66% of each of Bistro's 7 longest meshes (over
+  half for 4 of them), against 26-39% for shadow LODs and 9-34% for meshlets. Chaining cut both LOD scopes by about
+  3x; meshlets are now the largest share.
+- **Combine chained LOD errors with a max, not a sum**: meshoptimizer's README only says errors of previous levels
+  "should be accumulated". The author's projects and Godot do it with a max and give each step the same limit:
+  niagara (`src/scene.cpp`) and Godot's importer (`importer_mesh.cpp`) use `max(previous * 1.5, step)`, and
+  `clusterlod.h` defaults to `max(previous, step)`. Godot's comment: the step error is usually right as is, and the
+  1.5x floor only keeps errors strictly increasing and limits popping distances. A sum overstates the error and
+  selects denser LODs (+20% GPU time on the crowd). `meshopt_SimplifyErrorClamped` (meshoptimizer 1.3, we use 1.2)
+  clamps attribute error to the position error's scale; niagara found it reduces triangles on complex scenes.
+- **Device creation scanned every layer manifest about 40 times**: `vkb::SystemInfo` enumerates layer properties,
+  then the extensions of each layer, and each loader enumeration reparses every manifest. This machine registers 9
+  implicit layers (OBS, RenderDoc, Epic, 4 Nsight, Steam overlay and Fossilize) and 9 explicit ones (Vulkan SDK). Only
+  OBS's is active without an environment variable, but all manifests are parsed. `VK_LOADER_LAYERS_DISABLE=~implicit~`
+  turns implicit layers off for one run. Instance-level optional extensions don't exist in vk-bootstrap (only
+  `PhysicalDevice::enable_extension_if_present`).
+- **vcpkg doesn't install `vulkan-1.pdb`**: the `vulkan-loader` port never calls `vcpkg_copy_pdbs()` (still the case
+  upstream, no issue filed), and the PDB left in the buildtree doesn't match a DLL restored from the binary cache. To
+  profile the loader, rebuild it from the vcpkg clone (at the manifest's baseline) and use the buildtree's DLL and PDB
+  together: `vcpkg install vulkan-loader:x64-windows --overlay-triplets=../brutus-ng/triplets
+  --x-install-root=../brutus-ng/scratch/vulkan-loader --no-binarycaching`.
+- **Bistro's end time depends on when the big meshes start**: anything that moves when `main` joins `wait_ready()`
+  shifts TBB's splitting of `prepare_meshes` and can move Bistro's startup by ~0.3 s either way (debug utils above).
 - **`decompress_tex` is misleading**: it also covers DDS reads and unused images. Return early for unused images before
   the scope and use separate scopes (e.g. `read_dds`, `decode_image`) so a fallback to PNG shows up.
 - **`decompress_textures` time isn't read time**: it shares TBB workers with `prepare_meshes`, and varied 0.7-2.4 s
