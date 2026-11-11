@@ -71,11 +71,13 @@ Then device creation and mesh processing got cheaper:
 | --- | --- |
 | vk-renderer `3ec5c6e`, brutus-ng `8e53f95` | `VK_EXT_debug_utils` always required, without a `vkb::SystemInfo` scan; `debug_labels_support` removed |
 | brutus-ng `5eeb1f3` | Each LOD simplified from the previous one, errors tracked like niagara and Godot |
+| vk-renderer `eaee371`, `4c005d2` | vk-bootstrap only queries the extensions of requested layers; profiling scopes in `Device` |
 
 **Debug utils** (`scratch/devicefix`): `Device` made a `vkb::SystemInfo` only to check for `VK_EXT_debug_utils`, and
 `InstanceBuilder::build()` makes its own. Each one enumerates every layer's extensions, and each loader enumeration
-reparses every layer manifest: ~280 ms each on this machine, with 18 layers registered (see Findings). The Khronos
-loader implements the extension itself, so it's now required. Medians over 5 alternating Release runs:
+reparses every layer manifest: ~140-160 ms each in Release on this machine, with 18 layers registered (see
+Findings). The Khronos loader implements the extension itself, so it's now required. Medians over 5 alternating
+Release runs:
 
 | | Crowd before | Crowd after | Bistro before | Bistro after |
 | --- | --- | --- | --- | --- |
@@ -111,6 +113,31 @@ from Nsight traces (`util/gputrace.py`):
 - **Summing step errors selected much denser LODs**: the first version summed them (a strict bound) and only allowed
   each step what was left of the LOD's limit. Crowd GPU frame time went from 4.45 to 5.32 ms, LODs 2-5 costing 35-55%
   more. niagara, Godot's importer and meshoptimizer's `clusterlod.h` all use a max instead (Findings).
+
+**Layer extensions** (`scratch/vkbfix`): the `SystemInfo` made by `InstanceBuilder::build()` queried the extensions of
+all 18 installed layers, enabled or not, and merged them into one list. Besides the cost, that let an extension from a
+layer that isn't enabled pass vk-bootstrap's check and fail later in `vkCreateInstance` (`debug_utils_available` had
+the same flaw). `build()` now passes the layers it will enable (user layers, plus validation if enabled or requested)
+and `SystemInfo` only queries those (none in Release, validation in Debug). `get_system_info()` takes them as an
+optional parameter, so existing calls compile. The same change was sent upstream as a PR against `main` (branch
+`systeminfo_explicit_layers` of our fork, layers as `std::string`). Medians over 5 alternating runs, crowd:
+
+| | Debug before | Debug after | Release before | Release after |
+| --- | --- | --- | --- | --- |
+| `create_device` | 515 ms | 251 ms | 466 ms | 327 ms |
+| Startup | 1,401 ms | 1,099 ms | 681 ms | 558 ms |
+
+- Bistro's `create_device` goes from 748 to 493 ms in Release, its startup is within noise (bound by meshes).
+- Debug saves more because it uses vcpkg's debug `vulkan-1.dll` (unoptimized): ~7 ms per loader call against ~4 ms
+  in Release. Debug's `vk_instance` goes from 328 to 81 ms, validation still loads (`VK_LOADER_DEBUG=layer`).
+- The crowd's `create_device` is now `SDL_CreateWindow` 178 ms, `vk_device` 63, `vk_instance` 52, `SDL_init` 27,
+  `vk_physical_device` 7, and it's shorter than the crowd's `prepare` (386 ms): device creation is off the critical
+  path as long as there are meshes to prepare or textures to decompress. Memory within noise.
+- Instance creation is closed. `build()` still enumerates the layer list when no layer is requested, and in Debug
+  queries the validation layer's extensions although everything we request is in the base list: 2 loader calls each.
+  Removing those needs `build()` to do its own queries instead of going through `SystemInfo` (whose public fields
+  callers rely on), or our own instance creation. Neither is worth a few ms.
+- `SDL_CreateWindow` is about half Vulkan loading and half color profile lookups (Findings).
 
 ## Profile before the loading work
 
@@ -248,8 +275,8 @@ slot, `get()` waiting instead of asserting) can come later without changing call
    smaller arena isn't the fix. Likely causes: `main` sharing a core with a worker (~1.3-1.4x, see Experiments),
    driver and SDL threads on top of 16 busy threads, and on Bistro the 2 GB of DDS reads and page faults while the
    loader and driver load their DLLs. Device creation isn't on Bistro's critical path, so this only costs the crowd.
-   Removing the duplicate layer scan (`3ec5c6e`) took ~160 ms off; the rest is `vkCreateInstance` and the scan inside
-   `vkb::InstanceBuilder::build()`.
+   Removing the duplicate layer scan (`3ec5c6e`) took ~160 ms off, and querying only requested layers (`eaee371`)
+   another ~140 ms. `SDL_CreateWindow` is now the largest part (178 ms on the crowd).
 
 Estimates were from one capture each, before step 3:
 
@@ -433,12 +460,34 @@ only compare runs made in the same session, alternated.
   1.5x floor only keeps errors strictly increasing and limits popping distances. A sum overstates the error and
   selects denser LODs (+20% GPU time on the crowd). `meshopt_SimplifyErrorClamped` (meshoptimizer 1.3, we use 1.2)
   clamps attribute error to the position error's scale; niagara found it reduces triangles on complex scenes.
-- **Device creation scanned every layer manifest about 40 times**: `vkb::SystemInfo` enumerates layer properties,
-  then the extensions of each layer, and each loader enumeration reparses every manifest. This machine registers 9
-  implicit layers (OBS, RenderDoc, Epic, 4 Nsight, Steam overlay and Fossilize) and 9 explicit ones (Vulkan SDK). Only
-  OBS's is active without an environment variable, but all manifests are parsed. `VK_LOADER_LAYERS_DISABLE=~implicit~`
-  turns implicit layers off for one run. Instance-level optional extensions don't exist in vk-bootstrap (only
-  `PhysicalDevice::enable_extension_if_present`).
+- **Device creation scanned every layer manifest about 40 times** (before `eaee371`): `vkb::SystemInfo` enumerated
+  layer properties, then the extensions of each layer, each through `get_vector` (a count call, then a data call), and
+  each loader call reparses every manifest. A full `SystemInfo` cost ~140-160 ms in Release, ~4 ms per loader call.
+  This machine registers 9 implicit layers (OBS, RenderDoc, Epic, 4 Nsight, Steam overlay and Fossilize) and 9
+  explicit ones (Vulkan SDK). Only OBS's is active without an environment variable, but all manifests are parsed.
+  `VK_LOADER_LAYERS_DISABLE=~implicit~` turns implicit layers off for one run. Instance-level optional extensions don't
+  exist in vk-bootstrap (only `PhysicalDevice::enable_extension_if_present`).
+- **`vkEnumerateInstanceExtensionProperties( nullptr )` is all an app needs** to check instance extensions it enables
+  without naming a layer: per the spec it returns the implementation's (driver and loader, which implements
+  `VK_EXT_debug_utils` and the surfaces) plus those of active implicit layers, matching what `vkCreateInstance` will
+  load. A layer's own list only matters for extensions missing from it, and only for layers being enabled. No API
+  says which implicit layers are active (`vkEnumerateInstanceLayerProperties` also lists inactive ones), and none is
+  needed. Layers without extensions still do their work (they intercept calls).
+- **`VK_LAYER_KHRONOS_validation`** provides the instance extensions `VK_EXT_debug_report`, `VK_EXT_debug_utils`,
+  `VK_EXT_layer_settings` and `VK_EXT_validation_features`, and the device extensions `VK_EXT_debug_marker`,
+  `VK_EXT_validation_cache` and `VK_EXT_tooling_info` (manifests of SDK 1.4.335 and vcpkg 1.4.357). vk-bootstrap
+  chains `VkValidationFeaturesEXT` / `VkValidationFlagsEXT` without enabling their extensions (v1.4.305 and v1.4.367),
+  which the spec forbids and the layer tolerates. Its test mock's `VulkanMock::add_layer` stores device extensions in
+  the instance list, unnoticed because no test uses it.
+- **`SDL_CreateWindow` loads Vulkan and the driver** (VTune capture, SDL 3.4 and loader 1.4.357 sources): with
+  `SDL_WINDOW_VULKAN`, `WIN_Vulkan_LoadLibrary` loads `vulkan-1.dll` and calls `vkEnumerateInstanceExtensionProperties`
+  to check for the surface extensions, which preloads the driver DLL (`loader_preload_icds`). That cost moves rather
+  than adds: the preloaded driver stays loaded until `vkDestroyInstance` and `vkCreateInstance` reuses it. The other
+  half is `WIN_UpdateWindowICCProfile` (`CreateDCW` + `GetICMProfileW`), called unconditionally at creation and again
+  when the window gets focus, with no hint to disable it. Possible later work: create the instance on a worker while
+  `main` creates the window (DLL loads still serialize on the Windows loader lock), or ask SDL to query the color
+  profile lazily. An Optick scope around an explicit `SDL_Vulkan_LoadLibrary` before `SDL_CreateWindow` would split
+  the two.
 - **vcpkg doesn't install `vulkan-1.pdb`**: the `vulkan-loader` port never calls `vcpkg_copy_pdbs()` (still the case
   upstream, no issue filed), and the PDB left in the buildtree doesn't match a DLL restored from the binary cache. To
   profile the loader, rebuild it from the vcpkg clone (at the manifest's baseline) and use the buildtree's DLL and PDB

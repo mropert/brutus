@@ -94,6 +94,18 @@ reproduce.
   screenshots 45-60 s, and prefer Release. `--capture` needs no wait: frames only start once the load is done.
 - `image_diff.ps1` rounds its percentages: a few hundred changed pixels print as 0.00%. Check the mean difference or
   count pixels exactly before calling a change pixel identical.
+- **CPU profilers for system code** (Optick only sees our scopes, the Visual Studio profiler hides external libraries):
+  - VTune 2025.x has no hardware sampling tables for Skylake-family client CPUs (this i7-10700F is Comet Lake):
+    "cannot recognize the processor". 2024.2 works, from an older oneAPI Base Toolkit installer; run it as
+    administrator.
+  - Its hardware-mode call stacks are only LBR stacks here (leaf and a few frames): the `vtss` stack driver fails to
+    start on Windows 11 26H2 (build 26300), with both 2024.2 and 2025.8. User-mode sampling gives full stacks, but its
+    instrumentation inflates per-call costs (thousands of `strcmp` calls look like most of `vkCreateDevice`): read
+    call structure from it, durations from Optick.
+  - Superluminal's command line records without a license (from an administrator prompt), but its agent commands
+    (`llm`, `mcp`, from 1.0.7510) need an activated license. Free alternative with full stacks: `wpr -start CPU` /
+    `wpr -stop trace.etl` (administrator), read with WPA or exported with `wpaexporter`.
+  - `VK_LOADER_DEBUG=layer` logs which layers the loader finds and inserts.
 - PowerShell variable names ignore case: a script with a `$A` parameter and an `$a` local silently breaks.
 - Back to back app launches occasionally fail with `0xC0000142`: wait a few seconds between runs and retry.
 
