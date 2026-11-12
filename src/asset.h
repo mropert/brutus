@@ -159,8 +159,9 @@ struct scene_handle
 	uint32_t index;
 };
 
-// Loads glTF files in two phases: load() starts preparing them on TBB workers without a device, wait_ready() then
-// uploads them in load order once attach() provided the device. Not thread safe, calls are expected from one thread.
+// Loads glTF files: load() starts preparing them on TBB workers without a device. Once attach() provided the device,
+// wait_ready() uploads meshes and textures from the calling thread as soon as each is prepared, then finalizes the assets
+// in load order. Not thread safe, calls are expected from one thread.
 class Assets
 {
 public:
@@ -175,7 +176,7 @@ public:
 	scene_handle load( std::filesystem::path path );
 	// Without a compressor, decoded images are uploaded uncompressed. A compressor must be ready to compress.
 	void attach( renderer::Device& device, BindlessManager& bindless_manager, texture_compressor* compressor );
-	// Waits for every load to be prepared, then commits them. Requires attach(), rethrows the first load error.
+	// Waits for every load to be prepared, then commits them. Requires attach(), rethrows the first load error in load order.
 	void wait_ready();
 	const scene& get( scene_handle handle ) const;
 
@@ -190,6 +191,23 @@ private:
 	struct loaded_asset;
 	class load_job;
 	void add_content( loaded_asset& asset );
+
+	// A prepared mesh or texture of a job, ready to upload
+	struct upload_item
+	{
+		enum class kind : uint8_t
+		{
+			MESH,
+			TEXTURE,
+			JOB_DONE // A job's prepare() returned, after every item it pushed
+		};
+		kind kind = kind::JOB_DONE;
+		load_job* job = nullptr;
+		uint32_t index = 0; // Mesh index in the job's parsed meshes, or glTF texture index
+	};
+	using upload_queue = tbb::concurrent_bounded_queue<upload_item>;
+	// Uploads items until every job is prepared, then waits for the GPU copies
+	void upload_prepared();
 
 	// What attach() provides
 	struct gpu_state
@@ -209,4 +227,5 @@ private:
 	std::deque<scene> _scenes; // Committed scenes in load order, a deque so get() references stay valid
 	std::vector<material> _materials;
 	std::vector<mesh> _meshes;
+	upload_queue _uploads; // Filled by prepare tasks from load(), emptied by wait_ready()
 };

@@ -277,6 +277,45 @@ slot, `get()` waiting instead of asserting) can come later without changing call
    loader and driver load their DLLs. Device creation isn't on Bistro's critical path, so this only costs the crowd.
    Removing the duplicate layer scan (`3ec5c6e`) took ~160 ms off, and querying only requested layers (`eaee371`)
    another ~140 ms. `SDL_CreateWindow` is now the largest part (178 ms on the crowd).
+10. **Next: fewer copies on the texture upload path.** Since steps 5 and 6 (one prioritized flow graph, uploads streamed
+    from `wait_ready()` on the main thread), Bistro's critical path is
+    device (646 ms) + swapchain (226 ms) + pipelines, then 1,173 ms of serial uploads on `main`, ending 360 ms after
+    the last mesh. In that capture (`startup_release.opt`, Release):
+    - `upload_texture` is 804 ms: ~365 ms memcpy into staging, 221 ms `create_texture` (338 images), 216 ms
+      `wait_for_fences` (the single 128 MB staging buffer waits for the GPU on each of ~16 refills).
+    - DDS reads take 5.2 s of worker time for 1.96 GB (4 at a time, done by 1,449 ms, off the critical path). Each
+      byte is copied three times (OS cache -> zero-filled heap buffer -> staging -> GPU) and the heap copies sit in
+      the peak working set until uploaded. Python reads the same files at 2.4 s of thread time with 4 threads (Bistro
+      DDS reads, Experiments).
+
+    Plan, in order:
+    1. Double-buffer the staging buffer: fill one while the GPU copies the other (up to -216 ms on the critical path).
+    2. DDS: read only the header (`min( 148, file size )`: magic, header, DX10 header) in the prepare step, enough for
+       extent, format and mips. Create the images on workers once the device exists (-221 ms on `main`, needs
+       `create_texture` to be safe from several threads, unchecked). At upload, `ReadFile` the data straight into the
+       mapped staging buffer: one CPU copy instead of three, no heap copies in the peak, no 5.2 s of worker reads. The
+       read replaces the heap -> staging memcpy on `main`, about the same cost when cached.
+    3. PNG: keep reading the compressed bytes into ordinary memory and decoding on workers (inflate is the CPU cost).
+       The staging buffer is `HOST_ACCESS_SEQUENTIAL_WRITE`, likely write-combined: never read from it, so neither
+       decode nor convert in it. Convert the decoded surface to RGBA32 with the staging buffer as target
+       (`SDL_ConvertPixels( ..., staging_ptr, pitch )`): convert and upload copy become one pass. An RGBA32 surface
+       should be a plain row copy; if SDL doesn't fast-path it, add a branch with `memcpy`. Mostly the crowd (embedded
+       PNGs, GPU compression reads the RGBA input from staging): measure `convert_to_rgba` and the copy there first.
+       Later: libspng or wuffs decoding row by row into staging, without a full decoded surface.
+
+    Considered and not planned:
+    - Mapping DDS files (`MapViewOfFile`, 64 KB aligned views, header skipped) and copying to staging: still one CPU
+      copy, plus a soft fault per 4 KB source page (~500k for 2 GB). `ReadFile` copies through the kernel's cache
+      mapping without them.
+    - Importing the mapping as Vulkan memory (`VK_EXT_external_memory_host`, zero CPU copies): Bistro's DDS are BC7
+      with a DX10 header, so the data starts at 148, not a multiple of the 16 byte block that buffer -> image copies
+      require (an extra GPU buffer copy to realign). Drivers may only import host allocations, not file mappings.
+
+    Open: with a cold cache, synchronous reads on `main` would put the disk on the critical path (overlapped I/O or
+    IoRing with several reads in flight, or `FILE_FLAG_NO_BUFFERING` DMA into staging). If `main` becomes the limit,
+    workers can read and convert into staging ranges they reserve, which needs a staging ring with fence tracking.
+    The swapchain (226 ms) isn't needed by uploads but comes before them on `main`: create it on another thread
+    during `wait_ready()`, or attach right after the bindless manager.
 
 Estimates were from one capture each, before step 3:
 

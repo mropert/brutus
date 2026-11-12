@@ -8,6 +8,7 @@
 #include <SDL3_image/SDL_image.h>
 #include <algorithm>
 #include <bit>
+#include <exception>
 #include <fastgltf/core.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -315,6 +316,15 @@ public:
 		}
 	}
 
+	// Submits what was queued so far and waits for it, if anything was. The job keeps uploading afterwards.
+	void flush()
+	{
+		if ( _offset != 0 || _compressed_offset != 0 )
+		{
+			flush_full();
+		}
+	}
+
 	void submit()
 	{
 		assert( _state == state::UPLOADING );
@@ -400,6 +410,20 @@ struct Assets::loaded_asset
 
 namespace
 {
+	// What uploading needs, owned by Assets::upload_prepared() and shared by every job
+	struct upload_state
+	{
+		renderer::Device& device;
+		BindlessManager& bindless_manager;
+		index_buffer& indices;
+		texture_compressor* compressor; // Null without compression
+		gpu_upload_job mesh_upload;
+		gpu_upload_job texture_upload;
+	};
+}
+
+namespace
+{
 	glm::mat4 calc_node_transform( const fastgltf::Node& node )
 	{
 		const overloads make_transform(
@@ -478,6 +502,14 @@ class Assets::load_job
 		std::vector<gpu_meshlet> meshlets;
 		std::vector<uint32_t> meshlet_vertices;
 		std::vector<uint8_t> meshlet_triangles;
+	};
+
+	// Meshlets of some LODs of one chain, built separately then merged into mesh_upload_data
+	struct meshlet_set
+	{
+		std::vector<gpu_meshlet> meshlets; // Offsets relative to vertices and triangles below
+		std::vector<uint32_t> vertices;
+		std::vector<uint8_t> triangles;
 	};
 
 	// How the shaders read a texture, which decides its formats
@@ -579,48 +611,59 @@ class Assets::load_job
 	// A decoded surface, or a DDS file uploaded as is and parsed once its sRGB usage is known
 	using loaded_image = std::variant<std::monostate, sdl::raii::Surface, data_source>;
 
-	// What committing needs, only lives during commit()
-	struct gpu_state
-	{
-		renderer::Device& device;
-		BindlessManager& bindless_manager;
-		index_buffer& indices;
-		texture_compressor* compressor; // Null without compression
-		gpu_upload_job mesh_upload;
-		gpu_upload_job texture_upload;
-	};
+	using gpu_state = upload_state;
 
 public:
-	load_job( bool use_dds, std::filesystem::path path )
+	// Prepared meshes and textures are pushed to uploads
+	load_job( bool use_dds, std::filesystem::path path, upload_queue& uploads )
 		: _use_dds( use_dds )
 		, _path( std::move( path ) )
+		, _uploads( uploads )
 	{
 	}
 
-	// Reads, parses and processes the file, doesn't touch the device
+	// Reads, parses and processes the file, doesn't touch the device. Errors are kept for get_error() instead of thrown:
+	// a throwing task would cancel the task group and skip the other jobs' tasks, which would never push JOB_DONE.
 	void prepare()
 	{
 		PROFILER_SCOPE();
-		parse();
-		tbb::parallel_invoke( [ & ] { prepare_meshes(); }, [ & ] { decompress_textures(); } );
+		try
+		{
+			parse();
+			run_prepare_graph();
+		}
+		catch ( ... )
+		{
+			_error = std::current_exception();
+		}
+		// The graph is done: every item of this job was pushed before it
+		_uploads.push( { upload_item::kind::JOB_DONE, this } );
 	}
 
-	// Uploads the prepared asset and adds it to the bindless manager. Not thread safe: commits share the device's command
-	// pool, and their handles must be added in load order. A compressor must be ready.
-	loaded_asset
-	commit( renderer::Device& device, BindlessManager& bindless_manager, index_buffer& indices, texture_compressor* compressor )
+	const std::exception_ptr& get_error() const { return _error; }
+
+	// Uploads an item this job pushed, then frees its CPU side data. From Assets::upload_prepared() only.
+	void upload( gpu_state& gpu, const upload_item& item )
 	{
-		PROFILER_SCOPE();
-		gpu_state gpu { .device = device,
-						.bindless_manager = bindless_manager,
-						.indices = indices,
-						.compressor = compressor,
-						.mesh_upload = gpu_upload_job( device, 32 * 1024 * 1024 ),
-						.texture_upload = gpu_upload_job( device, 128 * 1024 * 1024, compressor ? 64 * 1024 * 1024 : 0 ) };
-		upload_meshes( gpu );
-		upload_textures( gpu );
-		return finalize( gpu );
+		if ( item.kind == upload_item::kind::MESH )
+		{
+			upload_mesh( gpu, item.index );
+			_mesh_upload_data[ item.index ] = { };
+		}
+		else
+		{
+			upload_texture( gpu, item.index );
+			const auto image = get_image_index( _asset.textures[ item.index ] );
+			if ( --_image_pending_textures[ image ] == 0 )
+			{
+				_images[ image ] = std::monostate { };
+			}
+		}
 	}
+
+	// Adds the materials and meshes to the bindless manager and builds the scene. Once every item of the job is
+	// uploaded, and in load order: handles must follow the loaded materials and meshes.
+	loaded_asset finalize( BindlessManager& bindless_manager ) { return finalize_impl( bindless_manager ); }
 
 private:
 	void add_meshes( size_t node_index )
@@ -805,6 +848,7 @@ private:
 						   }
 						   else
 						   {
+							   PROFILER_SCOPE_N( "read_asset" );
 							   auto path( uri.uri.fspath() );
 							   if ( !path.is_absolute() )
 								   path = _path.parent_path() / path;
@@ -990,20 +1034,194 @@ private:
 		}
 	}
 
-	void prepare_meshes()
+	// Meshes and textures as one flow graph: a step runs once its predecessors are done and never waits for anything, so a
+	// thread can't stack an unrelated mesh on top of one it's waiting for, as a blocking join (parallel_invoke) does.
+	// Prioritized steps run first, highest priority first: textures (short, DDS reads limited to the threads that saturate
+	// read bandwidth), then meshes by index count so the longest chains start early. Steps on a mesh's critical path
+	// (chains, their meshlets, the merge) get twice the priority of those off it (LOD 0 meshlets, shadow LOD 0 remap).
+	void run_prepare_graph()
 	{
 		PROFILER_SCOPE();
+		using step = tbb::flow::continue_node<tbb::flow::continue_msg>;
+		using texture_step = tbb::flow::function_node<size_t, tbb::flow::continue_msg>;
+		constexpr size_t dds_read_concurrency = 4;
+		constexpr auto texture_priority = std::numeric_limits<tbb::flow::node_priority_t>::max();
+
 		_mesh_upload_data.resize( _parsed_meshes.size() );
-		tbb::parallel_for( 0zu, _parsed_meshes.size(), [ this ]( size_t index ) { prepare_mesh( static_cast<uint32_t>( index ) ); } );
-#if 0
-		for ( int i = 0; i < _parsed_meshes.size(); ++i )
+		_images.resize( _images_usage.size() );
+		// Written by upload(), read by finalize()
+		_meshes.resize( _asset.meshes.size() );
+		_textures.resize( _textures_usage.size() );
+		// A decoded image makes its textures ready to upload, and is freed once they all are
+		_image_textures.resize( _images_usage.size() );
+		_image_pending_textures.resize( _images_usage.size() );
+		for ( uint32_t i = 0; i < _textures_usage.size(); ++i )
 		{
-			prepare_mesh( i );
+			if ( _textures_usage[ i ] != texture_usage::UNUSED )
+			{
+				const auto image = get_image_index( _asset.textures[ i ] );
+				_image_textures[ image ].push_back( i );
+				++_image_pending_textures[ image ];
+			}
 		}
-#endif
+		// Main LOD 0, main LODs 1+, shadow LOD 0, shadow LODs 1+: built in parallel, merged in that order
+		std::vector<std::array<meshlet_set, 4>> meshlets( _parsed_meshes.size() );
+
+		tbb::flow::graph graph;
+		std::vector<std::unique_ptr<step>> steps;
+		steps.reserve( _parsed_meshes.size() * 9 );
+		const auto add_step = [ & ]( tbb::flow::node_priority_t priority, auto body ) -> step&
+		{
+			return *steps.emplace_back( std::make_unique<step>(
+				graph,
+				[ body = std::move( body ) ]( const tbb::flow::continue_msg& )
+				{
+					body();
+					return tbb::flow::continue_msg { };
+				},
+				priority ) );
+		};
+
+		std::vector<step*> roots;
+		roots.reserve( _parsed_meshes.size() );
+		for ( uint32_t m = 0; m < _parsed_meshes.size(); ++m )
+		{
+			auto& data = _mesh_upload_data[ m ];
+			auto& sets = meshlets[ m ];
+			// 0 means no priority, and texture_priority must stay above
+			const auto side = static_cast<tbb::flow::node_priority_t>(
+								  std::min<size_t>( _parsed_meshes[ m ].indices.length, texture_priority / 4 ) )
+				+ 1;
+			const auto critical = 2 * side;
+
+			auto& repack = add_step( critical, [ this, m ] { repack_mesh( m ); } );
+			auto& main_lods = add_step( critical,
+										[ &data ]
+										{
+											PROFILER_SCOPE_N( "lod_generation" );
+											generate_lods( data.vertices, data.indices, data.lods, true );
+										} );
+			auto& shadow_lods = add_step( critical,
+										  [ &data ]
+										  {
+											  PROFILER_SCOPE_N( "shadow_lod_generation" );
+											  // Simplify from the original indices: merging vertices by position first creates
+											  // non-manifold edges (eg: duplicated back faces) which stop the simplifier early.
+											  // Attribute seams don't matter for depth-only rendering though, so every LOD is
+											  // remapped afterwards to only distinguish vertices by position (fewer unique
+											  // vertices to transform)
+											  generate_lods( data.vertices, data.indices, data.shadow_lods, false );
+											  size_t lod_offset = 0;
+											  for ( const auto lod_index_count : data.shadow_lods.indices_per_lod )
+											  {
+												  remap_to_shadow_indices(
+													  data.vertices,
+													  std::span( data.shadow_lods.indices ).subspan( lod_offset, lod_index_count ) );
+												  lod_offset += lod_index_count;
+											  }
+										  } );
+			auto& shadow_lod0 = add_step( side,
+										  [ &data ]
+										  {
+											  PROFILER_SCOPE_N( "shadow_lod0_remap" );
+											  data.shadow_indices.assign( begin( data.indices ), end( data.indices ) );
+											  remap_to_shadow_indices( data.vertices, data.shadow_indices );
+										  } );
+			auto& main_meshlets0 = add_step( side,
+											 [ &data, &sets ]
+											 {
+												 PROFILER_SCOPE_N( "meshlet_generation" );
+												 build_meshlets( data.vertices, data.indices, data.lods, 0, 0, sets[ 0 ] );
+											 } );
+			auto& main_meshlets = add_step( critical,
+											[ &data, &sets ]
+											{
+												PROFILER_SCOPE_N( "meshlet_generation" );
+												build_meshlets( data.vertices, data.indices, data.lods, 1, MESH_LOD_COUNT - 1, sets[ 1 ] );
+											} );
+			auto& shadow_meshlets0 = add_step( side,
+											   [ &data, &sets ]
+											   {
+												   PROFILER_SCOPE_N( "meshlet_generation" );
+												   build_meshlets( data.vertices, data.shadow_indices, data.shadow_lods, 0, 0, sets[ 2 ] );
+											   } );
+			auto& shadow_meshlets = add_step(
+				critical,
+				[ &data, &sets ]
+				{
+					PROFILER_SCOPE_N( "meshlet_generation" );
+					build_meshlets( data.vertices, data.shadow_indices, data.shadow_lods, 1, MESH_LOD_COUNT - 1, sets[ 3 ] );
+				} );
+			auto& merge = add_step( critical,
+									[ this, m, &data, &sets ]
+									{
+										PROFILER_SCOPE_N( "merge_meshlets" );
+										merge_meshlets( data, sets );
+										sets = { };
+										_uploads.push( { upload_item::kind::MESH, this, m } );
+									} );
+
+			tbb::flow::make_edge( repack, main_lods );
+			tbb::flow::make_edge( repack, shadow_lods );
+			tbb::flow::make_edge( repack, shadow_lod0 );
+			tbb::flow::make_edge( repack, main_meshlets0 );
+			tbb::flow::make_edge( shadow_lod0, shadow_meshlets0 );
+			tbb::flow::make_edge( main_lods, main_meshlets );
+			tbb::flow::make_edge( shadow_lods, shadow_meshlets );
+			tbb::flow::make_edge( main_meshlets0, merge );
+			tbb::flow::make_edge( main_meshlets, merge );
+			tbb::flow::make_edge( shadow_meshlets0, merge );
+			tbb::flow::make_edge( shadow_meshlets, merge );
+			roots.push_back( &repack );
+		}
+
+		const auto queue_textures = [ this ]( size_t index )
+		{
+			for ( const auto texture : _image_textures[ index ] )
+			{
+				_uploads.push( { upload_item::kind::TEXTURE, this, texture } );
+			}
+			return tbb::flow::continue_msg { };
+		};
+		texture_step dds_reads(
+			graph,
+			dds_read_concurrency,
+			[ & ]( size_t index )
+			{
+				read_dds( index );
+				return queue_textures( index );
+			},
+			texture_priority );
+		texture_step decodes(
+			graph,
+			tbb::flow::unlimited,
+			[ & ]( size_t index )
+			{
+				decode_image( index );
+				return queue_textures( index );
+			},
+			texture_priority );
+
+		for ( size_t i = 0; i < _images_usage.size(); ++i )
+		{
+			if ( _images_usage[ i ] == image_usage::DDS )
+			{
+				dds_reads.try_put( i );
+			}
+			else if ( _images_usage[ i ] == image_usage::DECODED )
+			{
+				decodes.try_put( i );
+			}
+		}
+		for ( const auto root : roots )
+		{
+			root->try_put( tbb::flow::continue_msg { } );
+		}
+		graph.wait_for_all();
 	}
 
-	void prepare_mesh( uint32_t mesh_index )
+	// Expands 16-bit indices, generates missing tangents and packs the vertices
+	void repack_mesh( uint32_t mesh_index )
 	{
 		PROFILER_SCOPE();
 		const auto& parsed_mesh = _parsed_meshes[ mesh_index ];
@@ -1070,34 +1288,6 @@ private:
 				const auto& uv = uvs.get( v );
 				upload_data.vertices.emplace_back( positions.get( v ), uv.x, normals.get( v ), uv.y, tangents.get( v ) );
 			}
-		}
-
-		{
-			PROFILER_SCOPE_N( "lod_generation" );
-			generate_lods( upload_data.vertices, upload_data.indices, upload_data.lods, true );
-		}
-
-		{
-			PROFILER_SCOPE_N( "shadow_lod_generation" );
-			// Simplify from the original indices: merging vertices by position first creates non-manifold edges (eg: duplicated
-			// back faces) which stop the simplifier early. Attribute seams don't matter for depth-only rendering though, so every
-			// LOD is remapped afterwards to only distinguish vertices by position (fewer unique vertices to transform)
-			generate_lods( upload_data.vertices, upload_data.indices, upload_data.shadow_lods, false );
-			upload_data.shadow_indices.assign( begin( upload_data.indices ), end( upload_data.indices ) );
-			remap_to_shadow_indices( upload_data.vertices, upload_data.shadow_indices );
-			size_t lod_offset = 0;
-			for ( const auto lod_index_count : upload_data.shadow_lods.indices_per_lod )
-			{
-				remap_to_shadow_indices( upload_data.vertices,
-										 std::span( upload_data.shadow_lods.indices ).subspan( lod_offset, lod_index_count ) );
-				lod_offset += lod_index_count;
-			}
-		}
-
-		{
-			PROFILER_SCOPE_N( "meshlet_generation" );
-			build_meshlets( upload_data, upload_data.indices, upload_data.lods );
-			build_meshlets( upload_data, upload_data.shadow_indices, upload_data.shadow_lods );
 		}
 	}
 
@@ -1188,12 +1378,23 @@ private:
 		meshopt_optimizeVertexCache( indices.data(), indices.data(), indices.size(), vertices.size() );
 	}
 
-	// Build meshlets for every LOD of the chain (starting with lod0_indices) and append them to the mesh meshlets
-	static void build_meshlets( mesh_upload_data& upload_data, std::span<const uint32_t> lod0_indices, lod_chain& chain )
+	// Build meshlets for LODs first_lod to last_lod of the chain (LOD 0 being lod0_indices) into a set, with offsets relative
+	// to the set's own buffers. Only writes the chain's meshlets_per_lod for those LODs, so other LODs can be built at the
+	// same time.
+	static void build_meshlets( std::span<const mesh_vertex> vertices,
+								std::span<const uint32_t> lod0_indices,
+								lod_chain& chain,
+								int first_lod,
+								int last_lod,
+								meshlet_set& out )
 	{
 		std::vector<meshopt_Meshlet> meshlet_buffer;
 		size_t index_offset = 0;
-		for ( int lod = 0; lod < MESH_LOD_COUNT; ++lod )
+		for ( int lod = 1; lod < first_lod; ++lod )
+		{
+			index_offset += chain.indices_per_lod[ lod - 1 ];
+		}
+		for ( int lod = first_lod; lod <= last_lod; ++lod )
 		{
 			const auto indices_ptr = lod == 0 ? lod0_indices.data() : chain.indices.data() + index_offset;
 			const auto indices_count = lod == 0 ? lod0_indices.size() : chain.indices_per_lod[ lod - 1 ];
@@ -1203,18 +1404,18 @@ private:
 			{
 				auto max_meshlets = meshopt_buildMeshletsBound( indices_count, 64, 96 );
 				meshlet_buffer.resize( max_meshlets );
-				const auto vertices_offset = upload_data.meshlet_vertices.size();
-				upload_data.meshlet_vertices.resize( upload_data.meshlet_vertices.size() + indices_count );
-				const auto triangles_offset = upload_data.meshlet_triangles.size();
-				upload_data.meshlet_triangles.resize( upload_data.meshlet_triangles.size() + indices_count + max_meshlets * 3 );
+				const auto vertices_offset = out.vertices.size();
+				out.vertices.resize( out.vertices.size() + indices_count );
+				const auto triangles_offset = out.triangles.size();
+				out.triangles.resize( out.triangles.size() + indices_count + max_meshlets * 3 );
 
 				const auto meshlet_count = meshopt_buildMeshlets( meshlet_buffer.data(),
-																  upload_data.meshlet_vertices.data() + vertices_offset,
-																  upload_data.meshlet_triangles.data() + triangles_offset,
+																  out.vertices.data() + vertices_offset,
+																  out.triangles.data() + triangles_offset,
 																  indices_ptr,
 																  indices_count,
-																  &upload_data.vertices.front().position.x,
-																  upload_data.vertices.size(),
+																  &vertices.front().position.x,
+																  vertices.size(),
 																  sizeof( mesh_vertex ),
 																  64,
 																  96,
@@ -1223,21 +1424,21 @@ private:
 				chain.meshlets_per_lod[ lod ] = static_cast<uint32_t>( meshlet_count );
 				const auto& last = meshlet_buffer[ meshlet_count - 1 ];
 
-				upload_data.meshlet_vertices.resize( vertices_offset + last.vertex_offset + last.vertex_count );
-				upload_data.meshlet_triangles.resize( triangles_offset + last.triangle_offset + last.triangle_count * 3 );
+				out.vertices.resize( vertices_offset + last.vertex_offset + last.vertex_count );
+				out.triangles.resize( triangles_offset + last.triangle_offset + last.triangle_count * 3 );
 
 				for ( const auto& meshlet : std::span( meshlet_buffer.data(), meshlet_count ) )
 				{
 					const size_t vertex_index = meshlet.vertex_offset + vertices_offset;
 					const size_t triangle_index = meshlet.triangle_offset + triangles_offset;
-					const auto bounds = meshopt_computeMeshletBounds( upload_data.meshlet_vertices.data() + vertex_index,
-																	  upload_data.meshlet_triangles.data() + triangle_index,
+					const auto bounds = meshopt_computeMeshletBounds( out.vertices.data() + vertex_index,
+																	  out.triangles.data() + triangle_index,
 																	  meshlet.triangle_count,
-																	  &upload_data.vertices.front().position.x,
-																	  upload_data.vertices.size(),
+																	  &vertices.front().position.x,
+																	  vertices.size(),
 																	  sizeof( mesh_vertex ) );
 
-					upload_data.meshlets.emplace_back(
+					out.meshlets.emplace_back(
 						static_cast<uint32_t>( vertex_index ),
 						static_cast<uint32_t>( triangle_index ),
 						meshlet.vertex_count,
@@ -1253,15 +1454,35 @@ private:
 		}
 	}
 
-	void upload_meshes( gpu_state& gpu )
+	// Append the sets in order to the mesh meshlets, offsetting their vertex and triangle indices
+	static void merge_meshlets( mesh_upload_data& upload_data, std::span<const meshlet_set> sets )
 	{
-		PROFILER_SCOPE();
-		_meshes.resize( _asset.meshes.size() );
-		for ( size_t i = 0; i < _parsed_meshes.size(); ++i )
+		size_t meshlets = 0;
+		size_t vertices = 0;
+		size_t triangles = 0;
+		for ( const auto& set : sets )
 		{
-			upload_mesh( gpu, i );
+			meshlets += set.meshlets.size();
+			vertices += set.vertices.size();
+			triangles += set.triangles.size();
 		}
-		gpu.mesh_upload.submit();
+		upload_data.meshlets.reserve( meshlets );
+		upload_data.meshlet_vertices.reserve( vertices );
+		upload_data.meshlet_triangles.reserve( triangles );
+
+		for ( const auto& set : sets )
+		{
+			const auto vertex_base = static_cast<uint32_t>( upload_data.meshlet_vertices.size() );
+			const auto triangle_base = static_cast<uint32_t>( upload_data.meshlet_triangles.size() );
+			upload_data.meshlet_vertices.insert( end( upload_data.meshlet_vertices ), begin( set.vertices ), end( set.vertices ) );
+			upload_data.meshlet_triangles.insert( end( upload_data.meshlet_triangles ), begin( set.triangles ), end( set.triangles ) );
+			for ( auto meshlet : set.meshlets )
+			{
+				meshlet.vertex_offset += vertex_base;
+				meshlet.triangle_offset += triangle_base;
+				upload_data.meshlets.push_back( meshlet );
+			}
+		}
 	}
 
 	void upload_mesh( gpu_state& gpu, size_t mesh_index )
@@ -1355,79 +1576,67 @@ private:
 		return meshlet_offset;
 	}
 
-	void decompress_textures()
+	// The file is kept as is, parsed at upload once its sRGB usage is known
+	void read_dds( size_t index )
 	{
 		PROFILER_SCOPE();
-		_images.resize( _images_usage.size() );
-
-		tbb::parallel_for( 0uz, _images_usage.size(), [ & ]( size_t index ) { decompress_texture( index ); } );
+		_images[ index ] = load( _asset.images[ index ].data, true );
 	}
 
-	void decompress_texture( size_t index )
+	// PNG or JPEG, decoded to RGBA32
+	void decode_image( size_t index )
 	{
-		PROFILER_SCOPE_N( "decompress_tex" );
-		if ( _images_usage[ index ] == image_usage::DDS )
+		PROFILER_SCOPE();
+		const auto source = load( _asset.images[ index ].data, true );
+		PROFILER_SCOPE_PUSH( decompress_png, "decompress_png" );
+		sdl::raii::Surface surface( IMG_Load_IO( SDL_IOFromConstMem( source.data.data(), source.data.size() ), true ) );
+		PROFILER_SCOPE_POP( decompress_png );
+		if ( !surface )
 		{
-			_images[ index ] = load( _asset.images[ index ].data, true );
+			throw renderer::Error( SDL_GetError() );
 		}
-		else if ( _images_usage[ index ] == image_usage::DECODED )
+		// Every format is expanded to RGBA, including palettes and grayscale
+		else if ( surface->format != SDL_PIXELFORMAT_RGBA32 )
 		{
-			const auto source = load( _asset.images[ index ].data, true );
-			sdl::raii::Surface surface( IMG_Load_IO( SDL_IOFromConstMem( source.data.data(), source.data.size() ), true ) );
-			if ( !surface )
+			PROFILER_SCOPE_N( "convert_to_rgba" );
+			sdl::raii::Surface converted_image( SDL_ConvertSurface( surface.get(), SDL_PIXELFORMAT_RGBA32 ) );
+			if ( !converted_image )
 			{
 				throw renderer::Error( SDL_GetError() );
 			}
-			// Every format is expanded to RGBA, including palettes and grayscale
-			else if ( surface->format != SDL_PIXELFORMAT_RGBA32 )
-			{
-				sdl::raii::Surface converted_image( SDL_ConvertSurface( surface.get(), SDL_PIXELFORMAT_RGBA32 ) );
-				if ( !converted_image )
-				{
-					throw renderer::Error( SDL_GetError() );
-				}
-				surface = std::move( converted_image );
-			}
-			_images[ index ] = std::move( surface );
+			surface = std::move( converted_image );
 		}
+		_images[ index ] = std::move( surface );
 	}
 
-	void upload_textures( gpu_state& gpu )
+	// Texture i must be used, and its image decoded
+	void upload_texture( gpu_state& gpu, size_t i )
 	{
 		PROFILER_SCOPE();
-		_textures.resize( _textures_usage.size() );
-		for ( size_t i = 0; i < _textures_usage.size(); ++i )
+		const auto usage = _textures_usage[ i ];
+		const auto& image = _images[ get_image_index( _asset.textures[ i ] ) ];
+		if ( const auto dds_source = std::get_if<data_source>( &image ) )
 		{
-			const auto usage = _textures_usage[ i ];
-			if ( usage != texture_usage::UNUSED )
-			{
-				const auto& image = _images[ get_image_index( _asset.textures[ i ] ) ];
-				if ( const auto dds_source = std::get_if<data_source>( &image ) )
-				{
-					const DDSFile dds( dds_source->data, is_srgb( usage ) );
-					auto tex = make_image_from_dds( gpu.device, dds );
-					gpu.texture_upload.queue( dds, tex );
-					_textures[ i ] = gpu.bindless_manager.add_texture( std::move( tex ) );
-				}
-				else if ( const auto& surface = std::get<sdl::raii::Surface>( image ); gpu.compressor )
-				{
-					auto tex = make_image_from_surface( gpu.device, *surface, compressed_format( usage ) );
-					gpu.texture_upload.queue( *surface, tex, *gpu.compressor );
-					_textures[ i ] = gpu.bindless_manager.add_texture( std::move( tex ) );
-				}
-				else
-				{
-					auto tex = make_image_from_surface( gpu.device, *surface, uncompressed_format( usage ) );
-					gpu.texture_upload.queue( *surface, tex );
-					_textures[ i ] = gpu.bindless_manager.add_texture( std::move( tex ) );
-				}
-			}
+			const DDSFile dds( dds_source->data, is_srgb( usage ) );
+			auto tex = make_image_from_dds( gpu.device, dds );
+			gpu.texture_upload.queue( dds, tex );
+			_textures[ i ] = gpu.bindless_manager.add_texture( std::move( tex ) );
 		}
-
-		gpu.texture_upload.submit();
+		else if ( const auto& surface = std::get<sdl::raii::Surface>( image ); gpu.compressor )
+		{
+			auto tex = make_image_from_surface( gpu.device, *surface, compressed_format( usage ) );
+			gpu.texture_upload.queue( *surface, tex, *gpu.compressor );
+			_textures[ i ] = gpu.bindless_manager.add_texture( std::move( tex ) );
+		}
+		else
+		{
+			auto tex = make_image_from_surface( gpu.device, *surface, uncompressed_format( usage ) );
+			gpu.texture_upload.queue( *surface, tex );
+			_textures[ i ] = gpu.bindless_manager.add_texture( std::move( tex ) );
+		}
 	}
 
-	loaded_asset finalize( gpu_state& gpu )
+	loaded_asset finalize_impl( BindlessManager& bindless_manager )
 	{
 		PROFILER_SCOPE();
 		std::vector<glm::vec4> bounding_spheres;
@@ -1441,8 +1650,6 @@ private:
 														 sizeof( glm::vec4 ),
 														 &bounding_spheres[ 0 ].w,
 														 sizeof( glm::vec4 ) );
-
-		gpu_upload_job::wait_all_done( { &gpu.mesh_upload, &gpu.texture_upload } );
 
 		_materials.resize( _asset.materials.size() );
 		for ( size_t i = 0; i < _materials_usage.size(); ++i )
@@ -1538,14 +1745,14 @@ private:
 				}
 				material.type = material.gpu_data.type;
 
-				material.handle = gpu.bindless_manager.add_buffer_entry( material.gpu_data );
+				material.handle = bindless_manager.add_buffer_entry( material.gpu_data );
 			}
 		}
 
 		for ( const auto& parsed_mesh : _parsed_meshes )
 		{
 			auto& mesh = _meshes[ parsed_mesh.gltf_index ];
-			mesh.handle = gpu.bindless_manager.add_buffer_entry( mesh.gpu_data );
+			mesh.handle = bindless_manager.add_buffer_entry( mesh.gpu_data );
 			mesh.material = _materials[ *_asset.meshes[ parsed_mesh.gltf_index ].primitives[ 0 ].materialIndex ].handle;
 		}
 
@@ -1592,6 +1799,10 @@ private:
 	std::vector<uint8_t> _materials_usage; // Could be a dynamic bitset
 	std::vector<mesh_data> _parsed_meshes;
 	std::vector<mesh_upload_data> _mesh_upload_data;
+	std::vector<std::vector<uint32_t>> _image_textures; // Used textures of each image
+	std::vector<uint32_t> _image_pending_textures; // Textures of each image not uploaded yet, upload() only
+	upload_queue& _uploads;
+	std::exception_ptr _error;
 	std::vector<data_source> _buffers;
 	std::vector<loaded_image> _images;
 	std::vector<renderer::BindlessTexture> _textures;
@@ -1607,16 +1818,22 @@ Assets::Assets( size_t max_indices, const texture_options& options )
 
 Assets::~Assets()
 {
-	// Loads that were never waited for, after an error elsewhere: their jobs must outlive their tasks
+	// Loads that were never waited for, after an error elsewhere: their jobs must outlive their tasks and uploads
 	_prepare_tasks.cancel();
-	_prepare_tasks.wait();
+	try
+	{
+		_prepare_tasks.wait();
+	}
+	catch ( ... )
+	{
+	}
 }
 
 scene_handle Assets::load( std::filesystem::path path )
 {
 	PROFILER_SCOPE();
 	const scene_handle handle { static_cast<uint32_t>( _scenes.size() + _jobs.size() ) };
-	const auto job = _jobs.emplace_back( std::make_unique<load_job>( _texture_options.use_dds, std::move( path ) ) ).get();
+	const auto job = _jobs.emplace_back( std::make_unique<load_job>( _texture_options.use_dds, std::move( path ), _uploads ) ).get();
 	tbb::this_task_arena::enqueue( [ job ] { job->prepare(); }, _prepare_tasks );
 	return handle;
 }
@@ -1632,17 +1849,70 @@ void Assets::attach( renderer::Device& device, BindlessManager& bindless_manager
 								.indices = index_buffer( device, _max_indices ) } );
 }
 
+// Runs on the calling thread instead of joining the TBB workers in _prepare_tasks.wait(), so it doesn't oversubscribe
+// the cores. The only user of the device's command pool and queue until it returns: the pipeline manager's thread only
+// creates pipelines.
+void Assets::upload_prepared()
+{
+	PROFILER_SCOPE();
+	upload_state gpu { .device = _gpu->device,
+					   .bindless_manager = _gpu->bindless_manager,
+					   .indices = _gpu->indices,
+					   .compressor = _gpu->compressor,
+					   .mesh_upload = gpu_upload_job( _gpu->device, 32 * 1024 * 1024 ),
+					   .texture_upload = gpu_upload_job( _gpu->device, 128 * 1024 * 1024, _gpu->compressor ? 64 * 1024 * 1024 : 0 ) };
+	size_t pending_jobs = _jobs.size();
+	upload_item item;
+	while ( pending_jobs != 0 )
+	{
+		if ( !_uploads.try_pop( item ) )
+		{
+			// Nothing ready: get the GPU copying what was queued while waiting for more
+			{
+				PROFILER_SCOPE_N( "flush_uploads" );
+				gpu.mesh_upload.flush();
+				gpu.texture_upload.flush();
+			}
+			PROFILER_SCOPE_N( "wait_prepared" );
+			_uploads.pop( item );
+		}
+		if ( item.kind == upload_item::kind::JOB_DONE )
+		{
+			--pending_jobs;
+		}
+		else
+		{
+			item.job->upload( gpu, item );
+		}
+	}
+	{
+		PROFILER_SCOPE_N( "finish_uploads" );
+		gpu.mesh_upload.submit();
+		gpu.texture_upload.submit();
+		gpu_upload_job::wait_all_done( { &gpu.mesh_upload, &gpu.texture_upload } );
+	}
+}
+
 void Assets::wait_ready()
 {
 	PROFILER_SCOPE();
 	assert( _gpu );
+	upload_prepared();
+	// Every job pushed JOB_DONE, this only waits for their tasks to return
 	_prepare_tasks.wait();
+	for ( const auto& job : _jobs )
+	{
+		if ( job->get_error() )
+		{
+			std::rethrow_exception( job->get_error() );
+		}
+	}
 	for ( auto& job : _jobs )
 	{
-		auto asset = job->commit( _gpu->device, _gpu->bindless_manager, _gpu->indices, _gpu->compressor );
+		auto asset = job->finalize( _gpu->bindless_manager );
 		add_content( asset );
 		_scenes.push_back( std::move( asset.contents ) );
-		// Frees its CPU side data before the next commit
+		// Frees what's left of its CPU side data
 		job.reset();
 	}
 	_jobs.clear();
