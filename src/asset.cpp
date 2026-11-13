@@ -61,26 +61,6 @@ struct mesh_vertex
 	glm::vec4 tangent;
 };
 
-renderer::raii::Texture make_image_from_surface( renderer::Device& device, const SDL_Surface& surface, renderer::Texture::Format format )
-{
-	PROFILER_SCOPE();
-	using TexUsage = renderer::Texture::Usage;
-	const renderer::Extent2D extent( surface.w, surface.h );
-	return device.create_texture( renderer::Texture::Desc { .format = format,
-															.usage = TexUsage::TRANSFER_SRC | TexUsage::TRANSFER_DST | TexUsage::SAMPLED,
-															.extent = extent,
-															.mips = calc_mip_levels( extent ) } );
-}
-
-renderer::raii::Texture make_image_from_dds( renderer::Device& device, const DDSFile& dds )
-{
-	PROFILER_SCOPE();
-	auto desc = dds.get_desc();
-	desc.usage = renderer::Texture::Usage::TRANSFER_DST | renderer::Texture::Usage::SAMPLED;
-	return device.create_texture( desc );
-}
-
-
 namespace
 {
 	template <class... Ts>
@@ -117,6 +97,86 @@ namespace
 		size_t _stride;
 		std::span<const std::byte> _data;
 	};
+
+
+	// XXX: ifstream is expected to be opened with std::ios::binary | std::ios::ate
+	// As this is a bit hacky we probably want a basic file wrapper at some point instead
+	using data_source = std::variant<std::span<const std::byte>, std::ifstream>;
+
+	// Unlike data_source, data_buffer guarantees that all the data is available in memory
+	// Use read_data_source to go from one to the other
+	struct data_buffer
+	{
+		std::span<const std::byte> data;
+		std::unique_ptr<std::byte[]> buffer;
+	};
+
+	class DDSFile
+	{
+	public:
+		DDSFile( data_source source, bool sRGB )
+			: _desc( parse_header( source, sRGB ) )
+			, _data( std::move( source ) )
+		{
+		}
+
+		void copy_texture_data( std::span<std::byte> destination )
+		{
+			std::visit( overloads( [ = ]( std::span<const std::byte> bytes )
+								   { memcpy( destination.data(), bytes.data() + DDS_HEADER_SIZE, destination.size() ); },
+								   [ = ]( std::ifstream& istream )
+								   {
+									   PROFILER_SCOPE_N( "read_dds" );
+									   // No need to seek, we own the istream and we previously read exactly DDS_HEADER_SIZE
+									   // This makes this function only usable once, but so far we have no use case for multiple calls
+									   istream.read( reinterpret_cast<char*>( destination.data() ), destination.size() );
+								   } ),
+						_data );
+		}
+
+		const renderer::Texture::Desc& get_desc() const { return _desc; }
+
+	private:
+		static renderer::Texture::Desc parse_header( data_source& data, bool sRGB )
+		{
+			return std::visit( overloads( [ sRGB ]( std::span<const std::byte> bytes ) { return parse_dds( bytes, sRGB ); },
+										  [ sRGB ]( std::istream& istream )
+										  {
+											  const size_t size = istream.tellg();
+											  if ( size < DDS_HEADER_SIZE )
+											  {
+												  throw renderer::Error( "DDS asset is corrupted, size is smaller than DXT10 header" );
+											  }
+											  istream.seekg( 0 );
+											  alignas( DDS_HEADER_ALIGN ) std::byte buffer[ DDS_HEADER_SIZE ];
+											  istream.read( reinterpret_cast<char*>( buffer ), DDS_HEADER_SIZE );
+											  return parse_dds( buffer, size, sRGB );
+										  } ),
+							   data );
+		}
+
+		renderer::Texture::Desc _desc;
+		data_source _data;
+	};
+}
+
+renderer::raii::Texture make_image_from_surface( renderer::Device& device, const SDL_Surface& surface, renderer::Texture::Format format )
+{
+	PROFILER_SCOPE();
+	using TexUsage = renderer::Texture::Usage;
+	const renderer::Extent2D extent( surface.w, surface.h );
+	return device.create_texture( renderer::Texture::Desc { .format = format,
+															.usage = TexUsage::TRANSFER_SRC | TexUsage::TRANSFER_DST | TexUsage::SAMPLED,
+															.extent = extent,
+															.mips = calc_mip_levels( extent ) } );
+}
+
+renderer::raii::Texture make_image_from_dds( renderer::Device& device, const DDSFile& dds )
+{
+	PROFILER_SCOPE();
+	auto desc = dds.get_desc();
+	desc.usage = renderer::Texture::Usage::TRANSFER_DST | renderer::Texture::Usage::SAMPLED;
+	return device.create_texture( desc );
 }
 
 namespace MikkTSpace
@@ -294,7 +354,7 @@ public:
 	}
 
 	// DDS files come with their mips, copied as is
-	void queue( const DDSFile& dds, renderer::Texture& texture )
+	void queue( DDSFile& dds, renderer::Texture& texture )
 	{
 		assert( _state == state::UPLOADING );
 		const auto& desc = dds.get_desc();
@@ -307,7 +367,8 @@ public:
 			flush_full();
 		}
 		const auto ptr = static_cast<std::byte*>( _upload_buffer.get_mapped_address() );
-		memcpy( ptr + _offset, dds.get_data().data(), size );
+		dds.copy_texture_data( std::span( ptr + _offset, size ) );
+
 		_cmd_buffer->transition_texture( texture, renderer::Texture::Layout::UNDEFINED, renderer::Texture::Layout::GENERAL );
 		for ( int mip = 0; mip < texture.get_mips(); ++mip )
 		{
@@ -602,14 +663,7 @@ class Assets::load_job
 		DDS
 	};
 
-	struct data_source
-	{
-		std::span<const std::byte> data;
-		std::unique_ptr<std::byte[]> buffer;
-	};
-
-	// A decoded surface, or a DDS file uploaded as is and parsed once its sRGB usage is known
-	using loaded_image = std::variant<std::monostate, sdl::raii::Surface, data_source>;
+	using loaded_image = std::variant<std::monostate, sdl::raii::Surface, DDSFile>;
 
 	using gpu_state = upload_state;
 
@@ -821,19 +875,18 @@ private:
 	data_source load( const fastgltf::DataSource& source, bool allow_bufferview ) const
 	{
 		return std::visit(
-			overloads( []( const fastgltf::sources::Array& array )
-					   { return data_source { .data = { array.bytes.data(), array.bytes.size() } }; },
-					   [ this, allow_bufferview ]( const fastgltf::sources::BufferView& view )
+			overloads( []( const fastgltf::sources::Array& array ) -> data_source
+					   { return std::span { array.bytes.data(), array.bytes.size() }; },
+					   [ this, allow_bufferview ]( const fastgltf::sources::BufferView& view ) -> data_source
 					   {
 						   if ( !allow_bufferview )
 						   {
 							   throw renderer::Error( "Unsupported recursive buffer view" );
 						   }
 						   const auto& buffer_view = _asset.bufferViews[ view.bufferViewIndex ];
-						   return data_source { .data = _buffers[ buffer_view.bufferIndex ].data.subspan( buffer_view.byteOffset,
-																										  buffer_view.byteLength ) };
+						   return _buffers[ buffer_view.bufferIndex ].data.subspan( buffer_view.byteOffset, buffer_view.byteLength );
 					   },
-					   [ this ]( const fastgltf::sources::URI& uri )
+					   [ this ]( const fastgltf::sources::URI& uri ) -> data_source
 					   {
 						   if ( !uri.uri.isLocalPath() )
 						   {
@@ -853,16 +906,26 @@ private:
 							   if ( !istream )
 							   {
 								   throw renderer::Error( "Asset references non existing file" );
-							   }
-							   const size_t size = istream.tellg();
-							   auto buffer = std::make_unique<std::byte[]>( size );
-							   istream.seekg( 0 );
-							   istream.read( reinterpret_cast<char*>( buffer.get() ), size );
-							   return data_source { .data = { buffer.get(), size }, .buffer = std::move( buffer ) };
+							   };
+							   return istream;
 						   }
 					   },
 					   []( const auto& ) -> data_source { throw renderer::Error( "Unsupported data source" ); } ),
 			source );
+	}
+
+	data_buffer read_data_source( data_source source )
+	{
+		return std::visit( overloads( []( std::span<const std::byte> bytes ) { return data_buffer { .data = bytes }; },
+									  []( std::ifstream& istream )
+									  {
+										  const size_t size = istream.tellg();
+										  auto buffer = std::make_unique<std::byte[]>( size );
+										  istream.seekg( 0 );
+										  istream.read( reinterpret_cast<char*>( buffer.get() ), size );
+										  return data_buffer { .data = { buffer.get(), size }, .buffer = std::move( buffer ) };
+									  } ),
+						   source );
 	}
 
 	void parse()
@@ -1027,7 +1090,7 @@ private:
 		_buffers.reserve( _asset.buffers.size() );
 		for ( const auto& buffer : _asset.buffers )
 		{
-			_buffers.emplace_back( load( buffer.data, false ) );
+			_buffers.emplace_back( read_data_source( load( buffer.data, false ) ) );
 		}
 	}
 
@@ -1166,7 +1229,7 @@ private:
 			dds_read_concurrency,
 			[ this ]( uint32_t texture )
 			{
-				read_dds( get_image_index( _asset.textures[ texture ] ) );
+				read_dds( get_image_index( _asset.textures[ texture ] ), is_srgb( _textures_usage[ texture ] ) );
 				_uploads.push( { upload_item::kind::TEXTURE, this, texture } );
 				return tbb::flow::continue_msg { };
 			},
@@ -1554,20 +1617,19 @@ private:
 		return meshlet_offset;
 	}
 
-	// The file is kept as is, parsed at upload once its sRGB usage is known
-	void read_dds( size_t index )
+	void read_dds( size_t index, bool sRGB )
 	{
-		PROFILER_SCOPE();
-		_images[ index ] = load( _asset.images[ index ].data, true );
+		PROFILER_SCOPE_N( "parse_dds" );
+		_images[ index ] = DDSFile( load( _asset.images[ index ].data, true ), sRGB );
 	}
 
 	// PNG or JPEG, decoded to RGBA32
 	void decode_image( size_t index )
 	{
 		PROFILER_SCOPE();
-		const auto source = load( _asset.images[ index ].data, true );
+		const auto buffer = read_data_source( load( _asset.images[ index ].data, true ) );
 		PROFILER_SCOPE_PUSH( decompress_png, "decompress_png" );
-		sdl::raii::Surface surface( IMG_Load_IO( SDL_IOFromConstMem( source.data.data(), source.data.size() ), true ) );
+		sdl::raii::Surface surface( IMG_Load_IO( SDL_IOFromConstMem( buffer.data.data(), buffer.data.size() ), true ) );
 		PROFILER_SCOPE_POP( decompress_png );
 		if ( !surface )
 		{
@@ -1591,25 +1653,26 @@ private:
 	void upload_texture( gpu_state& gpu, size_t i )
 	{
 		PROFILER_SCOPE();
-		const auto usage = _textures_usage[ i ];
-		const auto& image = _images[ get_image_index( _asset.textures[ i ] ) ];
-		if ( const auto dds_source = std::get_if<data_source>( &image ) )
+		auto& image = _images[ get_image_index( _asset.textures[ i ] ) ];
+		if ( const auto dds_file = std::get_if<DDSFile>( &image ) )
 		{
-			const DDSFile dds( dds_source->data, is_srgb( usage ) );
-			auto tex = make_image_from_dds( gpu.device, dds );
-			gpu.texture_upload.queue( dds, tex );
+			auto tex = make_image_from_dds( gpu.device, *dds_file );
+			gpu.texture_upload.queue( *dds_file, tex );
 			_textures[ i ] = gpu.bindless_manager.add_texture( std::move( tex ) );
 		}
-		else if ( const auto& surface = std::get<sdl::raii::Surface>( image ); gpu.compressor )
+		else if ( const auto& surface = std::get<sdl::raii::Surface>( image ) )
 		{
-			auto tex = make_image_from_surface( gpu.device, *surface, compressed_format( usage ) );
-			gpu.texture_upload.queue( *surface, tex, *gpu.compressor );
-			_textures[ i ] = gpu.bindless_manager.add_texture( std::move( tex ) );
-		}
-		else
-		{
-			auto tex = make_image_from_surface( gpu.device, *surface, uncompressed_format( usage ) );
-			gpu.texture_upload.queue( *surface, tex );
+			renderer::raii::Texture tex;
+			if ( gpu.compressor )
+			{
+				tex = make_image_from_surface( gpu.device, *surface, compressed_format( _textures_usage[ i ] ) );
+				gpu.texture_upload.queue( *surface, tex, *gpu.compressor );
+			}
+			else
+			{
+				tex = make_image_from_surface( gpu.device, *surface, uncompressed_format( _textures_usage[ i ] ) );
+				gpu.texture_upload.queue( *surface, tex );
+			}
 			_textures[ i ] = gpu.bindless_manager.add_texture( std::move( tex ) );
 		}
 	}
@@ -1779,7 +1842,7 @@ private:
 	std::vector<mesh_upload_data> _mesh_upload_data;
 	upload_queue& _uploads;
 	std::exception_ptr _error;
-	std::vector<data_source> _buffers;
+	std::vector<data_buffer> _buffers;
 	std::vector<loaded_image> _images;
 	std::vector<renderer::BindlessTexture> _textures;
 	std::vector<material> _materials;

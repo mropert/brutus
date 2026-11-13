@@ -229,6 +229,8 @@ namespace dds::details
 	static_assert( sizeof( pixel_format ) == 32 );
 	static_assert( sizeof( header ) == 124 );
 	static_assert( sizeof( header_dxt10 ) == 20 );
+	static_assert( sizeof( file_dxt10 ) == DDS_HEADER_SIZE );
+	static_assert( alignof( file_dxt10 ) == DDS_HEADER_ALIGN );
 }
 
 static auto cast_file( std::span<const std::byte> bytes )
@@ -258,16 +260,12 @@ static constexpr renderer::Texture::Format to_renderer_format( dds::details::for
 	return renderer::Texture::Format::UNDEFINED;
 }
 
-DDSFile::DDSFile( std::span<const std::byte> bytes, bool sRGB )
-	: _bytes( bytes )
+renderer::Texture::Desc parse_dds( std::span<const std::byte, DDS_HEADER_SIZE> header_bytes, size_t file_size, bool sRGB )
 {
-	if ( std::bit_cast<uintptr_t>( _bytes.data() ) % alignof( dds::details::file_dxt10 ) != 0 )
+	if ( std::bit_cast<uintptr_t>( header_bytes.data() ) % alignof( dds::details::file_dxt10 ) != 0 )
 		throw renderer::Error( "Buffer isn't aligned to the alignment of a DXT10 file" );
 
-	if ( _bytes.size_bytes() < sizeof( dds::details::file_dxt10 ) )
-		throw renderer::Error( "Buffer is smaller than the size of a DXT10 file header" );
-
-	const auto file = cast_file( _bytes );
+	const auto file = cast_file( header_bytes );
 	if ( file->magic != dds::details::magic )
 		throw renderer::Error( "Buffer is not a DDS file (bad magic)" );
 
@@ -279,8 +277,9 @@ DDSFile::DDSFile( std::span<const std::byte> bytes, bool sRGB )
 		 || std::string_view( file->header.spf.fourCC ) != "DX10"sv )
 		throw renderer::Error( "Buffer is not a DXT10 DDS file (legacy DDS is unsupported)" );
 
-	_desc.format = to_renderer_format( file->header_dxt10.dxgiFormat, sRGB );
-	if ( _desc.format == renderer::Texture::Format::UNDEFINED )
+	renderer::Texture::Desc desc;
+	desc.format = to_renderer_format( file->header_dxt10.dxgiFormat, sRGB );
+	if ( desc.format == renderer::Texture::Format::UNDEFINED )
 		throw renderer::Error( "Unsupported texture format" );
 
 	if ( file->header_dxt10.resourceDimension != dds::details::dimension::TEXTURE2D )
@@ -292,23 +291,28 @@ DDSFile::DDSFile( std::span<const std::byte> bytes, bool sRGB )
 	if ( file->header_dxt10.has_misc_flags( dds::details::header_dxt10::misc_flags_t::TEXTURECUBE ) )
 		throw renderer::Error( "Unsupported cubemap texture" );
 
-	_desc.extent.width = file->header.width;
-	_desc.extent.height = file->header.height;
-	if ( _desc.extent.width == 0 || _desc.extent.height == 0 )
+	desc.extent.width = file->header.width;
+	desc.extent.height = file->header.height;
+	if ( desc.extent.width == 0 || desc.extent.height == 0 )
 		throw renderer::Error( "Invalid texture extent (zero width or height)" );
 
 	// Same as Microsoft's own loader: ignore the MIPMAP caps bit, which writers don't always set, and treat 0 as 1
 	const uint32_t mips = std::max( file->header.mipMapCount, 1u );
-	if ( mips > static_cast<uint32_t>( std::bit_width( std::max( _desc.extent.width, _desc.extent.height ) ) ) )
+	if ( mips > static_cast<uint32_t>( std::bit_width( std::max( desc.extent.width, desc.extent.height ) ) ) )
 		throw renderer::Error( "Invalid mip count (more mips than the full chain)" );
-	_desc.mips = static_cast<int>( mips );
+	desc.mips = static_cast<int>( mips );
 
-	const auto size = _desc.get_size();
-	if ( sizeof( dds::details::file_dxt10 ) + size > _bytes.size_bytes() )
+	const auto size = desc.get_size();
+	if ( sizeof( dds::details::file_dxt10 ) + size > file_size )
 		throw renderer::Error( "DDS File is truncated" );
+
+	return desc;
 }
 
-std::span<const std::byte> DDSFile::get_data() const
+renderer::Texture::Desc parse_dds( std::span<const std::byte> bytes, bool sRGB )
 {
-	return _bytes.subspan( sizeof( dds::details::file_dxt10 ) );
+	if ( bytes.size() < DDS_HEADER_SIZE )
+		throw renderer::Error( "Buffer is smaller than a DXT10 header" );
+
+	return parse_dds( bytes.first<DDS_HEADER_SIZE>(), bytes.size(), sRGB );
 }
