@@ -1,6 +1,6 @@
 [submodule "submodules/vk-renderer"]
 	path = submodules/vk-renderer
-	url = git@github.com:mropert/vk-renderer.git
+	url = ../vk-renderer.git
 [submodule "submodules/gpu_stable_power"]
 	path = submodules/gpu_stable_power
-	url = https://github.com/mropert/gpu_stable_power
+	url = ../gpu_stable_power.git
