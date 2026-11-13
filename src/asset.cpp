@@ -653,11 +653,8 @@ public:
 		else
 		{
 			upload_texture( gpu, item.index );
-			const auto image = get_image_index( _asset.textures[ item.index ] );
-			if ( --_image_pending_textures[ image ] == 0 )
-			{
-				_images[ image ] = std::monostate { };
-			}
+			// No other texture uses this image (add_texture_usage() rejects that), so it can be freed now
+			_images[ get_image_index( _asset.textures[ item.index ] ) ] = std::monostate { };
 		}
 	}
 
@@ -1043,7 +1040,7 @@ private:
 	{
 		PROFILER_SCOPE();
 		using step = tbb::flow::continue_node<tbb::flow::continue_msg>;
-		using texture_step = tbb::flow::function_node<size_t, tbb::flow::continue_msg>;
+		using texture_step = tbb::flow::function_node<uint32_t, tbb::flow::continue_msg>;
 		constexpr size_t dds_read_concurrency = 4;
 		constexpr auto texture_priority = std::numeric_limits<tbb::flow::node_priority_t>::max();
 
@@ -1052,18 +1049,6 @@ private:
 		// Written by upload(), read by finalize()
 		_meshes.resize( _asset.meshes.size() );
 		_textures.resize( _textures_usage.size() );
-		// A decoded image makes its textures ready to upload, and is freed once they all are
-		_image_textures.resize( _images_usage.size() );
-		_image_pending_textures.resize( _images_usage.size() );
-		for ( uint32_t i = 0; i < _textures_usage.size(); ++i )
-		{
-			if ( _textures_usage[ i ] != texture_usage::UNUSED )
-			{
-				const auto image = get_image_index( _asset.textures[ i ] );
-				_image_textures[ image ].push_back( i );
-				++_image_pending_textures[ image ];
-			}
-		}
 		// Main LOD 0, main LODs 1+, shadow LOD 0, shadow LODs 1+: built in parallel, merged in that order
 		std::vector<std::array<meshlet_set, 4>> meshlets( _parsed_meshes.size() );
 
@@ -1175,42 +1160,35 @@ private:
 			roots.push_back( &repack );
 		}
 
-		const auto queue_textures = [ this ]( size_t index )
-		{
-			for ( const auto texture : _image_textures[ index ] )
-			{
-				_uploads.push( { upload_item::kind::TEXTURE, this, texture } );
-			}
-			return tbb::flow::continue_msg { };
-		};
+		// Both take a used texture's index: an image backs at most one texture (see add_texture_usage())
 		texture_step dds_reads(
 			graph,
 			dds_read_concurrency,
-			[ & ]( size_t index )
+			[ this ]( uint32_t texture )
 			{
-				read_dds( index );
-				return queue_textures( index );
+				read_dds( get_image_index( _asset.textures[ texture ] ) );
+				_uploads.push( { upload_item::kind::TEXTURE, this, texture } );
+				return tbb::flow::continue_msg { };
 			},
 			texture_priority );
 		texture_step decodes(
 			graph,
 			tbb::flow::unlimited,
-			[ & ]( size_t index )
+			[ this ]( uint32_t texture )
 			{
-				decode_image( index );
-				return queue_textures( index );
+				decode_image( get_image_index( _asset.textures[ texture ] ) );
+				_uploads.push( { upload_item::kind::TEXTURE, this, texture } );
+				return tbb::flow::continue_msg { };
 			},
 			texture_priority );
 
-		for ( size_t i = 0; i < _images_usage.size(); ++i )
+		for ( size_t i = 0; i < _textures_usage.size(); ++i )
 		{
-			if ( _images_usage[ i ] == image_usage::DDS )
+			if ( _textures_usage[ i ] != texture_usage::UNUSED )
 			{
-				dds_reads.try_put( i );
-			}
-			else if ( _images_usage[ i ] == image_usage::DECODED )
-			{
-				decodes.try_put( i );
+				const auto texture = static_cast<uint32_t>( i );
+				const auto image = get_image_index( _asset.textures[ i ] );
+				( _images_usage[ image ] == image_usage::DDS ? dds_reads : decodes ).try_put( texture );
 			}
 		}
 		for ( const auto root : roots )
@@ -1799,8 +1777,6 @@ private:
 	std::vector<uint8_t> _materials_usage; // Could be a dynamic bitset
 	std::vector<mesh_data> _parsed_meshes;
 	std::vector<mesh_upload_data> _mesh_upload_data;
-	std::vector<std::vector<uint32_t>> _image_textures; // Used textures of each image
-	std::vector<uint32_t> _image_pending_textures; // Textures of each image not uploaded yet, upload() only
 	upload_queue& _uploads;
 	std::exception_ptr _error;
 	std::vector<data_source> _buffers;
