@@ -42,9 +42,12 @@ Easiest way is to use `vcpkg` in manifest mode to pull the dependencies.
 ## AI / LLM notice
 
 I have used some LLM code assist since late Oct 2026. The commits are still all reviewed and owned by me, I do not believe
-in "vibe coding". Exception: the files under `docs` and `util` are mostly made and used by AI for its test harness.
+in "vibe coding".
+
+Exception: the files under `docs` and `util` are mostly made and used by AI for its test harness.
 
 ## License
 
 Copyright (C) 2025-2026 Mathieu Ropert
+
 Licensed under the GNU General Public License v3.0, see LICENSE.
