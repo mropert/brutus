@@ -8,23 +8,23 @@ Bistro. Shared rules and measurement setup: [working_process.md](working_process
 
 | Commit | Change |
 | --- | --- |
-| `8508c2b` | (user) `Assets` owns meshes, materials and the shared index buffer, looked up by bindless handle |
-| `b3880f4` | Loader arrays indexed like the glTF ones (with gaps for unused entries), only loaded entries reach `Assets`: an unused mesh or material used to shift lookups |
-| `682c29a` | `Assets::load` flattens the default scene's node tree into `scene_instance`s (mesh handle + world TRS); the crowd composes them with each character's transform. Crowd benchmark: 673 isolated pixels changed (Sabrina's 1.6e-7 node transforms), Bistro identical |
-| `1be485f` | `--scene <path.gltf>` replaces `#define BISTRO`, the crowd stays the default; `--dump-scene` refused with `--scene` |
-| `613ac04` | glTF camera and sun: the scene starts at its first perspective camera (no roll, its vertical FOV, now `Camera::fov`) and its first directional light sets the sun orbit's elevation and starting azimuth. Crowd unchanged |
-| `c9aa5be` | Ground grid toggle, off for glTF scenes |
-| `6245c4b`, `4c59c75` | fastgltf pinned to 0.9.1; specular-glossiness materials parsed into their own `gpu_material` fields (`workflow`, `specular_glossiness`, `specular_glossiness_texture`), a material defining both workflows throws. Not shaded yet |
+| `e5a9ac9` | (user) `Assets` owns meshes, materials and the shared index buffer, looked up by bindless handle |
+| `e9a24a0` | Loader arrays indexed like the glTF ones (with gaps for unused entries), only loaded entries reach `Assets`: an unused mesh or material used to shift lookups |
+| `4ca5ef2` | `Assets::load` flattens the default scene's node tree into `scene_instance`s (mesh handle + world TRS); the crowd composes them with each character's transform. Crowd benchmark: 673 isolated pixels changed (Sabrina's 1.6e-7 node transforms), Bistro identical |
+| `5736b1d` | `--scene <path.gltf>` replaces `#define BISTRO`, the crowd stays the default; `--dump-scene` refused with `--scene` |
+| `f72feb8` | glTF camera and sun: the scene starts at its first perspective camera (no roll, its vertical FOV, now `Camera::fov`) and its first directional light sets the sun orbit's elevation and starting azimuth. Crowd unchanged |
+| `ff7c344` | Ground grid toggle, off for glTF scenes |
+| `6124a08`, `0c22c4d` | fastgltf pinned to 0.9.1; specular-glossiness materials parsed into their own `gpu_material` fields (`workflow`, `specular_glossiness`, `specular_glossiness_texture`), a material defining both workflows throws. Not shaded yet |
 | vk-renderer `dcdd507` | BC7 formats, mandatory `textureCompressionBC`, per-mip `copy_buffer_to_texture` asserting block-aligned offsets |
-| `879e029`, `fa13bb6`, `f069349` | (user, then fixes) `DDSFile` parser: DX10 header, BC7 only, 2D without arrays or cubemaps, mip chain checked against the file size. vk-renderer `399ba27`, `1f26350`: `Desc::get_mip_size` / `get_size` for block formats (with `static_assert` tests), `get_extent( mip )` clamped to 1 (changed 14 crowd and 915 Bistro pixels: the last mips of non-square textures were never written) |
-| `644c36f` | Implicit switch fall-through is a warning (MSVC C5262 is off by default even at `/W4`) |
-| `820d852` | Textures with an `MSFT_texture_dds` image load the DDS: BC7 mip chain uploaded as is, no decoding or mip blits. The parser takes the glTF sRGB usage and throws on a contradicting format (`BC7_TYPELESS` takes it) |
-| `9fa554e` | `MASK` materials get their own bucket pair, alpha tested in the early and late opaque passes and in the shadow cascades (new `shadow_alpha_test.frag`), cutoff from the material's `alphaCutoff`. Bistro's foliage, chains and signs are cut out instead of opaque quads |
-| `f35abbb` | One `draw_buckets` for every mesh pass: per pass a table of steps (label, meshlet and vertex pipelines, first bucket of the pair, depth writes) and a pass state (commands buffer, viewport, depth bias, LOD labels). Images and GPU times unchanged |
-| `c06f907` | (user) Specular-glossiness shading: F0 is the specular color, diffuse scaled by `1 - max( specular )`, roughness `1 - glossiness`, factors times the optional texture. Crowd unchanged |
-| `125d1e1` | (user) Roughness floor of 0.045 for both workflows (0.03% of Bistro pixels changed, crowd identical) |
-| `6f6dad2` | (user) A missing albedo texture means the base color alone, in `mesh.frag` and `shadow_alpha_test.frag` (normals were shown before). Bistro's untextured glass turns from normal colors to opaque base color, crowd identical |
-| `20bde49` | (user) Occlusion (`mix( 1, ao, strength )` on the ambient, reusing the metallic-roughness sample when both share a texture) and emissive (`emissiveFactor * emissiveStrength * texture`, unlit, `KHR_materials_emissive_strength` enabled). Bistro's string lights and lanterns glow (0.46% of pixels), crowd identical; no asset has an occlusion texture |
+| `d929f84`, `3c69a4e`, `9b1c194` | (user, then fixes) `DDSFile` parser: DX10 header, BC7 only, 2D without arrays or cubemaps, mip chain checked against the file size. vk-renderer `399ba27`, `1f26350`: `Desc::get_mip_size` / `get_size` for block formats (with `static_assert` tests), `get_extent( mip )` clamped to 1 (changed 14 crowd and 915 Bistro pixels: the last mips of non-square textures were never written) |
+| `5da80d5` | Implicit switch fall-through is a warning (MSVC C5262 is off by default even at `/W4`) |
+| `3a1fc90` | Textures with an `MSFT_texture_dds` image load the DDS: BC7 mip chain uploaded as is, no decoding or mip blits. The parser takes the glTF sRGB usage and throws on a contradicting format (`BC7_TYPELESS` takes it) |
+| `c3ad157` | `MASK` materials get their own bucket pair, alpha tested in the early and late opaque passes and in the shadow cascades (new `shadow_alpha_test.frag`), cutoff from the material's `alphaCutoff`. Bistro's foliage, chains and signs are cut out instead of opaque quads |
+| `79bef63` | One `draw_buckets` for every mesh pass: per pass a table of steps (label, meshlet and vertex pipelines, first bucket of the pair, depth writes) and a pass state (commands buffer, viewport, depth bias, LOD labels). Images and GPU times unchanged |
+| `f495194` | (user) Specular-glossiness shading: F0 is the specular color, diffuse scaled by `1 - max( specular )`, roughness `1 - glossiness`, factors times the optional texture. Crowd unchanged |
+| `b2e35ca` | (user) Roughness floor of 0.045 for both workflows (0.03% of Bistro pixels changed, crowd identical) |
+| `aedf351` | (user) A missing albedo texture means the base color alone, in `mesh.frag` and `shadow_alpha_test.frag` (normals were shown before). Bistro's untextured glass turns from normal colors to opaque base color, crowd identical |
+| `35c832b` | (user) Occlusion (`mix( 1, ao, strength )` on the ambient, reusing the metallic-roughness sample when both share a texture) and emissive (`emissiveFactor * emissiveStrength * texture`, unlit, `KHR_materials_emissive_strength` enabled). Bistro's string lights and lanterns glow (0.46% of pixels), crowd identical; no asset has an occlusion texture |
 
 ## Current state
 
@@ -153,7 +153,7 @@ Bistro. Shared rules and measurement setup: [working_process.md](working_process
   (`-12.28, 1.52, 18.41`, pitch -0.176, yaw 0.751). Both builds show a recurring ~0.3 ms spike on the last bin of the
   early pass in some frames, not investigated: in 10-frame traces the "Alpha tested" step takes 0.36 or 0.67 ms, about
   half the frames each.
-- **Specular-glossiness was rendered as mirrors** before `c06f907`: the parser left `metalness` and `roughness` at the
+- **Specular-glossiness was rendered as mirrors** before `f495194`: the parser left `metalness` and `roughness` at the
   zero of a value-initialized `gpu_material`, so every specular-glossiness material reflected the sky at roughness 0
   (blue-grey sheen on foliage, ivy and plaster). Shading it costs ~0.03 ms of Bistro's opaque step (0.918 → 0.945 ms
   median) with unchanged pixel shader warp occupancy, so no sign of register pressure. Check a hedge at

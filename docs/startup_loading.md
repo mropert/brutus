@@ -10,11 +10,11 @@ Shader compilation, which was most of the visible startup cost, is no longer on 
 
 | Commit | Change |
 | --- | --- |
-| vk-renderer `51c5eff`, brutus-ng `99a4774` | On-disk SPIR-V cache, `--shader-cache <dir>` (default `shadercache/`, git-ignored) and `--no-shader-cache` |
-| vk-renderer `3e2adbf`, brutus-ng `177df3f` | Cache files start with a 64-bit FNV-1a of the SPIR-V: damaged or old-format entries are recompiled and rewritten |
-| brutus-ng `1676a2b` | All shaders on `#version 460` (the last GLSL version): Release SPIR-V byte-identical to 450 |
-| vk-renderer `59d342d`, brutus-ng `1d9cb80` | `ShaderCompiler::prewarm()` on the rebuild thread, and the rebuild thread polls every 100 ms instead of 1 s |
-| brutus-ng `9e65cd0` | Profiling scope on texture surface copies |
+| vk-renderer `51c5eff`, brutus-ng `5fa3d67` | On-disk SPIR-V cache, `--shader-cache <dir>` (default `shadercache/`, git-ignored) and `--no-shader-cache` |
+| vk-renderer `3e2adbf`, brutus-ng `bfc498f` | Cache files start with a 64-bit FNV-1a of the SPIR-V: damaged or old-format entries are recompiled and rewritten |
+| brutus-ng `75ed314` | All shaders on `#version 460` (the last GLSL version): Release SPIR-V byte-identical to 450 |
+| vk-renderer `59d342d`, brutus-ng `341dbf0` | `ShaderCompiler::prewarm()` on the rebuild thread, and the rebuild thread polls every 100 ms instead of 1 s |
+| brutus-ng `515bff9` | Profiling scope on texture surface copies |
 
 - **Cache key**: FNV-1a 64 of the glslang version (`GLSLANG_VERSION_*`), the SPIRV-Tools version string, target
   environment, optimization level, debug info flag, shader stage and the preprocessed source. Debug and Release get
@@ -33,12 +33,12 @@ Assets are then prepared while the device is created (steps 2 and 3 of the order
 
 | Commit | Change |
 | --- | --- |
-| vk-renderer `33c2bcd`, brutus-ng `6f32f67` | `PipelineManager::is_ready()`: checks without waiting, false if a pipeline failed |
-| brutus-ng `dd35d32` | `texture_compressor` in its own files, created by `main` and passed to `Assets` |
-| brutus-ng `5a5a796` | Terminate handler printing uncaught exceptions, without unwinding (see Findings) |
-| brutus-ng `5e8aaef` | The compressor's max texture size is a constructor parameter, larger textures throw |
-| brutus-ng `72295d9` | `load_job` split into `prepare()` and `commit()`, see Prepare and commit |
-| brutus-ng `7360d78` | `Assets::load()` before `Device`, then `attach()` and `wait_ready()` |
+| vk-renderer `33c2bcd`, brutus-ng `5563a18` | `PipelineManager::is_ready()`: checks without waiting, false if a pipeline failed |
+| brutus-ng `8136da7` | `texture_compressor` in its own files, created by `main` and passed to `Assets` |
+| brutus-ng `8f9b7d7` | Terminate handler printing uncaught exceptions, without unwinding (see Findings) |
+| brutus-ng `a92c7fc` | The compressor's max texture size is a constructor parameter, larger textures throw |
+| brutus-ng `e6f47fd` | `load_job` split into `prepare()` and `commit()`, see Prepare and commit |
+| brutus-ng `c2a16aa` | `Assets::load()` before `Device`, then `attach()` and `wait_ready()` |
 
 `main` now calls `SDL_Init( 0 )`, starts every load, creates the device and the rest, waits for the pipelines when
 compressing (`attach()` asserts the compressor is ready), then `attach()` and `wait_ready()`. The device lives in a
@@ -69,9 +69,9 @@ Then device creation and mesh processing got cheaper:
 
 | Commit | Change |
 | --- | --- |
-| vk-renderer `3ec5c6e`, brutus-ng `8e53f95` | `VK_EXT_debug_utils` always required, without a `vkb::SystemInfo` scan; `debug_labels_support` removed |
-| brutus-ng `5eeb1f3` | Each LOD simplified from the previous one, errors tracked like niagara and Godot |
-| vk-renderer `eaee371`, `4c005d2` | vk-bootstrap only queries the extensions of requested layers; profiling scopes in `Device` |
+| vk-renderer `3ec5c6e`, brutus-ng `0627c5e` | `VK_EXT_debug_utils` always required, without a `vkb::SystemInfo` scan; `debug_labels_support` removed |
+| brutus-ng `be33bfa` | Each LOD simplified from the previous one, errors tracked like niagara and Godot |
+| vk-renderer `8fe0e98`, `d012650` | vk-bootstrap only queries the extensions of requested layers; profiling scopes in `Device` |
 
 **Debug utils** (`scratch/devicefix`): `Device` made a `vkb::SystemInfo` only to check for `VK_EXT_debug_utils`, and
 `InstanceBuilder::build()` makes its own. Each one enumerates every layer's extensions, and each loader enumeration
@@ -186,7 +186,7 @@ only options they read (`--no-dds`, `--texture-compression`) come from the comma
      primitives, none in Bistro), vertex repack. Both LOD chains depend on it.
    - Main LOD chain (simplify with normals) and shadow LOD chain (positions only, then remapped to shadow indices) are
      independent: they only read the vertices and LOD 0 indices.
-   - Within a chain, every LOD simplifies the previous one (`generate_lods`, since `5eeb1f3`): a chain is serial. Until
+   - Within a chain, every LOD simplifies the previous one (`generate_lods`, since `be33bfa`): a chain is serial. Until
      then every LOD simplified LOD 0 and they were independent, at twice the total CPU time.
    - Meshlets per chain, and per LOD: each LOD's meshlets only need that LOD's indices, LOD 0's only vertex prep.
      `build_meshlets` appends to shared vectors with absolute offsets: parallel LODs need local outputs, merged and
@@ -215,7 +215,7 @@ only options they read (`--no-dds`, `--texture-compression`) come from the comma
 
 ### Prepare and commit
 
-Done (`72295d9`, `7360d78`). `load_job` is split in two:
+Done (`e6f47fd`, `c2a16aa`). `load_job` is split in two:
 
 - `prepare()`: stages 1 to 4 (`parse`, then `prepare_meshes` and `decompress_textures` in parallel), CPU only, no
   `Device` or `BindlessManager`. Its output is plain data: parsed glTF, mesh data, decoded surfaces or DDS bytes.
@@ -251,8 +251,8 @@ slot, `get()` waiting instead of asserting) can come later without changing call
 1. Largest meshes first: **tried, kept on branch `mesh-largest-first`, not merged.** It removes Bistro's tail but the
    mesh phase only drops 6%, and startup is within noise: the big meshes get much slower when they all run at once
    (Experiments).
-2. Prepare/commit split, behavior unchanged: **done** (`72295d9`), pixel identical, same load times.
-3. Start `prepare()` for every asset before `Device`, commit after it in order: **done** (`7360d78`). Startup crowd
+2. Prepare/commit split, behavior unchanged: **done** (`e6f47fd`), pixel identical, same load times.
+3. Start `prepare()` for every asset before `Device`, commit after it in order: **done** (`c2a16aa`). Startup crowd
    1,343 -> 959 ms, Bistro 5,333 -> 4,766 ms (Done so far).
 4. Prewarm before `Device` (see stage 5). Without it, commit waits ~190 ms for the compressor pipelines (prewarm,
    compile, pipeline creation) once asset work is hidden.
@@ -266,7 +266,7 @@ slot, `get()` waiting instead of asserting) can come later without changing call
    (scheduler bypass: earliest start, warm cache, no queueing); only fan-out spawns tasks. A per-mesh atomic counter
    lets the last task to finish run the merge (concatenating LOD outputs in a fixed order) inline. This shortens the
    tail that decides Bistro's end and stops starving the DDS reads, without reducing total work. Chained LODs (since
-   `5eeb1f3`) already halved the longest meshes.
+   `be33bfa`) already halved the longest meshes.
 7. Dedicated reader threads for stage 2 (see Open questions).
 8. Later: an on-disk cache for LODs and meshlets, the same pattern as the shader cache. With chained LODs, meshlet
    generation is the largest share of the remaining mesh CPU work, which bounds Bistro once the rest is done.
@@ -275,7 +275,7 @@ slot, `get()` waiting instead of asserting) can come later without changing call
    smaller arena isn't the fix. Likely causes: `main` sharing a core with a worker (~1.3-1.4x, see Experiments),
    driver and SDL threads on top of 16 busy threads, and on Bistro the 2 GB of DDS reads and page faults while the
    loader and driver load their DLLs. Device creation isn't on Bistro's critical path, so this only costs the crowd.
-   Removing the duplicate layer scan (`3ec5c6e`) took ~160 ms off, and querying only requested layers (`eaee371`)
+   Removing the duplicate layer scan (`3ec5c6e`) took ~160 ms off, and querying only requested layers (`8fe0e98`)
    another ~140 ms. `SDL_CreateWindow` is now the largest part (178 ms on the crowd).
 10. **Next: fewer copies on the texture upload path.** Since steps 5 and 6 (one prioritized flow graph, uploads streamed
     from `wait_ready()` on the main thread), Bistro's critical path is
@@ -499,7 +499,7 @@ only compare runs made in the same session, alternated.
   1.5x floor only keeps errors strictly increasing and limits popping distances. A sum overstates the error and
   selects denser LODs (+20% GPU time on the crowd). `meshopt_SimplifyErrorClamped` (meshoptimizer 1.3, we use 1.2)
   clamps attribute error to the position error's scale; niagara found it reduces triangles on complex scenes.
-- **Device creation scanned every layer manifest about 40 times** (before `eaee371`): `vkb::SystemInfo` enumerated
+- **Device creation scanned every layer manifest about 40 times** (before `8fe0e98`): `vkb::SystemInfo` enumerated
   layer properties, then the extensions of each layer, each through `get_vector` (a count call, then a data call), and
   each loader call reparses every manifest. A full `SystemInfo` cost ~140-160 ms in Release, ~4 ms per loader call.
   This machine registers 9 implicit layers (OBS, RenderDoc, Epic, 4 Nsight, Steam overlay and Fossilize) and 9

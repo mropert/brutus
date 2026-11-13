@@ -11,28 +11,28 @@ shadow distance. Next: raise the cap for Bistro and check its views, then tighte
 
 | Commit | Change |
 | --- | --- |
-| `e124a43` | Orthographic cone culling uses the view direction (`projection_matrix[3][3]` convention) |
-| `4ace47c` | Vertex shader path for the shadow pass |
-| `f2f1cd8` | LOD errors stored in absolute units (`meshopt_simplifyScale`) |
-| `b2c476f` | Separate position-only shadow LOD chain (`gpu_mesh::shadow_lods`, `SceneConstants::shadow_pass`), shadow tris 9.9M -> 6.3M |
-| `5f4fcc8` | Mesh shader triangle culling: back faces (single sided), zero area, small triangles (shadow pass only). Off since 2026-11-04 (`TRIANGLE_CULLING`): costs more than it saves, shadows unchanged without it |
-| `41ef760` | clang-format applied to shaders (byte-identical SPIR-V) |
-| `019ad2f` | `shadow.glsl` (`compute_shadow`), ground (grid) receives shadows, fade over last 10% of shadow distance |
+| `3a1b736` | Orthographic cone culling uses the view direction (`projection_matrix[3][3]` convention) |
+| `f4d1e8b` | Vertex shader path for the shadow pass |
+| `61cda3e` | LOD errors stored in absolute units (`meshopt_simplifyScale`) |
+| `1e066d6` | Separate position-only shadow LOD chain (`gpu_mesh::shadow_lods`, `SceneConstants::shadow_pass`), shadow tris 9.9M -> 6.3M |
+| `f8f7c3b` | Mesh shader triangle culling: back faces (single sided), zero area, small triangles (shadow pass only). Off since 2026-11-04 (`TRIANGLE_CULLING`): costs more than it saves, shadows unchanged without it |
+| `4ccc799` | clang-format applied to shaders (byte-identical SPIR-V) |
+| `1dbe71f` | `shadow.glsl` (`compute_shadow`), ground (grid) receives shadows, fade over last 10% of shadow distance |
 | vk-renderer `6ad6899`, `581e0be`, `5bd7c89` | Bindless cap 16 MiB; texture arrays + per-layer views, D16, dynamic depth bias, depth clamp; `Pipeline::DynamicState` + `set_dynamic_state` |
-| `f43164f` | Cascade plumbing (4-layer array, per-cascade fit/cull/draw loop, array sampling) |
-| `be08a86` | `util/` scripts |
-| `faad762` | D16 shadow maps (32 MB for 4 cascades) |
-| `1278968` | 4 cascades, UI: cascade count 0-4 (0 = off), cascade debug tint, shadow distance min 5 m; depth clamp on shadow pipelines |
-| `3278d40` | Camera position/pitch/yaw in the UI with a "Copy camera" button |
-| `9812590` | Normal offset (1.5 texels, slope scaled) + rasterizer slope bias replace the constant NDC bias |
-| `a29f96d` | Cascade blending over the end of each cascade's depth slice (`sample_shadow_cascade`) |
-| `5bc7ab1` | 5x5 tent PCF (9 bilinear compare taps, weights from the tent area per texel), blend band widened to 25% |
-| `cbcc6d8` | Bump terminator: direct light multiplied by Chiang, Li, Burley "Taming the Shadow Terminator" (SIGGRAPH 2019), 0 where the geometric normal faces away from the light. Fixes light leaking on normal mapped surfaces in shadow (and without shadows). Both shading paths share `hemisphere_environment()` (sky/ground ambient), the basic path no longer has a constant ambient |
-| `a1cfe26` | `SceneRenderer::FOV` in radians (0.884962, 50.70°, the angle 70 "radians" gave), image unchanged (0.03% of pixels within 2/255) |
-| `a1875b4` | Shadow caster culling against each cascade's receivers (`shadow_caster_visible` in `constants.glsl`), per draw and per meshlet: shadow map 1.71 -> 0.67 ms, pixel identical |
-| `7592996` | Shadow culling batched: one commands buffer per cascade, all culling dispatches then all draws (shadow map 0.67 -> 0.62 ms) |
-| `9fa554e` | Alpha tested (`MASK`) materials cast shadows through their own bucket pair and `shadow_alpha_test.frag` (depth only, discards below the material's cutoff) |
-| `8495f38` | SDSM: `depth_range.comp` measures the visible depth range, `shadow_cascades.comp` fits the next frame's cascades to it on the GPU (capped by the shadow distance). Crowd: main character moves to cascade 0, frame +0.22 ms (shadow draws +0.08, MSAA depth resolve +0.06, reduction +0.06, setup +0.01) |
+| `9f19a1c` | Cascade plumbing (4-layer array, per-cascade fit/cull/draw loop, array sampling) |
+| `c22e336` | `util/` scripts |
+| `e9afaec` | D16 shadow maps (32 MB for 4 cascades) |
+| `ff07931` | 4 cascades, UI: cascade count 0-4 (0 = off), cascade debug tint, shadow distance min 5 m; depth clamp on shadow pipelines |
+| `52d92fc` | Camera position/pitch/yaw in the UI with a "Copy camera" button |
+| `726dcc7` | Normal offset (1.5 texels, slope scaled) + rasterizer slope bias replace the constant NDC bias |
+| `aef8237` | Cascade blending over the end of each cascade's depth slice (`sample_shadow_cascade`) |
+| `30fbe09` | 5x5 tent PCF (9 bilinear compare taps, weights from the tent area per texel), blend band widened to 25% |
+| `c922c14` | Bump terminator: direct light multiplied by Chiang, Li, Burley "Taming the Shadow Terminator" (SIGGRAPH 2019), 0 where the geometric normal faces away from the light. Fixes light leaking on normal mapped surfaces in shadow (and without shadows). Both shading paths share `hemisphere_environment()` (sky/ground ambient), the basic path no longer has a constant ambient |
+| `ac4d0bd` | `SceneRenderer::FOV` in radians (0.884962, 50.70°, the angle 70 "radians" gave), image unchanged (0.03% of pixels within 2/255) |
+| `0dffa5e` | Shadow caster culling against each cascade's receivers (`shadow_caster_visible` in `constants.glsl`), per draw and per meshlet: shadow map 1.71 -> 0.67 ms, pixel identical |
+| `e0a7e86` | Shadow culling batched: one commands buffer per cascade, all culling dispatches then all draws (shadow map 0.67 -> 0.62 ms) |
+| `c3ad157` | Alpha tested (`MASK`) materials cast shadows through their own bucket pair and `shadow_alpha_test.frag` (depth only, discards below the material's cutoff) |
+| `7c58782` | SDSM: `depth_range.comp` measures the visible depth range, `shadow_cascades.comp` fits the next frame's cascades to it on the GPU (capped by the shadow distance). Crowd: main character moves to cascade 0, frame +0.22 ms (shadow draws +0.08, MSAA depth resolve +0.06, reduction +0.06, setup +0.01) |
 
 ## Current state
 
@@ -70,13 +70,13 @@ shadow distance. Next: raise the cap for Bistro and check its views, then tighte
   pixel identical on both paths at the benchmark view, the back view, a view facing the light (`{ 0, 6, -60 }`, pitch
   -0.30, yaw 3.1416) and a high view (`{ 0, 15, 10 }`, pitch -0.9, yaw 0). Changing the cascade selection, blend
   range, normal offset or filter in `shadow.glsl` must update the receivers / margin in `shadow_cascades.comp`.
-- **Cost** (Release, 2 x 10 traced frames, `64ca18b`): shadow map ~0.64 ms: culling 0.074 ms (all cascades, batched),
+- **Cost** (Release, 2 x 10 traced frames, `557f7a8`): shadow map ~0.64 ms: culling 0.074 ms (all cascades, batched),
   cascades 0.075 / 0.090 / 0.143 / 0.25 ms. Draws bound by depth writes and raster (ZROP 49-60%, raster 33-42%, SM
   4-11%, SMs idle 8-40% in the near cascades): a depth-only shadow mesh shader wouldn't help, fewer depth samples and
-  triangles would. History: 1.71 ms before caster culling (`a1875b4`, depth samples 18.0M -> 5.57M, Unity 12.4M,
-  rasterized primitives 3.69M -> 1.31M), 0.67 -> 0.62 ms with batched culling (`7592996`: each culling dispatch is a
+  triangles would. History: 1.71 ms before caster culling (`0dffa5e`, depth samples 18.0M -> 5.57M, Unity 12.4M,
+  rasterized primitives 3.69M -> 1.31M), 0.67 -> 0.62 ms with batched culling (`e0a7e86`: each culling dispatch is a
   single latency-bound wave, so batching overlaps them and avoids compute/graphics switches).
-- **Terminator** (`cbcc6d8`): `compute_shadow` skips the lookup when the geometric normal faces away from the light;
+- **Terminator** (`c922c14`): `compute_shadow` skips the lookup when the geometric normal faces away from the light;
   callers must give those surfaces no direct light (`bump_terminator_shadowing` in `mesh.frag`). Repro of the old leak:
   `{ -7.2700, 2.0876, 3.5322 }`, pitch -0.2620, yaw 2.5379.
 - **Visible issue: popping at cascade switches**, mostly 0 -> 1 at ~1.9 m: casters thinner than a texel (bangs strands
@@ -134,9 +134,9 @@ starting at the camera. On the crowd benchmark the near bound puts the main char
 
 ## Leads from the Unity comparison
 
-Measured against the Unity 6.3 URP reproduction at `47c6203` (setup in [benchmark.md](benchmark.md)).
+Measured against the Unity 6.3 URP reproduction at `9b733e1` (setup in [benchmark.md](benchmark.md)).
 
-- **Done (`a1875b4`)**: cull shadow casters already covered by a closer cascade. Cascades 0-2 were depth fill bound
+- **Done (`0dffa5e`)**: cull shadow casters already covered by a closer cascade. Cascades 0-2 were depth fill bound
   (ZROP 58-60%, PES 7-12%, SMs idle 24-38%). Unity wrote 12.4M shadow depth samples against our 18.0M (cascade 3: 1.37M
   against 3.90M) because its caster culling (`ReceiverSphereCuller.ComputeSplitVisibilityMask` in URP's core package)
   treats each caster as a capsule along the light clipped to the camera frustum. Ours now does the same against each

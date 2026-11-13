@@ -10,7 +10,7 @@ taught us.
 
 A Unity 6.3 URP reproduction exists in `../Renderer Compare` (local git repository): editor scripts that import the
 models and build the scene from the crowd dump, a `-benchmark` runner, and its findings in `docs/benchmark_results.md`
-and `docs/visual_comparison.md`. Headline at `47c6203`: Unity takes 18.4 - 19.1 ms against our 6.4 - 7.1 ms at its
+and `docs/visual_comparison.md`. Headline at `9b733e1`: Unity takes 18.4 - 19.1 ms against our 6.4 - 7.1 ms at its
 default Mesh LOD threshold, 9.6 - 10.8 ms at threshold 2 (near characters unchanged), mostly from triangle counts.
 
 ### Scene
@@ -35,7 +35,7 @@ default Mesh LOD threshold, 9.6 - 10.8 ms at threshold 2 (near characters unchan
   world transform is combined with the character's translation/rotation/scale (skinned meshes sit at the asset's
   root, as glTF specifies). For both assets the node transforms cancel out (Sketchfab's Z-up rotations): Miku's
   meshes are skinned, Sabrina's world transforms are identity within 1.6e-7, so an engine that imports the hierarchy
-  or takes each mesh at identity matches. Until `b3880f4` the transforms were ignored; taking them into account
+  or takes each mesh at identity matches. Until `e9a24a0` the transforms were ignored; taking them into account
   changed 673 isolated pixels of the benchmark frame.
 - **Ground**: an infinite unlit grid on y = 0 (`grid.frag`) that receives shadows. A large plane is close enough; its
   cost is negligible, but it's needed to check that shadow bias doesn't detach shadows at the feet.
@@ -50,7 +50,7 @@ default Mesh LOD threshold, 9.6 - 10.8 ms at threshold 2 (near characters unchan
 - **Pose**: position `( -7.5234, 2.5384, 4.8755 )`, pitch -0.2960, yaw 0.7039 (radians). Rotation is yaw about -Y
   then pitch about X, so forward = `( sin yaw cos pitch, sin pitch, -cos yaw cos pitch )` = `( 0.6190, -0.2917,
   -0.7292 )`: look at `( -6.9044, 2.2467, 4.1463 )`, up = +Y, no roll.
-- **Projection**: vertical FOV **50.70°** (`Camera::DEFAULT_FOV`: it used to be 70 passed to `tan()` as radians, `a1cfe26` kept the angle), 1920 x 1080 (aspect 16:9, 80.2° horizontal), near
+- **Projection**: vertical FOV **50.70°** (`Camera::DEFAULT_FOV`: it used to be 70 passed to `tan()` as radians, `ac4d0bd` kept the angle), 1920 x 1080 (aspect 16:9, 80.2° horizontal), near
   0.01 m, infinite far (reverse Z). Other views from these notes use the same convention (UI "Copy camera"). Unity has
   no infinite far plane: 1000 m loses nothing in this view.
 
@@ -89,7 +89,7 @@ default Mesh LOD threshold, 9.6 - 10.8 ms at threshold 2 (near characters unchan
   the closer visual match. Its shadow cascades reuse the camera's LODs, which is most of the remaining gap.
 - **Culling**: brutus does GPU frustum + occlusion culling per mesh and per meshlet; the other engine's culling is
   part of what's being compared. Unity's GPU Resident Drawer culls per instance; its GPU occlusion culling gains
-  nothing in this crowd (same as our mesh-level HZB), its shadow caster culling was better than ours until `a1875b4` (see
+  nothing in this crowd (same as our mesh-level HZB), its shadow caster culling was better than ours until `0dffa5e` (see
   [shadows.md](shadows.md)).
 - **Measure**: same GPU, resolution and fixed camera; GPU frame time (compare against a Release build of brutus, at
   locked clocks, see [working_process.md](working_process.md)), triangles rendered and draw calls from each engine's own stats or a capture.
