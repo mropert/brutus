@@ -51,3 +51,5 @@ Exception: the files under `docs` and `util` are mostly made and used by AI for 
 Copyright (C) 2025-2026 Mathieu Ropert
 
 Licensed under the GNU General Public License v3.0, see LICENSE.
+
+[Betsy](https://github.com/darksylinc/betsy) BC compression shaders in `shaders/betsy` fall under their [respective licenses](shaders/betsy/LICENSE.md).
