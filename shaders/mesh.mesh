@@ -72,7 +72,7 @@ void main()
 		const Vertex v = meshes[ mesh_id ].vb.vertices[ index ];
 		const vec3 pos = rotate_by_quaternion( v.position, draws_buffer.mesh_draws[ draw_id ].rotation )
 				* draws_buffer.mesh_draws[ draw_id ].scale
-			+ draws_buffer.mesh_draws[ draw_id ].translation;
+			+ draws_buffer.mesh_draws[ draw_id ].translation + payload.shadow_lod_offset;
 		const vec4 clip_pos = pass_constants.data.view_projection_matrix * vec4( pos, 1 );
 		gl_MeshVerticesEXT[ i ].gl_Position = clip_pos;
 #if TRIANGLE_CULLING

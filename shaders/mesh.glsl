@@ -122,7 +122,20 @@ struct MeshletTaskPayload
 {
 	uint meshlets[ TASK_GROUP_SIZE ];
 	uint draw_id;
+	vec3 shadow_lod_offset; // See shadow_lod_offset()
 };
+
+// Shadow passes: simplified LODs deviate from the full detail surface by up to their error, so where they rise above it
+// they shadow the receivers drawn at full detail in the main view. Moving them away from the light by their error keeps
+// them under it. Zero for LOD 0 and outside shadow passes, lod is a shadow LOD
+vec3 shadow_lod_offset( PassConstants constants, MeshLOD lod, vec3 scale )
+{
+	if ( constants.data.shadow_pass == 0 )
+	{
+		return vec3( 0.0 );
+	}
+	return constants.data.shadow_caster_sweep.xyz * ( lod.error * max( scale.x, max( scale.y, scale.z ) ) );
+}
 
 // Vertex shader path, one per draw
 struct MeshDrawCommand

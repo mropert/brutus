@@ -39,12 +39,14 @@ void main()
 {
 	const uint draw_id = commands_buffer.commands[ gl_BaseInstanceARB ].draw_id;
 	const uint mesh_id = draws_buffer.mesh_draws[ draw_id ].mesh;
+	const MeshLOD shadow_lod = meshes[ mesh_id ].shadow_lods[ commands_buffer.commands[ gl_BaseInstanceARB ].lod ];
 
 	const Vertex v = meshes[ mesh_id ].vb.vertices[ gl_VertexIndex ];
 
 	const vec3 pos = rotate_by_quaternion( v.position, draws_buffer.mesh_draws[ draw_id ].rotation )
 			* draws_buffer.mesh_draws[ draw_id ].scale
-		+ draws_buffer.mesh_draws[ draw_id ].translation;
+		+ draws_buffer.mesh_draws[ draw_id ].translation
+		+ shadow_lod_offset( pass_constants, shadow_lod, draws_buffer.mesh_draws[ draw_id ].scale );
 	gl_Position = pass_constants.data.view_projection_matrix * vec4( pos, 1 );
 	outNormal = rotate_by_quaternion( v.normal, draws_buffer.mesh_draws[ draw_id ].rotation );
 	outU = v.uv_x;
