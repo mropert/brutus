@@ -3,6 +3,7 @@
 #include "asset.h"
 
 #include "dds_parser.h"
+#include "file.h"
 #include "texture_compressor.h"
 
 #include <SDL3_image/SDL_image.h>
@@ -14,7 +15,6 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtx/quaternion.hpp>
-#include <istream>
 #include <meshoptimizer.h>
 #include <mikktspace.h>
 #include <numeric>
@@ -99,9 +99,7 @@ namespace
 	};
 
 
-	// XXX: ifstream is expected to be opened with std::ios::binary | std::ios::ate
-	// As this is a bit hacky we probably want a basic file wrapper at some point instead
-	using data_source = std::variant<std::span<const std::byte>, std::ifstream>;
+	using data_source = std::variant<std::span<const std::byte>, File>;
 
 	// Unlike data_source, data_buffer guarantees that all the data is available in memory
 	// Use read_data_source to go from one to the other
@@ -124,12 +122,12 @@ namespace
 		{
 			std::visit( overloads( [ = ]( std::span<const std::byte> bytes )
 								   { memcpy( destination.data(), bytes.data() + DDS_HEADER_SIZE, destination.size() ); },
-								   [ = ]( std::ifstream& istream )
+								   [ = ]( File& f )
 								   {
 									   PROFILER_SCOPE_N( "read_dds" );
-									   // No need to seek, we own the istream and we previously read exactly DDS_HEADER_SIZE
+									   // No need to seek, we own the file handle and we previously read exactly DDS_HEADER_SIZE
 									   // This makes this function only usable once, but so far we have no use case for multiple calls
-									   istream.read( reinterpret_cast<char*>( destination.data() ), destination.size() );
+									   f.read( destination );
 								   } ),
 						_data );
 		}
@@ -140,16 +138,15 @@ namespace
 		static renderer::Texture::Desc parse_header( data_source& data, bool sRGB )
 		{
 			return std::visit( overloads( [ sRGB ]( std::span<const std::byte> bytes ) { return parse_dds( bytes, sRGB ); },
-										  [ sRGB ]( std::istream& istream )
+										  [ sRGB ]( File& f )
 										  {
-											  const size_t size = istream.tellg();
+											  const size_t size = f.get_size();
 											  if ( size < DDS_HEADER_SIZE )
 											  {
 												  throw renderer::Error( "DDS asset is corrupted, size is smaller than DXT10 header" );
 											  }
-											  istream.seekg( 0 );
 											  alignas( DDS_HEADER_ALIGN ) std::byte buffer[ DDS_HEADER_SIZE ];
-											  istream.read( reinterpret_cast<char*>( buffer ), DDS_HEADER_SIZE );
+											  f.read( buffer );
 											  return parse_dds( buffer, size, sRGB );
 										  } ),
 							   data );
@@ -898,16 +895,11 @@ private:
 						   }
 						   else
 						   {
-							   PROFILER_SCOPE_N( "read_asset" );
+							   PROFILER_SCOPE_N( "open_asset" );
 							   auto path( uri.uri.fspath() );
 							   if ( !path.is_absolute() )
 								   path = _path.parent_path() / path;
-							   std::ifstream istream( path, std::ios::binary | std::ios::ate );
-							   if ( !istream )
-							   {
-								   throw renderer::Error( "Asset references non existing file" );
-							   };
-							   return istream;
+							   return File( path );
 						   }
 					   },
 					   []( const auto& ) -> data_source { throw renderer::Error( "Unsupported data source" ); } ),
@@ -917,13 +909,12 @@ private:
 	data_buffer read_data_source( data_source source )
 	{
 		return std::visit( overloads( []( std::span<const std::byte> bytes ) { return data_buffer { .data = bytes }; },
-									  []( std::ifstream& istream )
+									  []( File& f )
 									  {
-										  const size_t size = istream.tellg();
-										  auto buffer = std::make_unique<std::byte[]>( size );
-										  istream.seekg( 0 );
-										  istream.read( reinterpret_cast<char*>( buffer.get() ), size );
-										  return data_buffer { .data = { buffer.get(), size }, .buffer = std::move( buffer ) };
+										  auto buffer = std::make_unique<std::byte[]>( f.get_size() );
+										  const std::span bytes { buffer.get(), f.get_size() };
+										  f.read( bytes );
+										  return data_buffer { .data = bytes, .buffer = std::move( buffer ) };
 									  } ),
 						   source );
 	}
